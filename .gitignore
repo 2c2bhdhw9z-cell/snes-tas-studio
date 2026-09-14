@@ -1,6 +1,17 @@
-# ROM files (copyrighted, supplied by the user at deploy time — NEVER commit)
-assets/*.sfc
-assets/*.smc
+# ROM files.
+#
+# NOTE: .sfc / .smc are intentionally NOT ignored. The repo owner has chosen to
+# commit the ROM (e.g. assets/Super Mario All-Stars (USA).sfc) directly via the
+# GitHub web UI so it deploys with the app to Netlify, and is accepting the
+# associated risk WHILE THE REPOSITORY IS PRIVATE.
+#
+# WARNING: committing a ROM writes it into git history permanently. If this repo
+# is ever made PUBLIC, every historical commit that contains the ROM becomes
+# public too, and removing it later requires a destructive history rewrite
+# (force-push). Keep this repo private for as long as the ROM is committed.
+#
+# .zip stays ignored to avoid accidentally committing large/unrelated archives;
+# it does not affect committing a raw .sfc/.smc ROM.
 assets/*.zip
 
 # NOTE: the from-source bsnes-mercury accuracy WASM core (cores/snes9x_libretro.js
