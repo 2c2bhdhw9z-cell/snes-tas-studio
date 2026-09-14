@@ -3,14 +3,18 @@
 This directory holds the libretro SNES core compiled to WebAssembly via Emscripten.
 
 **Now bundled + committed:** a **from-source, raw-libretro `bsnes-mercury` accuracy core**
-compiled to WebAssembly ships here (`snes9x_libretro.js`, `snes9x_libretro.wasm`,
-`core.json`, `build.json`, `license.txt`) so the app deploys to Netlify with a working
-engine present. These files are intentionally **not** git-ignored.
+compiled to WebAssembly ships here (`bsnes_mercury_accuracy_libretro.js`,
+`bsnes_mercury_accuracy_libretro.wasm`, `core.json`, `build.json`, `license.txt`) so the app
+deploys to Netlify with a working engine present. These files are intentionally **not**
+git-ignored.
 
-> **Filename note:** the output files keep the historical `snes9x_libretro.*` names so the
-> loader (`core/core-loader.js`), the service worker (`sw.js`) and the probe
-> (`tools/core-probe.mjs`) all reference one consistent pair of paths. **The core inside is
-> bsnes-mercury accuracy, not snes9x.** See `core.json` / `build.json` for the exact source
+> **Filename note:** the output files are named honestly for the core they contain
+> (bsnes-mercury accuracy); the loader (`core/core-loader.js`), the service worker (`sw.js`)
+> and the probe (`tools/core-probe.mjs`) all reference this one pair of paths. The one place
+> the string `snes9x_libretro` legitimately survives is the loader's **internal Emscripten
+> factory export SYMBOL** (`EXPORT_NAME=snes9x_libretro`), which is independent of the file
+> name — that is why `snes9x_libretro` appears in `core-loader.js`'s `factoryNameGuesses`
+> and in the probe's factory resolution. See `core.json` / `build.json` for the exact source
 > commit, emsdk version and link flags.
 
 ## Why bsnes-mercury accuracy (cycle-accurate)
@@ -52,9 +56,9 @@ cd bsnes-mercury
 emmake make platform=emscripten PROFILE=accuracy -j$(nproc)
 # produces bsnes_mercury_accuracy_libretro.js + .wasm
 
-# 4. Copy both into ../cores/ under the historical snes9x_libretro.* names:
-cp bsnes_mercury_accuracy_libretro.js  ../<repo>/cores/snes9x_libretro.js
-cp bsnes_mercury_accuracy_libretro.wasm ../<repo>/cores/snes9x_libretro.wasm
+# 4. Copy both into ../cores/ (the output names are already the honest bsnes names):
+cp bsnes_mercury_accuracy_libretro.js  ../<repo>/cores/bsnes_mercury_accuracy_libretro.js
+cp bsnes_mercury_accuracy_libretro.wasm ../<repo>/cores/bsnes_mercury_accuracy_libretro.wasm
 ```
 
 Key Emscripten link flags (the raw-libretro contract):

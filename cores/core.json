@@ -14,9 +14,9 @@
   "built_from_source": true,
   "toolchain": "emscripten 6.0.9",
   "output_files": {
-    "loader": "snes9x_libretro.js",
-    "wasm": "snes9x_libretro.wasm",
-    "note": "Historical snes9x_libretro.* filenames are kept so the loader, service worker and core-probe reference one consistent pair of paths. The core inside is bsnes-mercury accuracy, NOT snes9x."
+    "loader": "bsnes_mercury_accuracy_libretro.js",
+    "wasm": "bsnes_mercury_accuracy_libretro.wasm",
+    "note": "Files are named honestly for the core they contain (bsnes-mercury accuracy). The loader's INTERNAL Emscripten factory export SYMBOL is still snes9x_libretro (EXPORT_NAME baked into the build); that JS symbol is independent of the file name, which is why snes9x_libretro appears in core-loader.js factoryNameGuesses and in the probe's factory resolution."
   },
   "emscripten_flags": [
     "-s WASM=1",

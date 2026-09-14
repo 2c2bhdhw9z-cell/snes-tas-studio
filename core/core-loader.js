@@ -2,11 +2,16 @@
 //
 // Loads and instantiates the Emscripten-compiled libretro SNES core.
 //
-// The core is a libretro C core (bsnes-mercury-accuracy preferred, snes9x fallback)
-// compiled to WebAssembly via Emscripten. Emscripten produces two files per core:
-//   - a JS loader (e.g. cores/bsnes_mercury_accuracy_libretro.js) that, when evaluated,
+// The core is a from-source, raw-libretro bsnes-mercury accuracy core compiled to
+// WebAssembly via Emscripten. Emscripten produces two files per core:
+//   - a JS loader (cores/bsnes_mercury_accuracy_libretro.js) that, when evaluated,
 //     defines a module factory and fetches its sibling .wasm.
-//   - the .wasm binary itself.
+//   - the .wasm binary itself (cores/bsnes_mercury_accuracy_libretro.wasm).
+//
+// The files are named honestly for the core they contain. Note the loader's INTERNAL
+// Emscripten factory export SYMBOL is still `snes9x_libretro` (EXPORT_NAME baked into the
+// 230KB minified build); that JS symbol is independent of the file name and is intentionally
+// retained in `factoryNameGuesses` below so factory resolution keeps working.
 //
 // Neither file is committed to this repo; both are dropped into cores/ at deploy time.
 // This loader therefore MUST degrade gracefully: on any failure it returns a structured
@@ -45,25 +50,23 @@
 
 export const DEFAULT_CORE_PATHS = [
   'cores/bsnes_mercury_accuracy_libretro.js',
-  'cores/snes9x_libretro.js',
 ];
 
 /**
  * Probe whether a core loader file actually exists at the given path.
- * Uses a HEAD-ish GET so a 404 is detected without downloading a large binary twice.
+ *
+ * Uses a ranged GET (`Range: bytes=0-0`) as the PRIMARY probe rather than HEAD: some
+ * CDNs (e.g. Netlify) return 404 for HEAD on static files, so a HEAD-first probe gives
+ * false negatives. A ranged GET fetches at most one byte and is answered with 206
+ * (or 200 for servers that ignore Range) on a file that exists, and 404 on one that
+ * does not. Graceful: any network error resolves to false.
  * @param {string} url
  * @returns {Promise<boolean>}
  */
 async function coreFileExists(url) {
   try {
-    const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
-    if (res.ok) return true;
-    // Some static servers do not implement HEAD; fall back to a ranged GET.
-    if (res.status === 405 || res.status === 501) {
-      const getRes = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
-      return getRes.ok || getRes.status === 206;
-    }
-    return false;
+    const res = await fetch(url, { method: 'GET', headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+    return res.ok || res.status === 206;
   } catch (_err) {
     return false;
   }
@@ -99,14 +102,14 @@ async function resolveModuleFactory(url) {
     'Module',
     'createModule',
     'bsnes_mercury_accuracy_libretro',
+    // IMPORTANT — do NOT remove `snes9x_libretro`. This is the INTERNAL Emscripten
+    // factory export SYMBOL (EXPORT_NAME) baked into the bundled bsnes-mercury accuracy
+    // loader; it is independent of the (now honest) file name
+    // cores/bsnes_mercury_accuracy_libretro.js. The bundled core resolves via the
+    // ES-module/UMD default export or this `snes9x_libretro` global. Removing it would
+    // break factory resolution. See cores/README.md and tools/core-probe.mjs
+    // (probe reports 17/17 retro_* + addFunction: yes).
     'snes9x_libretro',
-    // Legacy fallback name: some prebuilt EmulatorJS cores expose their factory as a UMD
-    // global `EJS_Runtime`. Harmless to keep in the guess list. The core actually bundled
-    // here is a from-source bsnes-mercury accuracy core built with MODULARIZE +
-    // EXPORT_NAME=snes9x_libretro, so it resolves via the ES-module/UMD default export or
-    // the `snes9x_libretro` global above — not this name. See cores/README.md and
-    // tools/core-probe.mjs (probe reports 17/17 retro_* + addFunction: yes).
-    'EJS_Runtime',
   ];
 
   const before = new Set(Object.keys(globalThis));

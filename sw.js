@@ -10,7 +10,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v5';
+const CACHE_VERSION = 'tas-studio-v6';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell — always precached. These are the files this feature ships.
@@ -34,8 +34,6 @@ const APP_SHELL = [
 const OPTIONAL_CORE_FILES = [
   'cores/bsnes_mercury_accuracy_libretro.js',
   'cores/bsnes_mercury_accuracy_libretro.wasm',
-  'cores/snes9x_libretro.js',
-  'cores/snes9x_libretro.wasm',
 ];
 
 // Never cache these (ROM). Requests matching this are always passed to the network.

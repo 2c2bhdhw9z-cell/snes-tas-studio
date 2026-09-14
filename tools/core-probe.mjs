@@ -1,13 +1,15 @@
 // tools/core-probe.mjs
 //
 // Node instantiation harness for the bundled SNES WASM core
-// (cores/snes9x_libretro.js + cores/snes9x_libretro.wasm).
+// (cores/bsnes_mercury_accuracy_libretro.js + cores/bsnes_mercury_accuracy_libretro.wasm).
 //
 // The bundled core is a from-source, raw-libretro **bsnes-mercury accuracy**
 // core compiled to WebAssembly with Emscripten (see cores/core.json for the
-// exact commit + flags). The output files keep the historical
-// snes9x_libretro.* names so the loader / service worker / this probe all
-// reference one consistent pair of paths; the core inside is bsnes, not snes9x.
+// exact commit + flags). The files are named honestly for the core they
+// contain. Note the loader's INTERNAL Emscripten factory export SYMBOL is still
+// `snes9x_libretro` (EXPORT_NAME baked into the build) — that JS symbol is
+// independent of the file name, which is why this probe resolves the factory via
+// the `snes9x_libretro` export below.
 //
 // PURPOSE: prove, before shipping, whether our thin custom libretro frontend
 // (tas-engine.js) can actually DRIVE this core. tas-engine.js assumes a *raw
@@ -17,7 +19,8 @@
 // the core to have been linked with -sALLOW_TABLE_GROWTH.
 //
 // This harness require()s the Emscripten MODULARIZE loader (UMD:
-// `module.exports = snes9x_libretro`), invokes the factory in Node (the loader
+// `module.exports = snes9x_libretro`, the internal export symbol), invokes the
+// factory in Node (the loader
 // has an ENVIRONMENT_IS_NODE branch), feeds the .wasm bytes via
 // Module.instantiateWasm so no network fetch is needed, waits for the module,
 // and then reports exactly which symbols our frontend needs are present vs.
@@ -37,8 +40,8 @@ import { createRequire } from 'node:module';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const ROOT = join(__dirname, '..');
-const CORE_JS = join(ROOT, 'cores', 'snes9x_libretro.js');
-const CORE_WASM = join(ROOT, 'cores', 'snes9x_libretro.wasm');
+const CORE_JS = join(ROOT, 'cores', 'bsnes_mercury_accuracy_libretro.js');
+const CORE_WASM = join(ROOT, 'cores', 'bsnes_mercury_accuracy_libretro.wasm');
 
 function line(s = '') { console.log(s); }
 function has(mod, key) { return typeof mod[key] !== 'undefined' && mod[key] !== null; }

@@ -30,15 +30,19 @@ label. snes9x was explicitly **rejected** (compatibility-focused, not cycle-accu
 
 A genuine **raw-libretro `bsnes-mercury` accuracy core**, **built from source** and compiled
 to WebAssembly with Emscripten, is now **bundled and committed** under `cores/`
-(`snes9x_libretro.js` + `snes9x_libretro.wasm`, plus `core.json`, `build.json`,
-`license.txt`). It is cycle-accurate — that is exactly why bsnes was chosen over snes9x.
+(`bsnes_mercury_accuracy_libretro.js` + `bsnes_mercury_accuracy_libretro.wasm`, plus
+`core.json`, `build.json`, `license.txt`). It is cycle-accurate, which is exactly why bsnes
+was chosen over snes9x.
 
 - **Source:** [`libretro/bsnes-mercury`](https://github.com/libretro/bsnes-mercury) @
   commit `79d7f9d`, `PROFILE=accuracy`.
 - **Toolchain:** Emscripten (emsdk) **6.0.9**.
-- **Filenames:** the output keeps the historical `snes9x_libretro.*` names so the loader,
-  service worker and probe reference one consistent pair of paths. **The core inside is
-  bsnes-mercury accuracy, not snes9x** — see `cores/core.json` / `cores/build.json`.
+- **Filenames:** the output files are named honestly for the core they contain
+  (`bsnes_mercury_accuracy_libretro.*`); the loader, service worker and probe reference this
+  one pair of paths. The loader's **internal Emscripten factory export symbol** is still
+  `snes9x_libretro` (`EXPORT_NAME`), independent of the file name, which is why that string
+  survives in `core-loader.js`'s factory-name guesses and the probe. See `cores/core.json` /
+  `cores/build.json`.
 - **License:** bsnes-mercury is **GPLv3** (`cores/license.txt`); the app as shipped is
   therefore subject to GPLv3.
 
@@ -88,7 +92,7 @@ frame-advance, state serialize/deserialize, and raw read-only memory peek direct
 | `manifest.json` | PWA manifest: standalone, landscape, dark theme, icons. |
 | `styles.css` | Studio UI + low-opacity on-screen touch controls. |
 | `icons/` | PWA icons (placeholder solids; regenerate with `tools/make-icons.js`). |
-| `cores/` | Bundled from-source **bsnes-mercury accuracy** WASM core (`snes9x_libretro.js` + `.wasm`, `core.json`, `build.json`, GPLv3 `license.txt`) — **committed** and deployed. Cycle-accurate and drivable by our raw-libretro frontend (probe: 17/17 `retro_*` + `addFunction`). Filenames are historical; the core is bsnes, not snes9x. |
+| `cores/` | Bundled from-source **bsnes-mercury accuracy** WASM core (`bsnes_mercury_accuracy_libretro.js` + `.wasm`, `core.json`, `build.json`, GPLv3 `license.txt`), **committed** and deployed. Cycle-accurate and drivable by our raw-libretro frontend (probe: 17/17 `retro_*` + `addFunction`). Files are named honestly; the loader's internal `EXPORT_NAME` symbol stays `snes9x_libretro`. |
 | `assets/` | **Runtime drop location** for the ROM. Not committed. |
 
 ### Verified libretro ABI hooks (from `libretro.h`)
@@ -137,15 +141,16 @@ git clone https://github.com/libretro/bsnes-mercury.git
 cd bsnes-mercury
 emmake make platform=emscripten PROFILE=accuracy -j$(nproc)
 
-# 3. Copy the two output files into cores/ under the historical snes9x_libretro.* names:
-cp bsnes_mercury_accuracy_libretro.js  ../<repo>/cores/snes9x_libretro.js
-cp bsnes_mercury_accuracy_libretro.wasm ../<repo>/cores/snes9x_libretro.wasm
+# 3. Copy the two output files into cores/ (output names are already the honest bsnes names):
+cp bsnes_mercury_accuracy_libretro.js  ../<repo>/cores/bsnes_mercury_accuracy_libretro.js
+cp bsnes_mercury_accuracy_libretro.wasm ../<repo>/cores/bsnes_mercury_accuracy_libretro.wasm
 ```
 
 The full flag set and Makefile edit are documented in
 [`cores/README.md`](cores/README.md) and `cores/build.json`. The loader
-(`core/core-loader.js`) tries `cores/bsnes_mercury_accuracy_libretro.js` first, then
-`cores/snes9x_libretro.js` — the committed core uses the latter filename.
+(`core/core-loader.js`) loads the single committed core at
+`cores/bsnes_mercury_accuracy_libretro.js` (with its sibling
+`cores/bsnes_mercury_accuracy_libretro.wasm`).
 
 If no core is present, the app shows a graceful "core not found" notice and stays usable.
 
