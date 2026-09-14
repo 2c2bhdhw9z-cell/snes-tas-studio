@@ -1,9 +1,7 @@
 {
-  "name": "bsnes-mercury (accuracy)",
-  "display_name": "bsnes-mercury accuracy (cycle-accurate SNES)",
+  "name": "bsnes-mercury (ASYNCIFY, dual profile)",
+  "display_name": "bsnes-mercury accuracy + performance (SNES)",
   "core": "bsnes-mercury",
-  "profile": "accuracy",
-  "cycle_accurate": true,
   "abi": "raw libretro",
   "extensions": ["smc", "sfc", "swc", "fig", "bs", "st"],
   "save": "srm",
@@ -13,19 +11,40 @@
   "source_commit": "79d7f9de218b6ffa65a80bbdc5828532bc239232",
   "built_from_source": true,
   "toolchain": "emscripten 6.0.9",
-  "output_files": {
-    "loader": "bsnes_mercury_accuracy_libretro.js",
-    "wasm": "bsnes_mercury_accuracy_libretro.wasm",
-    "note": "Files are named honestly for the core they contain (bsnes-mercury accuracy). The loader's INTERNAL Emscripten factory export SYMBOL is still snes9x_libretro (EXPORT_NAME baked into the build); that JS symbol is independent of the file name, which is why snes9x_libretro appears in core-loader.js factoryNameGuesses and in the probe's factory resolution."
+  "asyncify": {
+    "enabled": true,
+    "why": "bsnes uses libco cooperative cothreads. In a plain single-threaded, non-ASYNCIFY WASM build retro_run never returns (the libco scheduler never yields back to JS), so the first frame hangs. Building with -s ASYNCIFY=1 lets retro_run unwind the Emscripten stack and RETURN to the browser event loop.",
+    "libco_backend": "Emscripten Fibers (libco/emscripten.c, added for the __EMSCRIPTEN__ target in libco/libco.c). ASYNCIFY alone is not enough because libco context-switches raw stacks ASYNCIFY does not know about; the Fibers backend (emscripten_fiber_*) makes cothread switches cooperate with ASYNCIFY.",
+    "asyncify_stack_size": 1048576
   },
+  "profiles": {
+    "accuracy": {
+      "cycle_accurate": true,
+      "loader": "bsnes_mercury_accuracy_libretro.js",
+      "wasm": "bsnes_mercury_accuracy_libretro.wasm",
+      "export_name": "bsnes_accuracy",
+      "verified": "run-smoke: retro_load_game true, retro_run returns (no hang), video_refresh non-null (512x224 XRGB8888), frame counter advances."
+    },
+    "performance": {
+      "cycle_accurate": false,
+      "loader": "bsnes_mercury_performance_libretro.js",
+      "wasm": "bsnes_mercury_performance_libretro.wasm",
+      "export_name": "bsnes_performance",
+      "verified": "run-smoke: retro_load_game true, retro_run returns (no hang), video_refresh non-null (256x224 XRGB8888), frame counter advances."
+    }
+  },
+  "output_note": "Each profile is emitted with a DISTINCT filename AND a distinct MODULARIZE EXPORT_NAME (bsnes_accuracy / bsnes_performance) so the two cores never collide on a shared global/UMD symbol. Both are emitted as ES6 modules (-s EXPORT_ES6=1), so core-loader.js resolves either via the dynamic-import default export. The legacy snes9x_libretro name is kept in core-loader.js factoryNameGuesses only for backward compatibility with an older pre-ASYNCIFY core.",
   "emscripten_flags": [
     "-s WASM=1",
     "-s ALLOW_TABLE_GROWTH=1",
     "-s ALLOW_MEMORY_GROWTH=1",
     "-s INITIAL_MEMORY=134217728",
     "-s STACK_SIZE=8388608",
+    "-s ASYNCIFY=1",
+    "-s ASYNCIFY_STACK_SIZE=1048576",
     "-s MODULARIZE=1",
-    "-s EXPORT_NAME=snes9x_libretro",
+    "-s EXPORT_ES6=1",
+    "-s EXPORT_NAME=<bsnes_accuracy|bsnes_performance>",
     "-s INVOKE_RUN=0",
     "-s EXIT_RUNTIME=0",
     "-s ERROR_ON_UNDEFINED_SYMBOLS=0",

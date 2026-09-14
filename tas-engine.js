@@ -53,13 +53,46 @@ const RETRO_MEMORY_SYSTEM_RAM = 2;
 
 // Subset of RETRO_ENVIRONMENT_* commands (libretro.h). Only the ones this frontend
 // explicitly handles are listed; every other command is answered fail-closed (false).
+// A REAL bsnes-mercury (accuracy) core was booted headlessly (tools/run-smoke.mjs) to see
+// which commands it actually issues during retro_set_environment / retro_init /
+// retro_load_game. The observed set is:
+//   SET_PIXEL_FORMAT(10), SET_INPUT_DESCRIPTORS(11), GET_VARIABLE(15) x4,
+//   SET_VARIABLES(16), GET_LOG_INTERFACE(27), SET_SUBSYSTEM_INFO(34),
+//   SET_CONTROLLER_INFO(35), SET_MEMORY_MAPS(36).
+// We handle each of those (plus the common directory / can-dupe / options queries) so the
+// core initializes against real answers instead of a blanket `false`. Everything else stays
+// fail-closed.
 const RETRO_ENVIRONMENT = Object.freeze({
   SET_ROTATION: 1, // unsigned* — we render upright only
+  GET_OVERSCAN: 2, // bool* — do we want overscan? no (write 0)
   GET_CAN_DUPE: 3, // bool* — can the frontend re-show the last frame? yes.
   SET_MESSAGE: 6, // const retro_message* — acknowledge, no on-screen overlay needed
   SET_PERFORMANCE_LEVEL: 8, // const unsigned* — advisory only
+  GET_SYSTEM_DIRECTORY: 9, // const char** — write a stable heap dir string
   SET_PIXEL_FORMAT: 10, // const retro_pixel_format* — the core declares its framebuffer format
+  SET_INPUT_DESCRIPTORS: 11, // const retro_input_descriptor* — advisory, acknowledge
+  SET_KEYBOARD_CALLBACK: 12, // const retro_keyboard_callback* — acknowledge
+  GET_VARIABLE: 15, // retro_variable* — return no override (value=NULL) but report handled
+  SET_VARIABLES: 16, // const retro_variable* — core option list; acknowledge
+  GET_VARIABLE_UPDATE: 17, // bool* — options never change at runtime here (write 0)
+  SET_SUPPORT_NO_GAME: 18, // bool* — acknowledge
+  GET_LOG_INTERFACE: 27, // retro_log_callback* — see note in _handleEnvironment (fail-closed)
+  GET_CORE_ASSETS_DIRECTORY: 30, // const char** — write a stable heap dir string
+  GET_SAVE_DIRECTORY: 31, // const char** — write a stable heap dir string
+  SET_SYSTEM_AV_INFO: 32, // const retro_system_av_info* — acknowledge (re-read in _captureAvInfo)
+  SET_SUBSYSTEM_INFO: 34, // const retro_subsystem_info* — acknowledge
+  SET_CONTROLLER_INFO: 35, // const retro_controller_info* — acknowledge
+  SET_MEMORY_MAPS: 36, // const retro_memory_map* — acknowledge
+  SET_GEOMETRY: 37, // const retro_game_geometry* — acknowledge
+  GET_LANGUAGE: 39, // unsigned* — RETRO_LANGUAGE_ENGLISH (write 0)
+  GET_CORE_OPTIONS_VERSION: 52, // unsigned* — options API version we support (write 0)
+  SET_CORE_OPTIONS: 53, // const retro_core_option_definition* — acknowledge
+  SET_CORE_OPTIONS_INTL: 54, // const retro_core_options_intl* — acknowledge
+  SET_CORE_OPTIONS_DISPLAY: 55, // const retro_core_option_display* — acknowledge
 });
+
+// The experimental bit that some GET commands carry in libretro.h (e.g. GET_INPUT_BITMASKS).
+const RETRO_ENVIRONMENT_EXPERIMENTAL_MASK = 0xffff;
 
 // RETRO_PIXEL_FORMAT_* values (libretro.h).
 const RETRO_PIXEL_FORMAT = Object.freeze({
@@ -102,12 +135,26 @@ class TASEngine {
     this.coreStatus = 'Idle';
     this.romStatus = 'Idle';
     this.romBytes = 0; // byte length of the successfully fetched ROM (0 until loaded)
+    // High-level engine lifecycle for the on-screen banner (app.js renders an `Engine:` line).
+    //   'Init'         — before a game is loaded
+    //   'GameLoaded'   — retro_load_game succeeded
+    //   'RunLoop Active'— the rAF run loop is running
+    //   'Stopped'      — paused / stopped after having loaded
+    this.engineStatus = 'Init';
 
     // Libretro wrapped functions (populated in _wrapCore).
     this._fn = {};
 
     // ROM bytes (never persisted; held only in memory for the current session).
     this._romBytes = null;
+    // Heap pointer for the ROM DATA passed to retro_load_game. bsnes-mercury references the
+    // ROM buffer for the LIFETIME of the loaded game (it does not always fully copy when the
+    // ROM is passed by data pointer), so we RETAIN this pointer and only free it on
+    // retro_unload_game / reload — never immediately after load.
+    this._romDataPtr = 0;
+    // Heap-allocated, kept-alive C strings for directory GET queries (allocated once).
+    this._sysDirPtr = 0;
+    this._saveDirPtr = 0;
 
     // Run loop state.
     this.currentFrame = 0;
@@ -224,6 +271,8 @@ class TASEngine {
       coreStatus: this.coreStatus,
       romStatus: this.romStatus,
       romBytes: this.romBytes,
+      engineStatus: this.engineStatus,
+      frame: this.currentFrame,
     };
   }
 
@@ -236,6 +285,7 @@ class TASEngine {
       if ('coreStatus' in patch) this.coreStatus = patch.coreStatus;
       if ('romStatus' in patch) this.romStatus = patch.romStatus;
       if ('romBytes' in patch) this.romBytes = patch.romBytes;
+      if ('engineStatus' in patch) this.engineStatus = patch.engineStatus;
     }
     const snap = this.statusSnapshot();
     for (const cb of this._onStatusCbs) {
@@ -257,7 +307,7 @@ class TASEngine {
   async init(opts = {}) {
     this.status = 'loading';
     this.clearNotices();
-    this._setStatus({ coreStatus: 'Loading', romStatus: 'Idle', romBytes: 0 });
+    this._setStatus({ coreStatus: 'Loading', romStatus: 'Idle', romBytes: 0, engineStatus: 'Init' });
 
     // 1) Load the WASM libretro core (graceful failure).
     let coreResult;
@@ -309,21 +359,23 @@ class TASEngine {
       if (!loaded) {
         this.showNotice('The core refused to load the ROM (retro_load_game returned false).', 'error');
         this.status = 'error';
-        this._setStatus({});
+        // Surface the failure on the diagnostic banner right away.
+        this._setStatus({ engineStatus: 'Stopped' });
         return { ok: false, coreOk: true, romOk: true };
       }
       this._captureMemoryRegion();
       this._captureAvInfo();
       this.status = 'ready';
       this.clearNotices();
-      this._setStatus({});
+      // retro_load_game succeeded — the game is loaded and ready to run.
+      this._setStatus({ engineStatus: 'GameLoaded' });
       // Auto-boot: start the run loop immediately, no user action required.
       this.play();
       return { ok: true, coreOk: true, romOk: true };
     } catch (err) {
       this.showNotice(`Failed to start emulation: ${err && err.message ? err.message : err}`, 'error');
       this.status = 'error';
-      this._setStatus({});
+      this._setStatus({ engineStatus: 'Stopped' });
       return { ok: false, coreOk, romOk, error: String(err) };
     }
   }
@@ -374,6 +426,97 @@ class TASEngine {
 
     this._setStatus({ romStatus: `Loaded ${buf.byteLength} bytes`, romBytes: buf.byteLength });
     return { ok: true, bytes: new Uint8Array(buf) };
+  }
+
+  // ------------------------------------------------------------------ core switching
+
+  /**
+   * Switch to a different emulator core at runtime (e.g. accuracy <-> performance from the
+   * UI dropdown). Tears the current core/run loop down cleanly, re-initializes the engine
+   * against the selected core path, re-fetches + re-loads the ROM, and resumes playback if
+   * it was running. Never throws; on failure it renders a notice and leaves the UI usable
+   * (matching init()'s graceful-degradation contract). This is CORE selection only — it is
+   * NOT a ROM/level picker and grants no cheat/memory-write capability.
+   *
+   * @param {string} corePath the cores/*.js loader path to switch to
+   * @returns {Promise<{ok:boolean, coreOk?:boolean, romOk?:boolean}>}
+   */
+  async setCore(corePath) {
+    if (typeof corePath !== 'string' || !corePath) {
+      return { ok: false };
+    }
+    // No-op if it's already the active core (avoid a needless reload flash).
+    if (this.corePath === corePath && (this.status === 'ready' || this.status === 'running')) {
+      return { ok: true, coreOk: true, romOk: true };
+    }
+    const wasRunning = this.status === 'running' && !this.paused;
+
+    // Fully tear the current core down: stop the loop, unload the game, free the ROM
+    // buffer, and drop the Module reference so the old instance can be GC'd (no leaked
+    // Module, no double-run rAF loop).
+    this._teardownCore();
+
+    // Re-initialize against the selected core. init() re-fetches the ROM, re-wires
+    // callbacks, reloads the game, and (on success) auto-plays.
+    const result = await this.init({ corePaths: [corePath] });
+
+    // init() auto-plays on success. If the user had explicitly paused before switching,
+    // honor that by pausing again; if they were running, init() already resumed.
+    if (result && result.ok && !wasRunning) {
+      this.pause();
+    }
+    return result;
+  }
+
+  /**
+   * Stop the run loop and release the current core so a fresh init() can take over. Frees
+   * the retained ROM buffer and directory strings and clears wrapped-ABI references. Safe
+   * to call when nothing is loaded.
+   */
+  _teardownCore() {
+    // Halt the single tracked rAF loop first so no tick fires against a torn-down core.
+    this._stopLoop();
+    this.paused = true;
+
+    const M = this.Module;
+    if (M) {
+      try {
+        if (this._fn && typeof this._fn.retro_unload_game === 'function') {
+          this._fn.retro_unload_game();
+        }
+        if (this._fn && typeof this._fn.retro_deinit === 'function') {
+          this._fn.retro_deinit();
+        }
+      } catch (err) {
+        console.warn('[TASEngine] core teardown warning:', err);
+      }
+      // Free heap buffers we allocated and retained.
+      try {
+        if (this._romDataPtr) M._free(this._romDataPtr);
+        if (this._sysDirPtr) M._free(this._sysDirPtr);
+        if (this._saveDirPtr) M._free(this._saveDirPtr);
+      } catch (_err) {
+        /* best-effort */
+      }
+    }
+    this._romDataPtr = 0;
+    this._sysDirPtr = 0;
+    this._saveDirPtr = 0;
+
+    // Drop references so the old Emscripten Module can be garbage-collected.
+    this.Module = null;
+    this.corePath = null;
+    this._fn = {};
+    this._romBytes = null;
+    this._wramPtr = 0;
+    this._wramSize = 0;
+    this.currentFrame = 0;
+    this._imageData = null;
+    this._fbWidth = 0;
+    this._fbHeight = 0;
+    this._pixelFormat = RETRO_PIXEL_FORMAT.RGB565;
+    this.status = 'idle';
+    this.engineStatus = 'Init';
   }
 
   // ------------------------------------------------------------------ core wrapping
@@ -451,10 +594,14 @@ class TASEngine {
    */
   _handleEnvironment(cmd, data) {
     const M = this.Module;
-    switch (cmd) {
+    // Strip the experimental/private high bits so a command like GET_INPUT_BITMASKS
+    // (which carries the experimental bit in libretro.h) still classifies by its base id.
+    const base = cmd & RETRO_ENVIRONMENT_EXPERIMENTAL_MASK;
+    switch (base) {
       case RETRO_ENVIRONMENT.SET_PIXEL_FORMAT: {
         // const retro_pixel_format* data — record the format the core declares so the
         // video blit reads the correct bytes. Reject unknown formats (fail-closed).
+        // (bsnes-mercury accuracy declares XRGB8888 — verified via tools/run-smoke.mjs.)
         if (!M || !data) return false;
         const fmt = M.HEAP32[data >> 2];
         if (
@@ -473,24 +620,123 @@ class TASEngine {
         M.HEAPU8[data] = 1;
         return true;
       }
+      case RETRO_ENVIRONMENT.GET_OVERSCAN: {
+        // bool* data — we do not want the core's overscan region cropped for us.
+        if (!M || !data) return false;
+        M.HEAPU8[data] = 0;
+        return true;
+      }
+      case RETRO_ENVIRONMENT.GET_SYSTEM_DIRECTORY:
+      case RETRO_ENVIRONMENT.GET_CORE_ASSETS_DIRECTORY: {
+        // const char** data — write a pointer to a STABLE, kept-alive heap string. A bogus
+        // true with an unwritten buffer is worse than false, so we only return true after
+        // successfully writing the pointer.
+        if (!M || !data) return false;
+        const ptr = this._ensureDirString('_sysDirPtr');
+        if (!ptr) return false;
+        M.HEAP32[data >> 2] = ptr;
+        return true;
+      }
+      case RETRO_ENVIRONMENT.GET_SAVE_DIRECTORY: {
+        if (!M || !data) return false;
+        const ptr = this._ensureDirString('_saveDirPtr');
+        if (!ptr) return false;
+        M.HEAP32[data >> 2] = ptr;
+        return true;
+      }
+      case RETRO_ENVIRONMENT.GET_VARIABLE: {
+        // retro_variable { const char *key; const char *value; } — we provide no overrides,
+        // so set value=NULL and return true; the core then uses its own defaults. Writing
+        // NULL is the correct "no override" signal (never leave the buffer unwritten).
+        if (!M || !data) return false;
+        M.HEAP32[(data + 4) >> 2] = 0; // value = NULL
+        return true;
+      }
+      case RETRO_ENVIRONMENT.GET_VARIABLE_UPDATE: {
+        // bool* — options never change at runtime in this frontend.
+        if (!M || !data) return false;
+        M.HEAPU8[data] = 0;
+        return true;
+      }
+      case RETRO_ENVIRONMENT.GET_LANGUAGE: {
+        // unsigned* — RETRO_LANGUAGE_ENGLISH == 0.
+        if (!M || !data) return false;
+        M.HEAP32[data >> 2] = 0;
+        return true;
+      }
+      case RETRO_ENVIRONMENT.GET_CORE_OPTIONS_VERSION: {
+        // unsigned* — we implement the classic SET_VARIABLES options API (version 0).
+        if (!M || !data) return false;
+        M.HEAP32[data >> 2] = 0;
+        return true;
+      }
+      case RETRO_ENVIRONMENT.GET_LOG_INTERFACE:
+        // retro_log_callback { retro_log_printf_t log; }. The libretro log printf is a
+        // VARIADIC C callback (void(*)(enum level, const char *fmt, ...)). Emscripten's
+        // addFunction cannot represent a variadic callback, and a real bsnes-mercury core
+        // invoking such a mismatched table entry TRAPS with "null function or function
+        // signature mismatch" (observed in tools/run-smoke.mjs). So we deliberately do NOT
+        // provide a log interface and return false; the core falls back to its own logging.
+        return false;
       case RETRO_ENVIRONMENT.SET_ROTATION:
       case RETRO_ENVIRONMENT.SET_MESSAGE:
       case RETRO_ENVIRONMENT.SET_PERFORMANCE_LEVEL:
-        // Advisory SET commands with no state we need to keep; acknowledge without
-        // reading/writing data. (We render upright and show no core overlay.)
+      case RETRO_ENVIRONMENT.SET_INPUT_DESCRIPTORS:
+      case RETRO_ENVIRONMENT.SET_KEYBOARD_CALLBACK:
+      case RETRO_ENVIRONMENT.SET_VARIABLES:
+      case RETRO_ENVIRONMENT.SET_SUPPORT_NO_GAME:
+      case RETRO_ENVIRONMENT.SET_SYSTEM_AV_INFO:
+      case RETRO_ENVIRONMENT.SET_SUBSYSTEM_INFO:
+      case RETRO_ENVIRONMENT.SET_CONTROLLER_INFO:
+      case RETRO_ENVIRONMENT.SET_MEMORY_MAPS:
+      case RETRO_ENVIRONMENT.SET_GEOMETRY:
+      case RETRO_ENVIRONMENT.SET_CORE_OPTIONS:
+      case RETRO_ENVIRONMENT.SET_CORE_OPTIONS_INTL:
+      case RETRO_ENVIRONMENT.SET_CORE_OPTIONS_DISPLAY:
+        // Advisory SET commands: the core is informing the frontend. We keep no state that
+        // requires reading `data` here (geometry/av_info are re-queried in _captureAvInfo),
+        // so we simply acknowledge. None of these grant memory-write / cheat / level-select.
         return true;
       default:
-        // Everything else (GET_VARIABLE, GET_SYSTEM_DIRECTORY, GET_LOG_INTERFACE, ...) is
-        // unhandled — say so honestly so the core does not read stale/zero data.
+        // Everything else is unhandled — say so honestly (fail-closed) so the core does not
+        // read a `data` buffer we never populated.
         return false;
     }
   }
 
+  /**
+   * Lazily allocate a stable, NUL-terminated heap C string for a directory GET query and
+   * cache the pointer on the instance (kept alive for the core's lifetime). We use '.' (the
+   * core's working directory) which is a valid, writable path for save/system files. Returns
+   * the pointer, or 0 if allocation is not possible.
+   * @param {'_sysDirPtr'|'_saveDirPtr'} field
+   */
+  _ensureDirString(field) {
+    const M = this.Module;
+    if (!M || typeof M._malloc !== 'function') return 0;
+    if (this[field]) return this[field];
+    // '.' + NUL. Written as raw ASCII bytes (avoids relying on lengthBytesUTF8, which some
+    // builds do not export).
+    const bytes = [0x2e, 0x00]; // '.', '\0'
+    const ptr = M._malloc(bytes.length);
+    if (!ptr) return 0;
+    for (let i = 0; i < bytes.length; i++) M.HEAPU8[ptr + i] = bytes[i];
+    this[field] = ptr;
+    return ptr;
+  }
+
   _loadGame(romBytes) {
     const M = this.Module;
-    // Copy ROM bytes into the WASM heap.
+    // Copy ROM bytes into the WASM heap. We RETAIN this pointer for the lifetime of the
+    // loaded game (see below) and store it on the instance.
     const dataPtr = M._malloc(romBytes.length);
     M.HEAPU8.set(romBytes, dataPtr);
+    // Free any previously retained ROM buffer (reload path) before replacing it.
+    if (this._romDataPtr) {
+      M._free(this._romDataPtr);
+      this._romDataPtr = 0;
+    }
+    this._romDataPtr = dataPtr;
 
     // Build a retro_game_info struct:
     //   const char *path; const void *data; size_t size; const char *meta;
@@ -505,9 +751,16 @@ class TASEngine {
 
     const ok = this._fn.retro_load_game(infoPtr);
 
-    // The core copies what it needs during load; free our temporaries.
+    // Free ONLY the small info struct. We must NOT free dataPtr here: bsnes-mercury keeps a
+    // reference to the ROM DATA buffer for the lifetime of the loaded game when the ROM is
+    // passed by data pointer (need_fullpath == false). Freeing it now leaves the core reading
+    // freed heap -> black screen. dataPtr is released on unload/reload only.
     M._free(infoPtr);
-    M._free(dataPtr);
+    if (!ok) {
+      // Load failed: nothing references the buffer, so release it now.
+      M._free(this._romDataPtr);
+      this._romDataPtr = 0;
+    }
     return !!ok;
   }
 
@@ -680,6 +933,7 @@ class TASEngine {
     if (this.status !== 'ready' && this.status !== 'running') return;
     this.paused = false;
     this.status = 'running';
+    this._setStatus({ engineStatus: 'RunLoop Active' });
     this._startLoop();
   }
 
@@ -689,6 +943,10 @@ class TASEngine {
     // Actually halt the rAF loop. There is exactly one tracked rAF id, so this fully
     // stops emulation (no orphaned chain keeps ticking).
     this._stopLoop();
+    // Only report 'Stopped' once a game is actually loaded (avoid clobbering 'Init').
+    if (this.engineStatus === 'RunLoop Active' || this.engineStatus === 'GameLoaded') {
+      this._setStatus({ engineStatus: 'Stopped' });
+    }
   }
 
   togglePause() {

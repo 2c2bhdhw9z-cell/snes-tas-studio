@@ -52,6 +52,35 @@ export const DEFAULT_CORE_PATHS = [
   'cores/bsnes_mercury_accuracy_libretro.js',
 ];
 
+// The catalog of selectable emulator cores. Both are bsnes-mercury profiles compiled to
+// WASM with -s ASYNCIFY (so retro_run yields to the browser and returns) + the Emscripten
+// Fibers libco backend (so bsnes's cooperative cothreads cooperate with ASYNCIFY).
+//
+// This is CORE selection only — an emulator-accuracy choice. It is NOT a ROM/level picker
+// and grants no cheat/memory-write capability. Each entry records the MODULARIZE
+// EXPORT_NAME baked into that build so factory resolution can find the right global if the
+// ES-module default-export path is unavailable (the two cores use DISTINCT export names so
+// they never collide when both are referenced).
+export const CORE_CATALOG = Object.freeze([
+  Object.freeze({
+    id: 'accuracy',
+    label: 'Accuracy (bsnes-mercury)',
+    path: 'cores/bsnes_mercury_accuracy_libretro.js',
+    exportName: 'bsnes_accuracy',
+  }),
+  Object.freeze({
+    id: 'performance',
+    label: 'Performance (bsnes-mercury)',
+    path: 'cores/bsnes_mercury_performance_libretro.js',
+    exportName: 'bsnes_performance',
+  }),
+]);
+
+/** Look up a catalog entry by its id (e.g. 'accuracy' | 'performance'). */
+export function coreById(id) {
+  return CORE_CATALOG.find((c) => c.id === id) || null;
+}
+
 /**
  * Probe whether a core loader file actually exists at the given path.
  *
@@ -102,13 +131,17 @@ async function resolveModuleFactory(url) {
     'Module',
     'createModule',
     'bsnes_mercury_accuracy_libretro',
-    // IMPORTANT — do NOT remove `snes9x_libretro`. This is the INTERNAL Emscripten
-    // factory export SYMBOL (EXPORT_NAME) baked into the bundled bsnes-mercury accuracy
-    // loader; it is independent of the (now honest) file name
-    // cores/bsnes_mercury_accuracy_libretro.js. The bundled core resolves via the
-    // ES-module/UMD default export or this `snes9x_libretro` global. Removing it would
-    // break factory resolution. See cores/README.md and tools/core-probe.mjs
-    // (probe reports 17/17 retro_* + addFunction: yes).
+    'bsnes_mercury_performance_libretro',
+    // The ASYNCIFY rebuilds use DISTINCT MODULARIZE EXPORT_NAMEs per profile so the two
+    // cores never collide on a shared UMD/global symbol: the accuracy core exports
+    // `bsnes_accuracy`, the performance core `bsnes_performance`. Both are also emitted with
+    // -s EXPORT_ES6=1, so resolveModuleFactory's dynamic-import default-export path (tried
+    // first, above) resolves either one cleanly without touching globals. These names are
+    // the classic-<script> fallback for environments without ES-module import.
+    'bsnes_accuracy',
+    'bsnes_performance',
+    // Legacy: the ORIGINAL committed core used EXPORT_NAME `snes9x_libretro`. Retained so an
+    // older pre-ASYNCIFY core dropped into cores/ still resolves.
     'snes9x_libretro',
   ];
 

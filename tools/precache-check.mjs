@@ -36,8 +36,30 @@ const appShellBlock = sw.split('APP_SHELL')[1].split(']')[0];
 const noRomInShell = !/\.(sfc|smc)/i.test(appShellBlock);
 const hasRomGuard = /isRomRequest/.test(sw) && /assets\//.test(sw);
 
+// Both selectable ASYNCIFY cores (accuracy + performance, .js + .wasm) must be listed in
+// OPTIONAL_CORE_FILES so either can be chosen from the dropdown and still work offline. The
+// ROM must NEVER appear there.
+const optionalBlock = (sw.split('OPTIONAL_CORE_FILES')[1] || '').split(']')[0];
+const bothCores = [
+  'cores/bsnes_mercury_accuracy_libretro.js',
+  'cores/bsnes_mercury_accuracy_libretro.wasm',
+  'cores/bsnes_mercury_performance_libretro.js',
+  'cores/bsnes_mercury_performance_libretro.wasm',
+];
+let coresOk = true;
+for (const c of bothCores) {
+  if (!optionalBlock.includes(`'${c}'`)) {
+    console.log('MISSING from OPTIONAL_CORE_FILES:', c);
+    coresOk = false;
+  }
+}
+const noRomInOptional = !/\.(sfc|smc)/i.test(optionalBlock);
+
 console.log('cache version:', version);
 console.log('ROM guard present (isRomRequest + assets/):', hasRomGuard);
 console.log('APP_SHELL contains no ROM (.sfc/.smc):', noRomInShell);
-console.log(ok && noRomInShell && hasRomGuard ? 'PRECACHE OK' : 'PRECACHE FAIL');
-process.exit(ok && noRomInShell && hasRomGuard ? 0 : 1);
+console.log('OPTIONAL_CORE_FILES has both cores (accuracy + performance, .js + .wasm):', coresOk);
+console.log('OPTIONAL_CORE_FILES contains no ROM:', noRomInOptional);
+const pass = ok && noRomInShell && hasRomGuard && coresOk && noRomInOptional;
+console.log(pass ? 'PRECACHE OK' : 'PRECACHE FAIL');
+process.exit(pass ? 0 : 1);

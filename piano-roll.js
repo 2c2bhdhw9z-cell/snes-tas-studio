@@ -301,18 +301,45 @@ export class TASStudio {
       }
     };
 
-    if (playPause) {
-      playPause.addEventListener('click', () => {
-        if (typeof this.engine.togglePause === 'function') this.engine.togglePause();
+    // Primary controls (Play/Pause + Frame +1) must respond to BOTH 'pointerdown' AND
+    // 'click'. In an installed iOS PWA (standalone display mode) the synthetic 'click' after
+    // a tap can be delayed or suppressed, so a click-only binding leaves buttons feeling
+    // dead. We act on 'pointerdown' for immediate response and then suppress the synthetic
+    // 'click' that follows the same tap (via a short-lived guard flag) so the action never
+    // double-fires. Mouse/keyboard clicks (no preceding pointerdown guard) still work.
+    const bindPrimary = (el, action) => {
+      if (!el) return;
+      let handledByPointer = false;
+      const run = () => {
+        action();
         reflect();
+      };
+      el.addEventListener('pointerdown', (ev) => {
+        // Only treat primary button / touch / pen as an activation.
+        if (ev && typeof ev.button === 'number' && ev.button !== 0) return;
+        handledByPointer = true;
+        run();
+        // Clear the guard shortly after the synthetic click would have fired.
+        setTimeout(() => {
+          handledByPointer = false;
+        }, 500);
       });
-    }
-    if (frameAdvance) {
-      frameAdvance.addEventListener('click', () => {
-        if (typeof this.engine.frameAdvance === 'function') this.engine.frameAdvance();
-        reflect();
+      el.addEventListener('click', () => {
+        if (handledByPointer) {
+          // This click is the synthetic follow-up to a pointerdown we already handled.
+          handledByPointer = false;
+          return;
+        }
+        run();
       });
-    }
+    };
+
+    bindPrimary(playPause, () => {
+      if (typeof this.engine.togglePause === 'function') this.engine.togglePause();
+    });
+    bindPrimary(frameAdvance, () => {
+      if (typeof this.engine.frameAdvance === 'function') this.engine.frameAdvance();
+    });
     if (fastForward) {
       const ffOn = () => {
         if (typeof this.engine.fastForward === 'function') this.engine.fastForward(true);
@@ -344,14 +371,12 @@ export class TASStudio {
       speed.addEventListener('input', applySpeed);
       applySpeed();
     }
-    if (save) save.addEventListener('click', () => this.saveStateNode());
-    if (load) {
-      load.addEventListener('click', () => {
-        // Load the most recent state node if one exists.
-        const id = this._activeNodeId || this._stateOrder[this._stateOrder.length - 1];
-        if (id != null) this.loadStateNode(id);
-      });
-    }
+    bindPrimary(save, () => this.saveStateNode());
+    bindPrimary(load, () => {
+      // Load the most recent state node if one exists.
+      const id = this._activeNodeId || this._stateOrder[this._stateOrder.length - 1];
+      if (id != null) this.loadStateNode(id);
+    });
 
     reflect();
   }

@@ -340,6 +340,27 @@ body {
 }
 #frame-controls input[type="range"] { width: 160px; }
 
+/* Core selection dropdown (emulator accuracy choice, not a ROM/level picker). */
+#frame-controls .core-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+#frame-controls select#core-select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+#frame-controls select#core-select:hover { border-color: var(--accent); }
+#frame-controls select#core-select:disabled { opacity: 0.4; cursor: not-allowed; }
+
 /* Piano roll */
 #piano-roll {
   grid-area: pianoroll;
@@ -524,5 +545,57 @@ body {
 @media (orientation: landscape) and (max-height: 420px) {
   #app {
     grid-template-columns: 1fr minmax(240px, 300px);
+  }
+}
+
+/* ------------------------------------------------------------------ installed PWA (iOS standalone)
+
+   When the app is launched from the Home Screen (display-mode: standalone), iOS is stricter:
+   the root's `touch-action: none` / `-webkit-user-select: none` plus a full-viewport overlay
+   can leave interactive controls feeling completely dead (taps don't register). This block
+   guarantees that every interactive control is reachable and tappable in standalone mode:
+
+   1) The #touch-controls overlay stays pointer-events:none so it never blankets and steals
+      taps meant for the toolbar; only its individual clusters keep pointer-events:auto.
+   2) The primary controls (#frame-controls buttons + slider, save-state nodes, and the
+      on-screen gamepad buttons) get pointer-events:auto and a tap-permitting touch-action so
+      the OS delivers the tap to them. piano-roll.js also binds 'pointerdown' (not just
+      'click') on Play / Frame +1 / Save / Load, so standalone taps register immediately even
+      when iOS delays/suppresses the synthetic click.
+   3) Nothing full-viewport is allowed to sit above #frame-controls: the toolbar is given a
+      stacking context above the stage overlay so it is always the top hit-test target. */
+@media (display-mode: standalone) {
+  /* The overlay must never intercept pointers as a whole (only its buttons do). */
+  #touch-controls {
+    pointer-events: none;
+  }
+  #touch-controls .touch-cluster,
+  #touch-controls .touch-btn {
+    pointer-events: auto;
+    touch-action: manipulation;
+  }
+
+  /* Toolbar controls: always tappable, always on top of the stage overlay. */
+  #frame-controls {
+    pointer-events: auto;
+    touch-action: manipulation;
+    position: relative;
+    z-index: 5;
+  }
+  #frame-controls button,
+  #savestate-tree .savestate-node {
+    pointer-events: auto;
+    touch-action: manipulation;
+  }
+  #frame-controls input[type="range"],
+  #speed {
+    pointer-events: auto;
+    touch-action: pan-x;
+  }
+
+  /* Keep the scrollable timeline pannable by touch in standalone too. */
+  #piano-roll {
+    pointer-events: auto;
+    touch-action: pan-x pan-y;
   }
 }

@@ -21,6 +21,27 @@
 // capability, and it never introduces a file picker.
 
 import engine from './tas-engine.js';
+import { CORE_CATALOG, coreById } from './core/core-loader.js';
+
+// localStorage key for the persisted core choice (nice-to-have; defaults to accuracy).
+const CORE_PREF_KEY = 'tas-studio.core';
+
+function readCorePref() {
+  try {
+    const v = window.localStorage ? window.localStorage.getItem(CORE_PREF_KEY) : null;
+    return v && coreById(v) ? v : 'accuracy';
+  } catch (_err) {
+    return 'accuracy';
+  }
+}
+
+function writeCorePref(id) {
+  try {
+    if (window.localStorage) window.localStorage.setItem(CORE_PREF_KEY, id);
+  } catch (_err) {
+    /* private mode / disabled storage — ignore, choice just won't persist */
+  }
+}
 
 // --------------------------------------------------------------------- debug banner
 
@@ -31,6 +52,8 @@ import engine from './tas-engine.js';
 const bannerState = {
   core: 'Idle', // WASM core: Idle | Loading | Instantiated | Failed
   rom: 'Idle', // ROM fetch: Idle | Fetching | HTTP <code> | Loaded <N> bytes | Error <msg>
+  engine: 'Init', // Engine lifecycle: Init | GameLoaded | RunLoop Active | Stopped
+  frame: 0, // live frame number (advances one per retro_run)
   errors: [], // captured uncaught errors (most-recent last, capped)
 };
 const MAX_BANNER_ERRORS = 5;
@@ -60,6 +83,8 @@ function renderBanner() {
 
   el.appendChild(mk('Core', bannerState.core));
   el.appendChild(mk('ROM', bannerState.rom));
+  // Engine lifecycle + live frame counter, exactly as:  Engine: [state] | Frame: [N]
+  el.appendChild(mk('Engine', `${bannerState.engine} | Frame: ${bannerState.frame}`));
   el.appendChild(
     mk('Err', errLine, bannerState.errors.length > 0 ? 'debug-banner__item--err' : '')
   );
@@ -94,6 +119,8 @@ window.addEventListener('unhandledrejection', (event) => {
 engine.onStatus((snap) => {
   bannerState.core = snap.coreStatus;
   bannerState.rom = snap.romStatus;
+  if (typeof snap.engineStatus === 'string') bannerState.engine = snap.engineStatus;
+  if (typeof snap.frame === 'number') bannerState.frame = snap.frame;
   renderBanner();
 });
 
@@ -127,10 +154,48 @@ window.addEventListener('DOMContentLoaded', () => {
   const frameCounter = document.getElementById('frame-counter');
   engine.onFrame((frame) => {
     if (frameCounter) frameCounter.textContent = `Frame: ${frame}`;
+    // Mirror the live frame number into the diagnostic banner's Engine line.
+    bannerState.frame = frame;
+    renderBanner();
   });
 
-  // Auto-boot. No user action required; degrades gracefully.
-  engine.init().catch((err) => {
+  // Core selection dropdown. Populated from the core catalog; defaults to Accuracy (or the
+  // persisted choice). Changing it dynamically swaps the WASM core via engine.setCore(),
+  // which tears down the old core/run loop and re-inits with the new one (no leaked Module,
+  // no double rAF loop). This is emulator-core selection ONLY — never a ROM/level picker.
+  const coreSelect = document.getElementById('core-select');
+  const initialCoreId = readCorePref();
+  if (coreSelect) {
+    // Rebuild options from the catalog so labels/paths stay in one place.
+    coreSelect.innerHTML = '';
+    for (const c of CORE_CATALOG) {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.label;
+      coreSelect.appendChild(opt);
+    }
+    coreSelect.value = initialCoreId;
+
+    coreSelect.addEventListener('change', () => {
+      const entry = coreById(coreSelect.value) || coreById('accuracy');
+      if (!entry) return;
+      writeCorePref(entry.id);
+      coreSelect.disabled = true;
+      Promise.resolve(engine.setCore(entry.path))
+        .catch((err) => {
+          console.warn('[app] core switch error (handled):', err);
+          recordError(`core switch: ${err && err.message ? err.message : err}`);
+        })
+        .finally(() => {
+          coreSelect.disabled = false;
+        });
+    });
+  }
+
+  // Auto-boot with the selected/persisted core. No user action required; degrades
+  // gracefully (missing core/ROM -> banner notice, no crash, no file picker).
+  const bootEntry = coreById(initialCoreId) || coreById('accuracy');
+  engine.init({ corePaths: bootEntry ? [bootEntry.path] : undefined }).catch((err) => {
     console.warn('[app] engine init error (handled):', err);
     recordError(`engine init: ${err && err.message ? err.message : err}`);
   });

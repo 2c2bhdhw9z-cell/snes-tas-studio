@@ -88,12 +88,18 @@ check('public API surface present', () => {
 
 // --- Diagnostic status surface for the on-screen debug banner (app.js) ---
 check('onStatus() is a function', () => assert.strictEqual(typeof engine.onStatus, 'function'));
-check('statusSnapshot() returns the diagnostic fields', () => {
+check('statusSnapshot() returns the diagnostic fields (incl. engineStatus + frame)', () => {
   const snap = engine.statusSnapshot();
-  for (const k of ['status', 'coreStatus', 'romStatus', 'romBytes']) {
+  for (const k of ['status', 'coreStatus', 'romStatus', 'romBytes', 'engineStatus', 'frame']) {
     assert.ok(k in snap, `missing snapshot field: ${k}`);
   }
 });
+check('engineStatus is Init before any game is loaded', () =>
+  assert.strictEqual(engine.engineStatus, 'Init'));
+check('engineStatus stays Init in the disabled (no-core) state', () =>
+  assert.strictEqual(engine.statusSnapshot().engineStatus, 'Init'));
+check('snapshot frame is 0 at boot', () =>
+  assert.strictEqual(engine.statusSnapshot().frame, 0));
 check('core status is Failed when core is absent', () =>
   assert.strictEqual(engine.coreStatus, 'Failed'));
 check('ROM status surfaces the HTTP code on 404', () =>

@@ -22,27 +22,39 @@ tradeoff:
 - **True cycle accuracy needs a bsnes / higan-derived core.** The accuracy profile of
   bsnes (and its libretro descendants) emulates the SNES at the cycle level.
 
-**What this project ships:** a **bsnes-mercury accuracy** libretro core compiled to
-WebAssembly. This is the bsnes/higan-derived accuracy core that earns the "cycle-accurate"
-label. snes9x was explicitly **rejected** (compatibility-focused, not cycle-accurate).
+**What this project ships:** **two** `bsnes-mercury` libretro cores compiled to WebAssembly —
+an **accuracy** profile (the bsnes/higan-derived, cycle-accurate core that earns the
+"cycle-accurate" label) and a faster **performance** profile — selectable from a **Core**
+dropdown in the toolbar (defaults to Accuracy). snes9x was explicitly **rejected**
+(compatibility-focused, not cycle-accurate).
 
-## Bundled core: from-source bsnes-mercury accuracy (cycle-accurate)
+## Bundled cores: from-source bsnes-mercury (ASYNCIFY, accuracy + performance)
 
-A genuine **raw-libretro `bsnes-mercury` accuracy core**, **built from source** and compiled
-to WebAssembly with Emscripten, is now **bundled and committed** under `cores/`
-(`bsnes_mercury_accuracy_libretro.js` + `bsnes_mercury_accuracy_libretro.wasm`, plus
-`core.json`, `build.json`, `license.txt`). It is cycle-accurate, which is exactly why bsnes
-was chosen over snes9x.
+Two genuine **raw-libretro `bsnes-mercury` cores**, **built from source** and compiled to
+WebAssembly with Emscripten, are now **bundled and committed** under `cores/`:
+
+| Profile | Files | Export name | Cycle-accurate |
+| --- | --- | --- | --- |
+| Accuracy | `bsnes_mercury_accuracy_libretro.js` + `.wasm` | `bsnes_accuracy` | yes |
+| Performance | `bsnes_mercury_performance_libretro.js` + `.wasm` | `bsnes_performance` | no |
+
+(plus `core.json`, `build.json`, `license.txt`). The **Core** dropdown swaps between them at
+runtime; this is an emulator-accuracy choice only — **not** a ROM/level picker.
 
 - **Source:** [`libretro/bsnes-mercury`](https://github.com/libretro/bsnes-mercury) @
-  commit `79d7f9d`, `PROFILE=accuracy`.
+  commit `79d7f9d`, `PROFILE=accuracy` and `PROFILE=performance`.
 - **Toolchain:** Emscripten (emsdk) **6.0.9**.
-- **Filenames:** the output files are named honestly for the core they contain
-  (`bsnes_mercury_accuracy_libretro.*`); the loader, service worker and probe reference this
-  one pair of paths. The loader's **internal Emscripten factory export symbol** is still
-  `snes9x_libretro` (`EXPORT_NAME`), independent of the file name, which is why that string
-  survives in `core-loader.js`'s factory-name guesses and the probe. See `cores/core.json` /
-  `cores/build.json`.
+- **ASYNCIFY (critical):** bsnes uses **libco** cooperative cothreads; in a plain
+  non-ASYNCIFY WASM build `retro_run()` never returns (the scheduler never yields to JS) and
+  the first frame hangs. Both cores are built with **`-s ASYNCIFY=1`** plus an **Emscripten
+  Fibers** libco backend (`libco/emscripten.c`, so cothread switches cooperate with
+  ASYNCIFY). With both in place `retro_run` yields and returns on both profiles — proven by
+  `tools/run-smoke.mjs`. ASYNCIFY inflates the binaries to ~3.7 MB each.
+- **Filenames + export names:** each profile has a **distinct filename** and a **distinct
+  MODULARIZE `EXPORT_NAME`** (`bsnes_accuracy` / `bsnes_performance`) so they never collide;
+  both are ES6 modules (`-s EXPORT_ES6=1`) that `core-loader.js` resolves via dynamic import.
+  The legacy `snes9x_libretro` name survives only as a backward-compat fallback in
+  `core-loader.js`'s factory-name guesses. See `cores/core.json` / `cores/build.json`.
 - **License:** bsnes-mercury is **GPLv3** (`cores/license.txt`); the app as shipped is
   therefore subject to GPLv3.
 
@@ -92,7 +104,7 @@ frame-advance, state serialize/deserialize, and raw read-only memory peek direct
 | `manifest.json` | PWA manifest: standalone, landscape, dark theme, icons. |
 | `styles.css` | Studio UI + low-opacity on-screen touch controls. |
 | `icons/` | PWA icons (placeholder solids; regenerate with `tools/make-icons.js`). |
-| `cores/` | Bundled from-source **bsnes-mercury accuracy** WASM core (`bsnes_mercury_accuracy_libretro.js` + `.wasm`, `core.json`, `build.json`, GPLv3 `license.txt`), **committed** and deployed. Cycle-accurate and drivable by our raw-libretro frontend (probe: 17/17 `retro_*` + `addFunction`). Files are named honestly; the loader's internal `EXPORT_NAME` symbol stays `snes9x_libretro`. |
+| `cores/` | Bundled from-source **bsnes-mercury** WASM cores — **accuracy** (`bsnes_mercury_accuracy_libretro.*`, `EXPORT_NAME=bsnes_accuracy`) and **performance** (`bsnes_mercury_performance_libretro.*`, `EXPORT_NAME=bsnes_performance`), plus `core.json`, `build.json`, GPLv3 `license.txt` — **committed** and deployed. Both are ASYNCIFY builds so `retro_run` yields (proven by `tools/run-smoke.mjs`) and are selectable from the toolbar **Core** dropdown. |
 | `assets/` | **Runtime drop location** for the ROM. Not committed. |
 
 ### Verified libretro ABI hooks (from `libretro.h`)
@@ -120,12 +132,14 @@ never crashes and never falls back to a file chooser.
 
 ## The emulator core (already built and committed)
 
-Unlike the ROM, the compiled WASM core **is committed** to this repo (under `cores/`) so the
-app deploys with a working engine. It is a from-source **bsnes-mercury accuracy** core built
-with **Emscripten (emsdk 6.0.9)** from
-[`libretro/bsnes-mercury`](https://github.com/libretro/bsnes-mercury) @ `79d7f9d`.
+Unlike the ROM, the compiled WASM cores **are committed** to this repo (under `cores/`) so
+the app deploys with a working engine. They are from-source **bsnes-mercury** cores
+(accuracy + performance) built with **Emscripten (emsdk 6.0.9)** from
+[`libretro/bsnes-mercury`](https://github.com/libretro/bsnes-mercury) @ `79d7f9d`, each with
+**`-s ASYNCIFY`** so `retro_run` yields to the browser instead of hanging in bsnes's libco
+scheduler (see `cores/README.md` for the full ASYNCIFY + Emscripten-Fibers explanation).
 
-To **rebuild** it yourself:
+To **rebuild** them yourself:
 
 ```sh
 # 1. Install and activate the Emscripten SDK.
@@ -133,17 +147,29 @@ git clone https://github.com/emscripten-core/emsdk.git
 cd emsdk && ./emsdk install latest && ./emsdk activate latest
 source ./emsdk_env.sh && cd ..
 
-# 2. Build the accuracy core with the Emscripten toolchain.
+# 2. Build BOTH cores with the Emscripten toolchain.
 #    NOTE: the upstream emscripten platform block only emits an intermediate LLVM bitcode
 #    archive (.bc); it was edited to perform the full Emscripten link to .js + .wasm with
-#    the raw-libretro flags (ALLOW_TABLE_GROWTH, exported retro_* + runtime methods).
+#    the raw-libretro flags (ALLOW_TABLE_GROWTH, exported retro_* + runtime methods), to add
+#    -s ASYNCIFY=1 + a per-profile distinct EXPORT_NAME, and an Emscripten Fibers libco
+#    backend (libco/emscripten.c) so cothread switches cooperate with ASYNCIFY.
 git clone https://github.com/libretro/bsnes-mercury.git
 cd bsnes-mercury
+find . -name '*.o' -delete
 emmake make platform=emscripten PROFILE=accuracy -j$(nproc)
+find . -name '*.o' -delete
+emmake make platform=emscripten PROFILE=performance -j$(nproc)
 
-# 3. Copy the two output files into cores/ (output names are already the honest bsnes names):
-cp bsnes_mercury_accuracy_libretro.js  ../<repo>/cores/bsnes_mercury_accuracy_libretro.js
-cp bsnes_mercury_accuracy_libretro.wasm ../<repo>/cores/bsnes_mercury_accuracy_libretro.wasm
+# 3. Copy all four output files into cores/ (names are already the honest bsnes names):
+cp bsnes_mercury_accuracy_libretro.js    ../<repo>/cores/
+cp bsnes_mercury_accuracy_libretro.wasm  ../<repo>/cores/
+cp bsnes_mercury_performance_libretro.js   ../<repo>/cores/
+cp bsnes_mercury_performance_libretro.wasm ../<repo>/cores/
+
+# 4. Prove retro_run yields on both (bounded, non-hanging headless harness):
+cd ../<repo>
+node tools/run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12
+node tools/run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12
 ```
 
 The full flag set and Makefile edit are documented in

@@ -160,6 +160,35 @@ check('frameAdvance() while playing pauses and advances exactly one frame', () =
   assert.strictEqual(pending.size, 0, 'loop stopped after frameAdvance');
 });
 
+// --- engineStatus lifecycle transitions drive the banner (Engine: [state]) ---
+check('play() sets engineStatus to "RunLoop Active"', () => {
+  pending.clear();
+  const engine = makeReadyEngine();
+  engine.engineStatus = 'GameLoaded';
+  engine.play();
+  assert.strictEqual(engine.engineStatus, 'RunLoop Active');
+});
+
+check('pause() sets engineStatus to "Stopped" once running', () => {
+  pending.clear();
+  const engine = makeReadyEngine();
+  engine.engineStatus = 'GameLoaded';
+  engine.play();
+  engine.pause();
+  assert.strictEqual(engine.engineStatus, 'Stopped');
+});
+
+check('frameAdvance() increments the frame counter by exactly one and it reaches the banner snapshot', () => {
+  pending.clear();
+  const engine = makeReadyEngine();
+  engine.engineStatus = 'GameLoaded';
+  const before = engine.currentFrame;
+  engine.frameAdvance();
+  assert.strictEqual(engine.currentFrame - before, 1, 'Frame +1 increments the counter');
+  // The banner reads the live frame number from the snapshot.
+  assert.strictEqual(engine.statusSnapshot().frame, engine.currentFrame);
+});
+
 let failed = 0;
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : '  -> ' + r.err}`);

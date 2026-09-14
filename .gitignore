@@ -14,9 +14,11 @@
 # it does not affect committing a raw .sfc/.smc ROM.
 assets/*.zip
 
-# NOTE: the from-source bsnes-mercury accuracy WASM core (cores/snes9x_libretro.js
-# + .wasm, plus core.json, build.json, license.txt) is bundled and TRACKED so it
-# deploys with the app shell to Netlify. It is not ignored here on purpose.
+# NOTE: the from-source bsnes-mercury WASM cores (ASYNCIFY builds of both the
+# accuracy AND performance profiles — cores/bsnes_mercury_accuracy_libretro.js +
+# .wasm and cores/bsnes_mercury_performance_libretro.js + .wasm, plus core.json,
+# build.json, license.txt) are bundled and TRACKED so they deploy with the app
+# shell to Netlify. They are not ignored here on purpose.
 
 # OS / editor cruft
 .DS_Store

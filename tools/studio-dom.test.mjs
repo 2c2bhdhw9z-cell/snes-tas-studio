@@ -116,6 +116,50 @@ check('HUD shows placeholder without ROM', marioXVal === '--');
 document.getElementById('btn-savestate').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('save-state tree shows a node', document.querySelector('#savestate-tree .savestate-node'));
 
+// --- Core selection dropdown ---
+// The dropdown lives in the frame-controls toolbar. index.html ships static options and
+// app.js repopulates them from CORE_CATALOG; here we assert the markup + catalog + engine
+// API that make the live core swap work. (jsdom does not run app.js, so we assert the
+// pieces app.js relies on rather than the change handler itself.)
+const coreSelect = document.getElementById('core-select');
+check('core-select dropdown exists', !!coreSelect);
+check('core-select is a <select>', coreSelect && coreSelect.tagName === 'SELECT');
+const coreOptionValues = coreSelect
+  ? Array.from(coreSelect.querySelectorAll('option')).map((o) => o.value)
+  : [];
+check('core-select has an Accuracy option', coreOptionValues.includes('accuracy'));
+check('core-select has a Performance option', coreOptionValues.includes('performance'));
+check('core-select is NOT a file/ROM picker', coreSelect && coreSelect.tagName !== 'INPUT');
+check('no file input introduced anywhere', document.querySelectorAll('input[type="file"]').length === 0);
+
+// Core catalog + resolver from core-loader.
+const loaderMod = await import('../core/core-loader.js');
+const { CORE_CATALOG, coreById, DEFAULT_CORE_PATHS } = loaderMod;
+check('CORE_CATALOG has two cores', Array.isArray(CORE_CATALOG) && CORE_CATALOG.length === 2);
+check(
+  'catalog accuracy path is the accuracy core',
+  coreById('accuracy') && coreById('accuracy').path === 'cores/bsnes_mercury_accuracy_libretro.js'
+);
+check(
+  'catalog performance path is the performance core',
+  coreById('performance') && coreById('performance').path === 'cores/bsnes_mercury_performance_libretro.js'
+);
+check(
+  'accuracy and performance have DISTINCT export names',
+  coreById('accuracy').exportName !== coreById('performance').exportName
+);
+check(
+  'DEFAULT_CORE_PATHS still defaults to accuracy',
+  Array.isArray(DEFAULT_CORE_PATHS) && DEFAULT_CORE_PATHS[0] === 'cores/bsnes_mercury_accuracy_libretro.js'
+);
+
+// Engine exposes a setCore() API for the dropdown to call. Without a core present it must
+// degrade gracefully (resolve to a not-ok result, never throw).
+check('engine.setCore is a function', typeof engine.setCore === 'function');
+const switchResult = await engine.setCore('cores/bsnes_mercury_performance_libretro.js');
+check('setCore resolves without throwing (graceful when core absent)', switchResult && switchResult.ok === false);
+check('setCore did not introduce a file picker', document.querySelectorAll('input[type="file"]').length === 0);
+
 // --- Report ---
 let failed = 0;
 for (const r of results) {

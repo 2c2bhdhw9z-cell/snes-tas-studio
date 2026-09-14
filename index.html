@@ -85,6 +85,17 @@
 
       <!-- Frame control toolbar + piano-roll timeline. -->
       <div id="frame-controls">
+        <!-- Core selection: emulator-accuracy choice only (NOT a ROM/level picker). Defaults
+             to Accuracy; switching swaps the WASM core live. Options are populated from the
+             core catalog by app.js, but a static default is provided so the control is
+             present/testable even before scripts run. -->
+        <div class="core-group">
+          <label for="core-select">Core</label>
+          <select id="core-select" title="Emulator core (accuracy vs performance)">
+            <option value="accuracy">Accuracy (bsnes-mercury)</option>
+            <option value="performance">Performance (bsnes-mercury)</option>
+          </select>
+        </div>
         <button type="button" id="btn-playpause" title="Play / Pause">▶ Play</button>
         <button type="button" id="btn-frame-advance" title="Advance one frame">⏭ Frame +1</button>
         <button type="button" id="btn-fast-forward" title="Fast-forward">⏩ FF</button>

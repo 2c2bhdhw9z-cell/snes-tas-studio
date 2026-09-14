@@ -1,15 +1,10 @@
 // This code implements the `-sMODULARIZE` settings by taking the generated
 // JS program code (INNER_JS_CODE) and wrapping it in a factory function.
 
-// Single threaded MINIMAL_RUNTIME programs do not need access to
-// document.currentScript, so a simple export declaration is enough.
-var snes9x_libretro = (() => {
-  // When MODULARIZE this JS may be executed later,
-  // after document.currentScript is gone, so we save it.
-  // In EXPORT_ES6 mode we can just use 'import.meta.url'.
-  var _scriptName = globalThis.document?.currentScript?.src;
-  return async function(moduleArg = {}) {
-    var Module = moduleArg;
+// When targeting node and ES6 we use `await import ..` in the generated code
+// so the outer function needs to be marked as async.
+async function bsnes_accuracy(moduleArg = {}) {
+  var Module = moduleArg;
 // include: shell.js
 // include: minimum_runtime_check.js
 (function() {
@@ -85,6 +80,15 @@ var ENVIRONMENT_IS_WORKER = !!globalThis.WorkerGlobalScope;
 var ENVIRONMENT_IS_NODE = globalThis.process?.versions?.node && globalThis.process?.type != 'renderer';
 var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
 
+if (ENVIRONMENT_IS_NODE) {
+  // When building an ES module `require` is not normally available.
+  // We need to use `createRequire()` to construct the require()` function.
+  const { createRequire } = await import('node:module');
+  /** @suppress{duplicate} */
+  var require = createRequire(import.meta.url);
+
+}
+
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
 
@@ -95,12 +99,7 @@ var quit_ = (status, toThrow) => {
   throw toThrow;
 };
 
-if (typeof __filename != 'undefined') { // Node
-  _scriptName = __filename;
-} else
-if (ENVIRONMENT_IS_WORKER) {
-  _scriptName = self.location.href;
-}
+var _scriptName = import.meta.url;
 
 // `/` should be present at the end if `scriptDirectory` is not empty
 var scriptDirectory = '';
@@ -122,7 +121,9 @@ if (ENVIRONMENT_IS_NODE) {
   // the complexity of lazy-loading.
   var fs = require('node:fs');
 
-  scriptDirectory = __dirname + '/';
+  if (_scriptName.startsWith('file:')) {
+    scriptDirectory = require('node:path').dirname(require('node:url').fileURLToPath(_scriptName)) + '/';
+  }
 
 // include: node_shell_read.js
 readBinary = (filename) => {
@@ -513,6 +514,10 @@ function abort(what) {
 
   ABORT = true;
 
+  if (what.search(/RuntimeError: [Uu]nreachable/) >= 0) {
+    what += '. "unreachable" may be due to ASYNCIFY_STACK_SIZE not being large enough (try increasing it)';
+  }
+
   // Use a wasm runtime error, because a JS error might be seen as a foreign
   // exception, which means we'd run destructors on it. We need the error to
   // simply make the program stop.
@@ -548,7 +553,14 @@ function createExportWrapper(name, func, nargs) {
 var wasmBinaryFile;
 
 function findWasmBinary() {
-  return locateFile('bsnes_mercury_accuracy_libretro.wasm');
+
+  if (Module['locateFile']) {
+    return locateFile('bsnes_mercury_accuracy_libretro.wasm');
+  }
+
+  // Use bundler-friendly `new URL(..., import.meta.url)` pattern; works in browsers too.
+  return new URL('bsnes_mercury_accuracy_libretro.wasm', import.meta.url).href;
+
 }
 
 function getBinarySync(file) {
@@ -615,6 +627,10 @@ async function instantiateAsync(binary, binaryFile, imports) {
 }
 
 function getWasmImports() {
+  // instrumenting imports is used in asyncify in two ways: to add assertions
+  // that check for proper import use, and for JSPI we use them to set up
+  // the Promise API on the import side.
+  Asyncify.instrumentWasmImports(wasmImports);
   // prepare imports
   var imports = {
     'env': wasmImports,
@@ -631,6 +647,8 @@ async function createWasm() {
   // performing other necessary setup
   function receiveInstance(instance) {
     wasmExports = instance.exports;
+
+    wasmExports = Asyncify.instrumentWasmExports(wasmExports);
 
     assignWasmExports(wasmExports);
 
@@ -714,6 +732,34 @@ async function createWasm() {
   var onPreRuns = [];
   var addOnPreRun = (cb) => onPreRuns.push(cb);
 
+
+  var dynCalls = {
+  };
+  var dynCallLegacy = (sig, ptr, args) => {
+      sig = sig.replace(/p/g, 'i')
+      assert(sig in dynCalls, `bad function pointer type - sig is not in dynCalls: '${sig}'`);
+      if (args?.length) {
+        // j (64-bit integer) is fine, and is implemented as a BigInt. Without
+        // legalization, the number of parameters should match (j is not expanded
+        // into two i's).
+        assert(args.length === sig.length - 1);
+      } else {
+        assert(sig.length == 1);
+      }
+      var f = dynCalls[sig];
+      return f(ptr, ...args);
+    };
+  var dynCall = (sig, ptr, args = [], promising = false) => {
+      assert(ptr, `null function pointer in dynCall`);
+      assert(!promising, 'async dynCall is not supported in this mode')
+      var rtn = dynCallLegacy(sig, ptr, args);
+  
+      function convert(rtn) {
+        return rtn;
+      }
+  
+      return convert(rtn);
+    };
 
   var noExitRuntime = true;
 
@@ -829,21 +875,6 @@ async function createWasm() {
     };
   var ___assert_fail = (condition, filename, line, func) =>
       abort(`Assertion failed: ${UTF8ToString(condition)}, at: ` + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
-
-  var wasmTableMirror = [];
-  
-  
-  var getWasmTableEntry = (funcPtr) => {
-      var func = wasmTableMirror[funcPtr];
-      if (!func) {
-        /** @suppress {checkTypes} */
-        wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
-      }
-      /** @suppress {checkTypes} */
-      assert(wasmTable.get(funcPtr) == func, 'table mirror is out of date');
-      return func;
-    };
-  var ___call_sighandler = (fp, sig) => getWasmTableEntry(fp)(sig);
 
   var exceptionCaught =  [];
   
@@ -5007,16 +5038,6 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   var __abort_js = () =>
       abort('native code called abort()');
 
-  var runtimeKeepaliveCounter = 0;
-  var __emscripten_runtime_keepalive_clear = () => {
-      noExitRuntime = false;
-      runtimeKeepaliveCounter = 0;
-    };
-
-  var __emscripten_throw_longjmp = () => {
-      throw new EmscriptenSjLj;
-    };
-
   var isLeapYear = (year) => year%4 === 0 && (year%100 !== 0 || year%400 === 0);
   
   var MONTH_DAYS_LEAP_CUMULATIVE = [0,31,60,91,121,152,182,213,244,274,305,335];
@@ -5205,6 +5226,420 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
     ;
   }
 
+
+  var runAndAbortIfError = (func) => {
+      try {
+        return func();
+      } catch (e) {
+        abort(e);
+      }
+    };
+  
+  var handleException = (e) => {
+      // Certain exception types we do not treat as errors since they are used for
+      // internal control flow.
+      // 1. ExitStatus, which is thrown by exit()
+      // 2. "unwind", which is thrown by emscripten_unwind_to_js_event_loop() and others
+      //    that wish to return to JS event loop.
+      if (e instanceof ExitStatus || e == 'unwind') {
+        return EXITSTATUS;
+      }
+      checkStackCookie();
+      if (e instanceof WebAssembly.RuntimeError) {
+        if (_emscripten_stack_get_current() <= 0) {
+          err('Stack overflow detected.  You can try increasing -sSTACK_SIZE (currently set to 8388608)');
+        }
+      }
+      quit_(1, e);
+    };
+  
+  
+  var runtimeKeepaliveCounter = 0;
+  var keepRuntimeAlive = () => noExitRuntime || runtimeKeepaliveCounter > 0;
+  var _proc_exit = (code) => {
+      EXITSTATUS = code;
+      if (!keepRuntimeAlive()) {
+        Module['onExit']?.(code);
+        ABORT = true;
+      }
+      quit_(code, new ExitStatus(code));
+    };
+  
+  
+  /** @param {boolean|number=} implicit */
+  var exitJS = (status, implicit) => {
+      EXITSTATUS = status;
+  
+      checkUnflushedContent();
+  
+      // if exit() was called explicitly, warn the user if the runtime isn't actually being shut down
+      if (keepRuntimeAlive() && !implicit) {
+        var msg = `program exited (with status: ${status}), but keepRuntimeAlive() is set (counter=${runtimeKeepaliveCounter}) due to an async operation, so halting execution but not exiting the runtime or preventing further async execution (you can use emscripten_force_exit, if you want to force a true shutdown)`;
+        err(msg);
+      }
+  
+      _proc_exit(status);
+    };
+  var _exit = exitJS;
+  
+  
+  var maybeExit = () => {
+      if (!keepRuntimeAlive()) {
+        try {
+          _exit(EXITSTATUS);
+        } catch (e) {
+          handleException(e);
+        }
+      }
+    };
+  var callUserCallback = (func) => {
+      if (ABORT) {
+        err('user callback triggered after runtime exited or application aborted.  Ignoring.');
+        return;
+      }
+      try {
+        return func();
+      } catch (e) {
+        handleException(e);
+      } finally {
+        maybeExit();
+      }
+    };
+  
+  var createNamedFunction = (name, func) => Object.defineProperty(func, 'name', { value: name });
+  
+  var runtimeKeepalivePush = () => {
+      runtimeKeepaliveCounter += 1;
+    };
+  
+  var runtimeKeepalivePop = () => {
+      assert(runtimeKeepaliveCounter > 0);
+      runtimeKeepaliveCounter -= 1;
+    };
+  
+  
+  
+  
+  var Asyncify = {
+  instrumentWasmImports(imports) {
+        var importPattern = /^(invoke_.*|__asyncjs__.*)$/;
+  
+        for (let [x, original] of Object.entries(imports)) {
+          if (typeof original == 'function') {
+            let isAsyncifyImport = original.isAsync || importPattern.test(x);
+            imports[x] = (...args) => {
+              var originalAsyncifyState = Asyncify.state;
+              try {
+                return original(...args);
+              } finally {
+                // Only asyncify-declared imports are allowed to change the
+                // state.
+                // Changing the state from normal to disabled is allowed (in any
+                // function) as that is what shutdown does (and we don't have an
+                // explicit list of shutdown imports).
+                var changedToDisabled =
+                      originalAsyncifyState === Asyncify.State.Normal &&
+                      Asyncify.state        === Asyncify.State.Disabled;
+                // invoke_* functions are allowed to change the state if we do
+                // not ignore indirect calls.
+                var ignoredInvoke = x.startsWith('invoke_') &&
+                                    true;
+                if (Asyncify.state !== originalAsyncifyState &&
+                    !isAsyncifyImport &&
+                    !changedToDisabled &&
+                    !ignoredInvoke) {
+                  abort(`import ${x} was not in ASYNCIFY_IMPORTS, but changed the state`);
+                }
+              }
+            };
+          }
+        }
+      },
+  instrumentFunction(original) {
+        var wrapper = (...args) => {
+          Asyncify.exportCallStack.push(original);
+          try {
+            return original(...args);
+          } finally {
+            if (!ABORT) {
+              var top = Asyncify.exportCallStack.pop();
+              assert(top === original);
+              Asyncify.maybeStopUnwind();
+            }
+          }
+        };
+        Asyncify.funcWrappers.set(original, wrapper);
+        wrapper = createNamedFunction(`__asyncify_wrapper_${original.name}`, wrapper);
+        return wrapper;
+      },
+  instrumentWasmExports(exports) {
+        var ret = {};
+        for (let [x, original] of Object.entries(exports)) {
+          if (typeof original == 'function') {
+            var wrapper = Asyncify.instrumentFunction(original);
+            ret[x] = wrapper;
+          } else {
+            ret[x] = original;
+          }
+        }
+        return ret;
+      },
+  State:{
+  Normal:0,
+  Unwinding:1,
+  Rewinding:2,
+  Disabled:3,
+  },
+  state:0,
+  StackSize:1048576,
+  currData:null,
+  handleSleepReturnValue:0,
+  exportCallStack:[],
+  callstackFuncToId:new Map,
+  callStackIdToFunc:new Map,
+  funcWrappers:new Map,
+  callStackId:0,
+  asyncPromiseHandlers:null,
+  sleepCallbacks:[],
+  getCallStackId(func) {
+        assert(func);
+        if (!Asyncify.callstackFuncToId.has(func)) {
+          var id = Asyncify.callStackId++;
+          Asyncify.callstackFuncToId.set(func, id);
+          Asyncify.callStackIdToFunc.set(id, func);
+        }
+        return Asyncify.callstackFuncToId.get(func);
+      },
+  maybeStopUnwind() {
+        if (Asyncify.currData &&
+            Asyncify.state === Asyncify.State.Unwinding &&
+            !Asyncify.exportCallStack.length) {
+          // We just finished unwinding.
+          // Be sure to set the state before calling any other functions to avoid
+          // possible infinite recursion here (For example in debug pthread builds
+          // the dbg() function itself can call back into WebAssembly to get the
+          // current pthread_self() pointer).
+          Asyncify.state = Asyncify.State.Normal;
+          
+          // Keep the runtime alive so that a re-wind can be done later.
+          runAndAbortIfError(_asyncify_stop_unwind);
+          if (typeof Fibers != 'undefined') {
+            Fibers.trampoline();
+          }
+        }
+      },
+  whenDone() {
+        assert(Asyncify.currData, 'tried to wait for an async operation when none is in progress');
+        assert(!Asyncify.asyncPromiseHandlers, 'cannot have multiple async operations in flight at once');
+        return new Promise((resolve, reject) => {
+          Asyncify.asyncPromiseHandlers = { resolve, reject };
+        });
+      },
+  allocateData() {
+        // An asyncify data structure has three fields:
+        //  0  current stack pos
+        //  4  max stack pos
+        //  8  id of function at bottom of the call stack (callStackIdToFunc[id] == wasm func)
+        //
+        // The Asyncify ABI only interprets the first two fields, the rest is for the runtime.
+        // We also embed a stack in the same memory region here, right next to the structure.
+        // This struct is also defined as asyncify_data_t in emscripten/fiber.h
+        var ptr = _malloc(12 + Asyncify.StackSize);
+        Asyncify.setDataHeader(ptr, ptr + 12, Asyncify.StackSize);
+        Asyncify.setDataRewindFunc(ptr);
+        return ptr;
+      },
+  setDataHeader(ptr, stack, stackSize) {
+        HEAPU32[((ptr)>>2)] = stack;
+        HEAPU32[(((ptr)+(4))>>2)] = stack + stackSize;
+      },
+  setDataRewindFunc(ptr) {
+        var bottomOfCallStack = Asyncify.exportCallStack[0];
+        assert(bottomOfCallStack, 'exportCallStack is empty');
+        var rewindId = Asyncify.getCallStackId(bottomOfCallStack);
+        HEAP32[(((ptr)+(8))>>2)] = rewindId;
+      },
+  getDataRewindFunc(ptr) {
+        var id = HEAP32[(((ptr)+(8))>>2)];
+        var func = Asyncify.callStackIdToFunc.get(id);
+        assert(func, `id ${id} not found in callStackIdToFunc`);
+        return func;
+      },
+  doRewind(ptr) {
+        var original = Asyncify.getDataRewindFunc(ptr);
+        var func = Asyncify.funcWrappers.get(original);
+        assert(original);
+        assert(func);
+        // Once we have rewound and the stack we no longer need to artificially
+        // keep the runtime alive.
+        
+        return callUserCallback(func);
+      },
+  handleSleep(startAsync) {
+        assert(Asyncify.state !== Asyncify.State.Disabled, 'handleSleep called after Asyncify was shut down');
+        if (ABORT) return;
+        if (Asyncify.state === Asyncify.State.Normal) {
+          // Prepare to sleep. Call startAsync, and see what happens:
+          // if the code decided to call our callback synchronously,
+          // then no async operation was in fact begun, and we don't
+          // need to do anything.
+          var reachedCallback = false;
+          var reachedAfterCallback = false;
+          startAsync((handleSleepReturnValue = 0) => {
+            // old emterpretify API supported other stuff
+            assert(['undefined', 'number', 'boolean', 'bigint'].includes(typeof handleSleepReturnValue), `invalid type for handleSleepReturnValue: '${typeof handleSleepReturnValue}'`);
+            if (ABORT) return;
+            Asyncify.handleSleepReturnValue = handleSleepReturnValue;
+            reachedCallback = true;
+            if (!reachedAfterCallback) {
+              // We are happening synchronously, so no need for async.
+              return;
+            }
+            // This async operation did not happen synchronously, so we did
+            // unwind. In that case there can be no compiled code on the stack,
+            // as it might break later operations (we can rewind ok now, but if
+            // we unwind again, we would unwind through the extra compiled code
+            // too).
+            assert(!Asyncify.exportCallStack.length, 'waking up (starting to rewind) must be done from JS, without compiled code on the stack');
+            Asyncify.state = Asyncify.State.Rewinding;
+            runAndAbortIfError(() => _asyncify_start_rewind(Asyncify.currData));
+            if (typeof MainLoop != 'undefined' && MainLoop.func) {
+              MainLoop.resume();
+            }
+            var asyncWasmReturnValue, isError = false;
+            try {
+              asyncWasmReturnValue = Asyncify.doRewind(Asyncify.currData);
+            } catch (err) {
+              asyncWasmReturnValue = err;
+              isError = true;
+            }
+            // Track whether the return value was handled by any promise handlers.
+            var handled = false;
+            if (!Asyncify.currData) {
+              // All asynchronous execution has finished.
+              // `asyncWasmReturnValue` now contains the final
+              // return value of the exported async WASM function.
+              //
+              // Note: `asyncWasmReturnValue` is distinct from
+              // `Asyncify.handleSleepReturnValue`.
+              // `Asyncify.handleSleepReturnValue` contains the return
+              // value of the last C function to have executed
+              // `Asyncify.handleSleep()`, whereas `asyncWasmReturnValue`
+              // contains the return value of the exported WASM function
+              // that may have called C functions that
+              // call `Asyncify.handleSleep()`.
+              var asyncPromiseHandlers = Asyncify.asyncPromiseHandlers;
+              if (asyncPromiseHandlers) {
+                Asyncify.asyncPromiseHandlers = null;
+                (isError ? asyncPromiseHandlers.reject : asyncPromiseHandlers.resolve)(asyncWasmReturnValue);
+                handled = true;
+              }
+            }
+            if (isError && !handled) {
+              // If there was an error and it was not handled by now, we have no choice but to
+              // rethrow that error into the global scope where it can be caught only by
+              // `onerror` or `onunhandledpromiserejection`.
+              throw asyncWasmReturnValue;
+            }
+          });
+          reachedAfterCallback = true;
+          if (!reachedCallback) {
+            // A true async operation was begun; start a sleep.
+            Asyncify.state = Asyncify.State.Unwinding;
+            // TODO: reuse, don't alloc/free every sleep
+            Asyncify.currData = Asyncify.allocateData();
+            if (typeof MainLoop != 'undefined' && MainLoop.func) {
+              MainLoop.pause();
+            }
+            runAndAbortIfError(() => _asyncify_start_unwind(Asyncify.currData));
+          }
+        } else if (Asyncify.state === Asyncify.State.Rewinding) {
+          // Stop a resume.
+          Asyncify.state = Asyncify.State.Normal;
+          runAndAbortIfError(_asyncify_stop_rewind);
+          _free(Asyncify.currData);
+          Asyncify.currData = null;
+          // Call all sleep callbacks now that the sleep-resume is all done.
+          Asyncify.sleepCallbacks.forEach(callUserCallback);
+        } else {
+          abort(`invalid state: ${Asyncify.state}`);
+        }
+        return Asyncify.handleSleepReturnValue;
+      },
+  handleAsync:(startAsync) => Asyncify.handleSleep(async (wakeUp) => {
+        // TODO: add error handling as a second param when handleSleep implements it.
+        wakeUp(await startAsync());
+      }),
+  };
+  
+  
+  
+  
+  var Fibers = {
+  nextFiber:0,
+  trampolineRunning:false,
+  trampoline() {
+        if (!Fibers.trampolineRunning && Fibers.nextFiber) {
+          Fibers.trampolineRunning = true;
+          do {
+            var fiber = Fibers.nextFiber;
+            Fibers.nextFiber = 0;
+            Fibers.finishContextSwitch(fiber);
+          } while (Fibers.nextFiber);
+          Fibers.trampolineRunning = false;
+        }
+      },
+  finishContextSwitch(newFiber) {
+        var stack_base = HEAPU32[((newFiber)>>2)];
+        var stack_max =  HEAPU32[(((newFiber)+(4))>>2)];
+        _emscripten_stack_set_limits(stack_base, stack_max);
+  
+        stackRestore(HEAPU32[(((newFiber)+(8))>>2)]);
+  
+        var entryPoint = HEAPU32[(((newFiber)+(12))>>2)];
+  
+        if (entryPoint) {
+          writeStackCookie();
+          Asyncify.currData = null;
+          HEAPU32[(((newFiber)+(12))>>2)] = 0;
+  
+          var userData = HEAPU32[(((newFiber)+(16))>>2)];
+          ((a1) => dynCall_vi(entryPoint, a1))(userData);
+        } else {
+          var asyncifyData = newFiber + 20;
+          Asyncify.currData = asyncifyData;
+  
+          Asyncify.state = Asyncify.State.Rewinding;
+          _asyncify_start_rewind(asyncifyData);
+          Asyncify.doRewind(asyncifyData);
+        }
+      },
+  };
+  
+  
+  var _emscripten_fiber_swap = (oldFiber, newFiber) => {
+      if (ABORT) return;
+      if (Asyncify.state === Asyncify.State.Normal) {
+        Asyncify.state = Asyncify.State.Unwinding;
+  
+        var asyncifyData = oldFiber + 20;
+        Asyncify.setDataRewindFunc(asyncifyData);
+        Asyncify.currData = asyncifyData;
+  
+        _asyncify_start_unwind(asyncifyData);
+  
+        var stackTop = stackSave();
+        HEAPU32[(((oldFiber)+(8))>>2)] = stackTop;
+  
+        Fibers.nextFiber = newFiber;
+      } else {
+        assert(Asyncify.state === Asyncify.State.Rewinding);
+        Asyncify.state = Asyncify.State.Normal;
+        _asyncify_stop_rewind();
+        Asyncify.currData = null;
+      }
+    };
+  _emscripten_fiber_swap.isAsync = true;
 
 
   var getHeapMax = () =>
@@ -5583,17 +6018,6 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       return 0;
     };
 
-  
-  var keepRuntimeAlive = () => noExitRuntime || runtimeKeepaliveCounter > 0;
-  var _proc_exit = (code) => {
-      EXITSTATUS = code;
-      if (!keepRuntimeAlive()) {
-        Module['onExit']?.(code);
-        ABORT = true;
-      }
-      quit_(code, new ExitStatus(code));
-    };
-
 
   var getCFunc = (ident) => {
       var func = Module['_' + ident]; // closure exported function
@@ -5615,6 +6039,8 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       stringToUTF8(str, ret, size);
       return ret;
     };
+  
+  
   
   
   
@@ -5666,13 +6092,38 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           }
         }
       }
+      // Data for a previous async operation that was in flight before us.
+      var previousAsync = Asyncify.currData;
       var ret = func(...cArgs);
       function onDone(ret) {
+        runtimeKeepalivePop();
         if (stack) stackRestore(stack);
         return convertReturnValue(ret);
       }
+    var asyncMode = opts?.async;
+  
+      // Keep the runtime alive through all calls. Note that this call might not be
+      // async, but for simplicity we push and pop in all calls.
+      runtimeKeepalivePush();
+      if (Asyncify.currData != previousAsync) {
+        // A change in async operation happened. If there was already an async
+        // operation in flight before us, that is an error: we should not start
+        // another async operation while one is active, and we should not stop one
+        // either. The only valid combination is to have no change in the async
+        // data (so we either had one in flight and left it alone, or we didn't have
+        // one), or to have nothing in flight and to start one.
+        assert(!(previousAsync && Asyncify.currData), 'We cannot start an async operation when one is already in flight');
+        assert(!(previousAsync && !Asyncify.currData), 'We cannot stop an async operation in flight');
+        // This is a new async operation. The wasm is paused and has unwound its stack.
+        // We need to return a Promise that resolves the return value
+        // once the stack is rewound and execution finishes.
+        assert(asyncMode, `The call to ${ident} is running asynchronously. If this was intended, add the async option to the ccall/cwrap call.`);
+        return Asyncify.whenDone().then(onDone);
+      }
   
       ret = onDone(ret);
+      // If this is an async ccall, ensure we return a promise
+      if (asyncMode) return Promise.resolve(ret);
       return ret;
     };
 
@@ -5686,6 +6137,19 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       return (...args) => ccall(ident, returnType, argTypes, args, opts);
     };
 
+  var wasmTableMirror = [];
+  
+  
+  var getWasmTableEntry = (funcPtr) => {
+      var func = wasmTableMirror[funcPtr];
+      if (!func) {
+        /** @suppress {checkTypes} */
+        wasmTableMirror[funcPtr] = func = wasmTable.get(funcPtr);
+      }
+      /** @suppress {checkTypes} */
+      assert(wasmTable.get(funcPtr) == func, 'table mirror is out of date');
+      return func;
+    };
   
   var updateTableMap = (offset, count) => {
       if (functionsInTableMap) {
@@ -5974,20 +6438,12 @@ if (Module['printErr']) err = Module['printErr'];
   'convertU32PairToI53',
   'getTempRet0',
   'setTempRet0',
-  'createNamedFunction',
-  'exitJS',
   'withStackSave',
   'readEmAsmArgs',
   'jstoi_q',
   'getExecutableName',
   'autoResumeAudioContext',
   'getDynCaller',
-  'dynCall',
-  'handleException',
-  'runtimeKeepalivePush',
-  'runtimeKeepalivePop',
-  'callUserCallback',
-  'maybeExit',
   'asmjsMangle',
   'HandleAllocator',
   'addOnInit',
@@ -6097,7 +6553,6 @@ if (Module['printErr']) err = Module['printErr'];
   '__glGetActiveAttribOrUniform',
   'writeGLArray',
   'registerWebGlEventCallback',
-  'runAndAbortIfError',
   'writeStringToMemory',
   'writeAsciiToMemory',
   'allocateUTF8',
@@ -6128,8 +6583,10 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'stackSave',
   'stackRestore',
   'stackAlloc',
+  'createNamedFunction',
   'ptrToString',
   'zeroMemory',
+  'exitJS',
   'getHeapMax',
   'growMemory',
   'ENV',
@@ -6147,7 +6604,14 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'timers',
   'warnOnce',
   'readEmAsmArgsArray',
+  'dynCallLegacy',
+  'dynCall',
+  'handleException',
   'keepRuntimeAlive',
+  'runtimeKeepalivePush',
+  'runtimeKeepalivePop',
+  'callUserCallback',
+  'maybeExit',
   'asyncLoad',
   'alignMemory',
   'mmapAlloc',
@@ -6341,6 +6805,9 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'EGL',
   'GLEW',
   'IDBStore',
+  'runAndAbortIfError',
+  'Asyncify',
+  'Fibers',
   'SDL',
   'SDL_gfx',
   'print',
@@ -6408,20 +6875,40 @@ var _retro_load_game = Module['_retro_load_game'] = makeInvalidEarlyAccess('_ret
 var _retro_unload_game = Module['_retro_unload_game'] = makeInvalidEarlyAccess('_retro_unload_game');
 var _retro_get_memory_data = Module['_retro_get_memory_data'] = makeInvalidEarlyAccess('_retro_get_memory_data');
 var _retro_get_memory_size = Module['_retro_get_memory_size'] = makeInvalidEarlyAccess('_retro_get_memory_size');
-var _fflush = makeInvalidEarlyAccess('_fflush');
-var _emscripten_stack_get_end = makeInvalidEarlyAccess('_emscripten_stack_get_end');
 var _emscripten_stack_get_base = makeInvalidEarlyAccess('_emscripten_stack_get_base');
+var _emscripten_stack_get_end = makeInvalidEarlyAccess('_emscripten_stack_get_end');
+var _fflush = makeInvalidEarlyAccess('_fflush');
 var _htonl = makeInvalidEarlyAccess('_htonl');
 var _htons = makeInvalidEarlyAccess('_htons');
 var _emscripten_builtin_memalign = makeInvalidEarlyAccess('_emscripten_builtin_memalign');
 var _ntohs = makeInvalidEarlyAccess('_ntohs');
 var _strerror = makeInvalidEarlyAccess('_strerror');
-var _setThrew = makeInvalidEarlyAccess('_setThrew');
 var _emscripten_stack_init = makeInvalidEarlyAccess('_emscripten_stack_init');
+var _emscripten_stack_set_limits = makeInvalidEarlyAccess('_emscripten_stack_set_limits');
 var _emscripten_stack_get_free = makeInvalidEarlyAccess('_emscripten_stack_get_free');
 var __emscripten_stack_restore = makeInvalidEarlyAccess('__emscripten_stack_restore');
 var __emscripten_stack_alloc = makeInvalidEarlyAccess('__emscripten_stack_alloc');
 var _emscripten_stack_get_current = makeInvalidEarlyAccess('_emscripten_stack_get_current');
+var dynCall_vi = makeInvalidEarlyAccess('dynCall_vi');
+var dynCall_ii = makeInvalidEarlyAccess('dynCall_ii');
+var dynCall_v = makeInvalidEarlyAccess('dynCall_v');
+var dynCall_iii = makeInvalidEarlyAccess('dynCall_iii');
+var dynCall_vii = makeInvalidEarlyAccess('dynCall_vii');
+var dynCall_di = makeInvalidEarlyAccess('dynCall_di');
+var dynCall_viii = makeInvalidEarlyAccess('dynCall_viii');
+var dynCall_viiiiiii = makeInvalidEarlyAccess('dynCall_viiiiiii');
+var dynCall_viiii = makeInvalidEarlyAccess('dynCall_viiii');
+var dynCall_iiiiiii = makeInvalidEarlyAccess('dynCall_iiiiiii');
+var dynCall_viiiiii = makeInvalidEarlyAccess('dynCall_viiiiii');
+var dynCall_iiiii = makeInvalidEarlyAccess('dynCall_iiiii');
+var dynCall_viiiii = makeInvalidEarlyAccess('dynCall_viiiii');
+var dynCall_iiii = makeInvalidEarlyAccess('dynCall_iiii');
+var dynCall_jiji = makeInvalidEarlyAccess('dynCall_jiji');
+var dynCall_iidiiiii = makeInvalidEarlyAccess('dynCall_iidiiiii');
+var _asyncify_start_unwind = makeInvalidEarlyAccess('_asyncify_start_unwind');
+var _asyncify_stop_unwind = makeInvalidEarlyAccess('_asyncify_stop_unwind');
+var _asyncify_start_rewind = makeInvalidEarlyAccess('_asyncify_start_rewind');
+var _asyncify_stop_rewind = makeInvalidEarlyAccess('_asyncify_stop_rewind');
 var memory = makeInvalidEarlyAccess('memory');
 var __indirect_function_table = makeInvalidEarlyAccess('__indirect_function_table');
 var wasmMemory = makeInvalidEarlyAccess('wasmMemory');
@@ -6450,20 +6937,40 @@ function assignWasmExports(wasmExports) {
   assert(typeof wasmExports['retro_unload_game'] != 'undefined', 'missing Wasm export: retro_unload_game');
   assert(typeof wasmExports['retro_get_memory_data'] != 'undefined', 'missing Wasm export: retro_get_memory_data');
   assert(typeof wasmExports['retro_get_memory_size'] != 'undefined', 'missing Wasm export: retro_get_memory_size');
-  assert(typeof wasmExports['fflush'] != 'undefined', 'missing Wasm export: fflush');
-  assert(typeof wasmExports['emscripten_stack_get_end'] != 'undefined', 'missing Wasm export: emscripten_stack_get_end');
   assert(typeof wasmExports['emscripten_stack_get_base'] != 'undefined', 'missing Wasm export: emscripten_stack_get_base');
+  assert(typeof wasmExports['emscripten_stack_get_end'] != 'undefined', 'missing Wasm export: emscripten_stack_get_end');
+  assert(typeof wasmExports['fflush'] != 'undefined', 'missing Wasm export: fflush');
   assert(typeof wasmExports['htonl'] != 'undefined', 'missing Wasm export: htonl');
   assert(typeof wasmExports['htons'] != 'undefined', 'missing Wasm export: htons');
   assert(typeof wasmExports['emscripten_builtin_memalign'] != 'undefined', 'missing Wasm export: emscripten_builtin_memalign');
   assert(typeof wasmExports['ntohs'] != 'undefined', 'missing Wasm export: ntohs');
   assert(typeof wasmExports['strerror'] != 'undefined', 'missing Wasm export: strerror');
-  assert(typeof wasmExports['setThrew'] != 'undefined', 'missing Wasm export: setThrew');
   assert(typeof wasmExports['emscripten_stack_init'] != 'undefined', 'missing Wasm export: emscripten_stack_init');
+  assert(typeof wasmExports['emscripten_stack_set_limits'] != 'undefined', 'missing Wasm export: emscripten_stack_set_limits');
   assert(typeof wasmExports['emscripten_stack_get_free'] != 'undefined', 'missing Wasm export: emscripten_stack_get_free');
   assert(typeof wasmExports['_emscripten_stack_restore'] != 'undefined', 'missing Wasm export: _emscripten_stack_restore');
   assert(typeof wasmExports['_emscripten_stack_alloc'] != 'undefined', 'missing Wasm export: _emscripten_stack_alloc');
   assert(typeof wasmExports['emscripten_stack_get_current'] != 'undefined', 'missing Wasm export: emscripten_stack_get_current');
+  assert(typeof wasmExports['dynCall_vi'] != 'undefined', 'missing Wasm export: dynCall_vi');
+  assert(typeof wasmExports['dynCall_ii'] != 'undefined', 'missing Wasm export: dynCall_ii');
+  assert(typeof wasmExports['dynCall_v'] != 'undefined', 'missing Wasm export: dynCall_v');
+  assert(typeof wasmExports['dynCall_iii'] != 'undefined', 'missing Wasm export: dynCall_iii');
+  assert(typeof wasmExports['dynCall_vii'] != 'undefined', 'missing Wasm export: dynCall_vii');
+  assert(typeof wasmExports['dynCall_di'] != 'undefined', 'missing Wasm export: dynCall_di');
+  assert(typeof wasmExports['dynCall_viii'] != 'undefined', 'missing Wasm export: dynCall_viii');
+  assert(typeof wasmExports['dynCall_viiiiiii'] != 'undefined', 'missing Wasm export: dynCall_viiiiiii');
+  assert(typeof wasmExports['dynCall_viiii'] != 'undefined', 'missing Wasm export: dynCall_viiii');
+  assert(typeof wasmExports['dynCall_iiiiiii'] != 'undefined', 'missing Wasm export: dynCall_iiiiiii');
+  assert(typeof wasmExports['dynCall_viiiiii'] != 'undefined', 'missing Wasm export: dynCall_viiiiii');
+  assert(typeof wasmExports['dynCall_iiiii'] != 'undefined', 'missing Wasm export: dynCall_iiiii');
+  assert(typeof wasmExports['dynCall_viiiii'] != 'undefined', 'missing Wasm export: dynCall_viiiii');
+  assert(typeof wasmExports['dynCall_iiii'] != 'undefined', 'missing Wasm export: dynCall_iiii');
+  assert(typeof wasmExports['dynCall_jiji'] != 'undefined', 'missing Wasm export: dynCall_jiji');
+  assert(typeof wasmExports['dynCall_iidiiiii'] != 'undefined', 'missing Wasm export: dynCall_iidiiiii');
+  assert(typeof wasmExports['asyncify_start_unwind'] != 'undefined', 'missing Wasm export: asyncify_start_unwind');
+  assert(typeof wasmExports['asyncify_stop_unwind'] != 'undefined', 'missing Wasm export: asyncify_stop_unwind');
+  assert(typeof wasmExports['asyncify_start_rewind'] != 'undefined', 'missing Wasm export: asyncify_start_rewind');
+  assert(typeof wasmExports['asyncify_stop_rewind'] != 'undefined', 'missing Wasm export: asyncify_stop_rewind');
   assert(typeof wasmExports['memory'] != 'undefined', 'missing Wasm export: memory');
   assert(typeof wasmExports['__indirect_function_table'] != 'undefined', 'missing Wasm export: __indirect_function_table');
   _free = Module['_free'] = createExportWrapper('free', wasmExports['free'], 1);
@@ -6488,20 +6995,40 @@ function assignWasmExports(wasmExports) {
   _retro_unload_game = Module['_retro_unload_game'] = createExportWrapper('retro_unload_game', wasmExports['retro_unload_game'], 0);
   _retro_get_memory_data = Module['_retro_get_memory_data'] = createExportWrapper('retro_get_memory_data', wasmExports['retro_get_memory_data'], 1);
   _retro_get_memory_size = Module['_retro_get_memory_size'] = createExportWrapper('retro_get_memory_size', wasmExports['retro_get_memory_size'], 1);
-  _fflush = createExportWrapper('fflush', wasmExports['fflush'], 1);
-  _emscripten_stack_get_end = wasmExports['emscripten_stack_get_end'];
   _emscripten_stack_get_base = wasmExports['emscripten_stack_get_base'];
+  _emscripten_stack_get_end = wasmExports['emscripten_stack_get_end'];
+  _fflush = createExportWrapper('fflush', wasmExports['fflush'], 1);
   _htonl = createExportWrapper('htonl', wasmExports['htonl'], 1);
   _htons = createExportWrapper('htons', wasmExports['htons'], 1);
   _emscripten_builtin_memalign = createExportWrapper('emscripten_builtin_memalign', wasmExports['emscripten_builtin_memalign'], 2);
   _ntohs = createExportWrapper('ntohs', wasmExports['ntohs'], 1);
   _strerror = createExportWrapper('strerror', wasmExports['strerror'], 1);
-  _setThrew = createExportWrapper('setThrew', wasmExports['setThrew'], 2);
   _emscripten_stack_init = wasmExports['emscripten_stack_init'];
+  _emscripten_stack_set_limits = wasmExports['emscripten_stack_set_limits'];
   _emscripten_stack_get_free = wasmExports['emscripten_stack_get_free'];
   __emscripten_stack_restore = wasmExports['_emscripten_stack_restore'];
   __emscripten_stack_alloc = wasmExports['_emscripten_stack_alloc'];
   _emscripten_stack_get_current = wasmExports['emscripten_stack_get_current'];
+  dynCall_vi = dynCalls['vi'] = createExportWrapper('dynCall_vi', wasmExports['dynCall_vi'], 2);
+  dynCall_ii = dynCalls['ii'] = createExportWrapper('dynCall_ii', wasmExports['dynCall_ii'], 2);
+  dynCall_v = dynCalls['v'] = createExportWrapper('dynCall_v', wasmExports['dynCall_v'], 1);
+  dynCall_iii = dynCalls['iii'] = createExportWrapper('dynCall_iii', wasmExports['dynCall_iii'], 3);
+  dynCall_vii = dynCalls['vii'] = createExportWrapper('dynCall_vii', wasmExports['dynCall_vii'], 3);
+  dynCall_di = dynCalls['di'] = createExportWrapper('dynCall_di', wasmExports['dynCall_di'], 2);
+  dynCall_viii = dynCalls['viii'] = createExportWrapper('dynCall_viii', wasmExports['dynCall_viii'], 4);
+  dynCall_viiiiiii = dynCalls['viiiiiii'] = createExportWrapper('dynCall_viiiiiii', wasmExports['dynCall_viiiiiii'], 8);
+  dynCall_viiii = dynCalls['viiii'] = createExportWrapper('dynCall_viiii', wasmExports['dynCall_viiii'], 5);
+  dynCall_iiiiiii = dynCalls['iiiiiii'] = createExportWrapper('dynCall_iiiiiii', wasmExports['dynCall_iiiiiii'], 7);
+  dynCall_viiiiii = dynCalls['viiiiii'] = createExportWrapper('dynCall_viiiiii', wasmExports['dynCall_viiiiii'], 7);
+  dynCall_iiiii = dynCalls['iiiii'] = createExportWrapper('dynCall_iiiii', wasmExports['dynCall_iiiii'], 5);
+  dynCall_viiiii = dynCalls['viiiii'] = createExportWrapper('dynCall_viiiii', wasmExports['dynCall_viiiii'], 6);
+  dynCall_iiii = dynCalls['iiii'] = createExportWrapper('dynCall_iiii', wasmExports['dynCall_iiii'], 4);
+  dynCall_jiji = dynCalls['jiji'] = createExportWrapper('dynCall_jiji', wasmExports['dynCall_jiji'], 4);
+  dynCall_iidiiiii = dynCalls['iidiiiii'] = createExportWrapper('dynCall_iidiiiii', wasmExports['dynCall_iidiiiii'], 8);
+  _asyncify_start_unwind = createExportWrapper('asyncify_start_unwind', wasmExports['asyncify_start_unwind'], 1);
+  _asyncify_stop_unwind = createExportWrapper('asyncify_stop_unwind', wasmExports['asyncify_stop_unwind'], 0);
+  _asyncify_start_rewind = createExportWrapper('asyncify_start_rewind', wasmExports['asyncify_start_rewind'], 1);
+  _asyncify_stop_rewind = createExportWrapper('asyncify_stop_rewind', wasmExports['asyncify_stop_rewind'], 0);
   memory = wasmMemory = wasmExports['memory'];
   __indirect_function_table = wasmTable = wasmExports['__indirect_function_table'];
 }
@@ -6509,8 +7036,6 @@ function assignWasmExports(wasmExports) {
 var wasmImports = {
   /** @export */
   __assert_fail: ___assert_fail,
-  /** @export */
-  __call_sighandler: ___call_sighandler,
   /** @export */
   __cxa_rethrow: ___cxa_rethrow,
   /** @export */
@@ -6542,10 +7067,6 @@ var wasmImports = {
   /** @export */
   _abort_js: __abort_js,
   /** @export */
-  _emscripten_runtime_keepalive_clear: __emscripten_runtime_keepalive_clear,
-  /** @export */
-  _emscripten_throw_longjmp: __emscripten_throw_longjmp,
-  /** @export */
   _localtime_js: __localtime_js,
   /** @export */
   _mmap_js: __mmap_js,
@@ -6557,6 +7078,8 @@ var wasmImports = {
   clock_time_get: _clock_time_get,
   /** @export */
   emscripten_date_now: _emscripten_date_now,
+  /** @export */
+  emscripten_fiber_swap: _emscripten_fiber_swap,
   /** @export */
   emscripten_get_now: _emscripten_get_now,
   /** @export */
@@ -6570,36 +7093,8 @@ var wasmImports = {
   /** @export */
   fd_write: _fd_write,
   /** @export */
-  getaddrinfo: _getaddrinfo,
-  /** @export */
-  invoke_v,
-  /** @export */
-  invoke_vii,
-  /** @export */
-  proc_exit: _proc_exit
+  getaddrinfo: _getaddrinfo
 };
-
-function invoke_v(index) {
-  var sp = stackSave();
-  try {
-    getWasmTableEntry(index)();
-  } catch(e) {
-    stackRestore(sp);
-    if (!(e instanceof EmscriptenEH)) throw e;
-    _setThrew(1, 0);
-  }
-}
-
-function invoke_vii(index,a1,a2) {
-  var sp = stackSave();
-  try {
-    getWasmTableEntry(index)(a1,a2);
-  } catch(e) {
-    stackRestore(sp);
-    if (!(e instanceof EmscriptenEH)) throw e;
-    _setThrew(1, 0);
-  }
-}
 
 
 // include: postamble.js
@@ -6720,16 +7215,9 @@ for (const prop of Object.keys(Module)) {
 
 
 
-    return Module;
-  };
-})();
+  return Module;
+}
 
 // Export using a UMD style export, or ES6 exports if selected
-if (typeof exports === 'object' && typeof module === 'object') {
-  module.exports = snes9x_libretro;
-  // This default export looks redundant, but it allows TS to import this
-  // commonjs style module.
-  module.exports.default = snes9x_libretro;
-} else if (typeof define === 'function' && define['amd'])
-  define([], () => snes9x_libretro);
+export default bsnes_accuracy;
 

@@ -117,6 +117,25 @@ check('#frame-controls speed slider uses touch-action:pan-x', /#frame-controls i
 check('CSS has orientation:portrait rules', /@media\s*\(orientation:\s*portrait\)/.test(css));
 check('CSS has orientation:landscape rules', /@media\s*\(orientation:\s*landscape\)/.test(css));
 
+// --- Installed PWA (iOS standalone) touch fixes ---
+check('CSS has an @media (display-mode: standalone) block', /@media\s*\(display-mode:\s*standalone\)/.test(css));
+// Grab just the standalone block for targeted assertions.
+const standaloneMatch = css.match(/@media\s*\(display-mode:\s*standalone\)\s*\{([\s\S]*?)\n\}\s*$/);
+const standaloneBlock = standaloneMatch ? standaloneMatch[1] : '';
+check('standalone: #touch-controls overlay stays pointer-events:none', /#touch-controls\s*\{[^}]*pointer-events:\s*none/s.test(standaloneBlock));
+check('standalone: touch-control clusters/buttons get pointer-events:auto', /#touch-controls[^{]*\.touch-btn[\s\S]*?pointer-events:\s*auto/s.test(standaloneBlock));
+check('standalone: #frame-controls gets pointer-events:auto', /#frame-controls\s*\{[^}]*pointer-events:\s*auto/s.test(standaloneBlock));
+check('standalone: #frame-controls buttons/save-state nodes get pointer-events:auto', /#frame-controls button[\s\S]*?pointer-events:\s*auto/s.test(standaloneBlock));
+check('standalone: #speed slider gets pointer-events:auto + pan-x', /#speed[\s\S]*?pointer-events:\s*auto/s.test(standaloneBlock) && /#speed[\s\S]*?touch-action:\s*pan-x/s.test(standaloneBlock));
+check('standalone: #frame-controls raised above the stage (z-index)', /#frame-controls\s*\{[^}]*z-index:/s.test(standaloneBlock));
+
+// Primary controls in piano-roll.js listen for BOTH pointerdown AND click (item: iOS
+// standalone can delay/suppress the synthetic click). bindPrimary binds both.
+const pianoSrc = fs.readFileSync(path.join(ROOT, 'piano-roll.js'), 'utf8');
+check('piano-roll binds pointerdown on primary controls', /addEventListener\(\s*['"]pointerdown['"]/.test(pianoSrc));
+check('piano-roll still binds click on primary controls', /addEventListener\(\s*['"]click['"]/.test(pianoSrc));
+check('piano-roll guards against pointerdown+click double-fire', /handledByPointer/.test(pianoSrc));
+
 const liveSrc = fs.readFileSync(path.join(ROOT, 'live-input.js'), 'utf8');
 check('gamepad polling (getGamepads) present', /navigator\.getGamepads/.test(liveSrc));
 check('gamepadconnected handled', /gamepadconnected/.test(liveSrc));
@@ -180,6 +199,34 @@ const li2 = new LiveInput();
 gamepadHolder.pads = [{ buttons: [], axes: [-1, 0], mapping: 'standard' }];
 li2.poll();
 check('left stick left -> SNES LEFT', (li2.getMask() & (1 << 6)) !== 0);
+
+// --- Behavioral: a pointerdown on Play toggles the engine (standalone tap path) ---
+// jsdom has no PointerEvent, but the listener is bound by string type, so dispatching a
+// generic Event of type 'pointerdown' exercises the same handler a real tap would.
+let toggled = 0;
+engine.togglePause = () => { toggled += 1; };
+const playBtn = document.getElementById('btn-playpause');
+check('#btn-playpause exists', playBtn);
+const pd = new window.Event('pointerdown', { bubbles: true });
+// Emulate a primary-button pointer (button 0).
+Object.defineProperty(pd, 'button', { value: 0 });
+playBtn.dispatchEvent(pd);
+check('pointerdown on Play toggles the engine once', toggled === 1);
+// The synthetic click that follows the same tap must NOT double-fire the action.
+playBtn.dispatchEvent(new window.Event('click', { bubbles: true }));
+check('synthetic click after pointerdown does not double-toggle', toggled === 1);
+
+// Frame +1 pointerdown runs exactly one frameAdvance.
+let advanced = 0;
+engine.frameAdvance = () => { advanced += 1; };
+const stepBtn = document.getElementById('btn-frame-advance');
+check('#btn-frame-advance exists', stepBtn);
+const pd2 = new window.Event('pointerdown', { bubbles: true });
+Object.defineProperty(pd2, 'button', { value: 0 });
+stepBtn.dispatchEvent(pd2);
+check('pointerdown on Frame +1 advances exactly one frame', advanced === 1);
+stepBtn.dispatchEvent(new window.Event('click', { bubbles: true }));
+check('synthetic click after Frame +1 pointerdown does not double-advance', advanced === 1);
 
 // --- Report ---
 let failed = 0;
