@@ -8,10 +8,13 @@
 //     defines a module factory and fetches its sibling .wasm.
 //   - the .wasm binary itself (cores/bsnes_mercury_accuracy_libretro.wasm).
 //
-// The files are named honestly for the core they contain. Note the loader's INTERNAL
-// Emscripten factory export SYMBOL is still `snes9x_libretro` (EXPORT_NAME baked into the
-// 230KB minified build); that JS symbol is independent of the file name and is intentionally
-// retained in `factoryNameGuesses` below so factory resolution keeps working.
+// Both cores are built with `-s MODULARIZE=1 -s EXPORT_ES6=1` and DISTINCT MODULARIZE
+// EXPORT_NAMEs (accuracy -> `bsnes_accuracy`, performance -> `bsnes_performance`). The JS
+// loader ends with `export default <factory>`, so we obtain the factory purely via a native
+// dynamic `import()` of the module's default export — no global symbols, no classic <script>.
+// A classic <script> injection is deliberately NOT used: these files use `import.meta`, which
+// throws `SyntaxError: import.meta is only valid inside modules` when parsed as a classic
+// script (that was the live production bug this loader fixes).
 //
 // Neither file is committed to this repo; both are dropped into cores/ at deploy time.
 // This loader therefore MUST degrade gracefully: on any failure it returns a structured
@@ -102,83 +105,77 @@ async function coreFileExists(url) {
 }
 
 /**
- * Dynamically evaluate an Emscripten core loader script and obtain its module factory.
+ * Resolve a (possibly page-relative) core path to an ABSOLUTE, importable URL.
  *
- * Emscripten cores can be emitted in a few shapes depending on build flags:
- *   - as an ES module exporting a default factory function (MODULARIZE + EXPORT_ES6),
- *   - as a global factory function assigned to a name (MODULARIZE),
- *   - as a script that populates a global `Module` object.
- * We try the ES-module import path first (cleanest, no globals), then fall back to a
- * classic <script> injection.
+ * WHY THIS EXISTS (the actual browser bug this fixes):
+ * The catalog stores page-relative specifiers like 'cores/bsnes_mercury_accuracy_libretro.js'
+ * (no leading './' or '/'). A dynamic `import('cores/...js')` treats that as a BARE module
+ * specifier and throws `TypeError: Failed to resolve module specifier "cores/..."`. Previously
+ * that error was swallowed and execution fell through to a classic-<script> injection of the
+ * SAME file — but the core is an ES6 module using `import.meta.url`, so the browser parsed it
+ * as a classic script and died with the fatal:
+ *   `SyntaxError: import.meta is only valid inside modules.`
+ * Resolving to an absolute URL against the page base makes `import()` succeed, so we never
+ * fall through to the (removed) harmful classic-script path.
  *
- * @param {string} url
- * @returns {Promise<Function|null>} a module factory `(moduleArg) => Promise<Module>` or null
+ * An already-absolute URL (http:, https:, file:, blob:, data:) or an explicitly relative one
+ * ('./' or '../') is returned effectively unchanged after normalization against the base.
+ *
+ * @param {string} corePath e.g. 'cores/bsnes_mercury_accuracy_libretro.js'
+ * @param {string} [base] the base to resolve against (defaults to the document/page base)
+ * @returns {string} an absolute URL string safe to hand to dynamic import()
+ */
+export function resolveCoreUrl(corePath, base) {
+  const baseHref = base
+    || (typeof document !== 'undefined' && document.baseURI)
+    || (typeof location !== 'undefined' && location.href)
+    || 'file:///';
+  return new URL(corePath, baseHref).href;
+}
+
+/**
+ * Dynamically import an Emscripten ES6-module core loader and obtain its module factory.
+ *
+ * Our cores are built with `-s MODULARIZE=1 -s EXPORT_ES6=1`, so the JS loader ends with
+ * `export default <factory>` where the factory is `(moduleArg) => Promise<Module>`. We import
+ * the module and read its default export.
+ *
+ * IMPORTANT: the specifier MUST be resolved to an absolute URL first (see resolveCoreUrl),
+ * otherwise a page-relative path is a bare specifier and import() throws. We do NOT fall back
+ * to injecting the file as a classic <script>: these cores use `import.meta` and a classic
+ * script would throw `SyntaxError: import.meta is only valid inside modules`. Any real import
+ * failure is surfaced (returned) rather than silently swallowed.
+ *
+ * @param {string} url an ABSOLUTE URL (already run through resolveCoreUrl)
+ * @returns {Promise<{factory:Function|null, error:Error|null}>}
  */
 async function resolveModuleFactory(url) {
-  // 1) Try native ES module import (works when the core was built with EXPORT_ES6).
+  let mod;
   try {
-    const mod = await import(/* webpackIgnore: true */ url);
-    if (mod && typeof mod.default === 'function') return mod.default;
-  } catch (_esErr) {
-    // Not an ES module (or import blocked) — fall through to classic script injection.
+    mod = await import(/* webpackIgnore: true */ url);
+  } catch (err) {
+    // Surface the real error to the console so the failure is diagnosable — never swallow it.
+    console.error(`[core-loader] dynamic import of ES6 core failed for ${url}:`, err);
+    return { factory: null, error: err instanceof Error ? err : new Error(String(err)) };
   }
 
-  // 2) Classic <script> injection. Capture any global factory or Module the script defines.
-  if (typeof document === 'undefined') return null;
+  // Emscripten EXPORT_ES6 emits `export default <factory>`. Read mod.default; tolerate a
+  // double-default (mod.default.default) and a directly-callable namespace defensively.
+  let candidate = mod && mod.default;
+  if (candidate && typeof candidate !== 'function' && typeof candidate.default === 'function') {
+    candidate = candidate.default;
+  }
+  if (typeof candidate !== 'function' && typeof mod === 'function') {
+    candidate = mod;
+  }
 
-  const factoryNameGuesses = [
-    'libretro',
-    'Module',
-    'createModule',
-    'bsnes_mercury_accuracy_libretro',
-    'bsnes_mercury_performance_libretro',
-    // The ASYNCIFY rebuilds use DISTINCT MODULARIZE EXPORT_NAMEs per profile so the two
-    // cores never collide on a shared UMD/global symbol: the accuracy core exports
-    // `bsnes_accuracy`, the performance core `bsnes_performance`. Both are also emitted with
-    // -s EXPORT_ES6=1, so resolveModuleFactory's dynamic-import default-export path (tried
-    // first, above) resolves either one cleanly without touching globals. These names are
-    // the classic-<script> fallback for environments without ES-module import.
-    'bsnes_accuracy',
-    'bsnes_performance',
-    // Legacy: the ORIGINAL committed core used EXPORT_NAME `snes9x_libretro`. Retained so an
-    // older pre-ASYNCIFY core dropped into cores/ still resolves.
-    'snes9x_libretro',
-  ];
+  if (typeof candidate === 'function') return { factory: candidate, error: null };
 
-  const before = new Set(Object.keys(globalThis));
-
-  return new Promise((resolve) => {
-    const script = document.createElement('script');
-    script.async = true;
-    script.src = url;
-    script.onload = () => {
-      // Prefer a newly-introduced global that is a function factory.
-      for (const key of Object.keys(globalThis)) {
-        if (before.has(key)) continue;
-        const val = globalThis[key];
-        if (typeof val === 'function') {
-          resolve(val);
-          return;
-        }
-      }
-      // Fall back to well-known names.
-      for (const name of factoryNameGuesses) {
-        const val = globalThis[name];
-        if (typeof val === 'function') {
-          resolve(val);
-          return;
-        }
-        if (val && typeof val === 'object') {
-          // A prebuilt Module object; wrap it so callers get a uniform factory shape.
-          resolve(() => Promise.resolve(val));
-          return;
-        }
-      }
-      resolve(null);
-    };
-    script.onerror = () => resolve(null);
-    document.head.appendChild(script);
-  });
+  const err = new Error(
+    `Core module at ${url} did not export a factory function (default export was ${typeof (mod && mod.default)}).`
+  );
+  console.error('[core-loader]', err.message);
+  return { factory: null, error: err };
 }
 
 /**
@@ -194,23 +191,34 @@ export async function loadCore(opts = {}) {
   const moduleOverrides = opts.moduleOverrides || {};
 
   const attempted = [];
+  let lastError = null;
 
   for (const corePath of corePaths) {
     attempted.push(corePath);
 
+    // Resolve the (page-relative) corePath to an absolute URL up front. Both the existence
+    // probe and the dynamic import use this so the specifier is never a bare one.
+    const coreUrl = resolveCoreUrl(corePath);
+
     // Skip paths whose loader file is not present, so we can try the next candidate.
-    const exists = await coreFileExists(corePath);
+    const exists = await coreFileExists(coreUrl);
     if (!exists) continue;
 
-    const factory = await resolveModuleFactory(corePath);
-    if (typeof factory !== 'function') continue;
+    const { factory, error } = await resolveModuleFactory(coreUrl);
+    if (typeof factory !== 'function') {
+      // A PRESENT-but-failing import is a real error: remember it so loadCore can report it
+      // instead of masquerading as a plain 'core-missing'. Then try the next candidate.
+      if (error) lastError = error;
+      continue;
+    }
 
     try {
-      // Point Emscripten at the correct .wasm sibling and forward any overrides.
-      const wasmPath = corePath.replace(/\.js$/, '.wasm');
+      // Point Emscripten at the correct .wasm sibling and forward any overrides. locateFile
+      // must return a URL emscripten can fetch, so resolve the sibling to an absolute URL too.
+      const wasmUrl = resolveCoreUrl(corePath.replace(/\.js$/, '.wasm'));
       const Module = await factory({
         locateFile: (file) => {
-          if (file.endsWith('.wasm')) return wasmPath;
+          if (file.endsWith('.wasm')) return wasmUrl;
           return file;
         },
         // Keep the core quiet unless it errors; callers can override.
@@ -227,9 +235,21 @@ export async function loadCore(opts = {}) {
         return { ok: true, Module, corePath };
       }
     } catch (err) {
-      console.warn(`[core-loader] failed to instantiate ${corePath}:`, err);
+      console.error(`[core-loader] failed to instantiate ${corePath}:`, err);
+      lastError = err instanceof Error ? err : new Error(String(err));
       // Try the next candidate rather than throwing.
     }
+  }
+
+  // If a core FILE was present but failed to import/instantiate, report that distinctly so the
+  // app banner can show the real reason (e.g. an import/instantiate error) rather than
+  // implying the file is simply missing.
+  if (lastError) {
+    return {
+      ok: false,
+      reason: 'core-load-failed',
+      detail: `Core file present but failed to load. Tried: ${attempted.join(', ')}. Last error: ${lastError.message}`,
+    };
   }
 
   return {

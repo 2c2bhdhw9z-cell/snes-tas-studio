@@ -326,10 +326,19 @@ class TASEngine {
     const romOk = romResult && romResult.ok;
 
     if (!coreOk) {
-      this.showNotice(
-        'Emulator core not found in cores/. Build/drop the WASM core (e.g. cores/bsnes_mercury_accuracy_libretro.js) to enable emulation.',
-        'error'
-      );
+      if (coreResult && coreResult.reason === 'core-load-failed') {
+        // A core file WAS present but failed to import/instantiate — surface the real detail
+        // so the failure is diagnosable (not misreported as a missing file).
+        this.showNotice(
+          `Emulator core failed to load. ${coreResult.detail || ''}`.trim(),
+          'error'
+        );
+      } else {
+        this.showNotice(
+          'Emulator core not found in cores/. Build/drop the WASM core (e.g. cores/bsnes_mercury_accuracy_libretro.js) to enable emulation.',
+          'error'
+        );
+      }
     }
     if (!romOk) {
       this.showNotice(

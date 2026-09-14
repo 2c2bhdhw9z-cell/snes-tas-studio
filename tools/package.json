@@ -12,11 +12,12 @@
     "test:mobile": "node mobile-smoke.test.mjs",
     "test:inputlog": "node inputlog-truncate.test.mjs",
     "test:precache": "node precache-check.mjs",
+    "test:coreurl": "node core-url-resolve.test.mjs",
     "coreprobe": "node core-probe.mjs",
     "test:runsmoke": "node run-smoke.mjs",
     "test:runsmoke:accuracy": "node run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12",
     "test:runsmoke:performance": "node run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12",
-    "test": "node inputlog-truncate.test.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node engine-smoke.mjs && node runloop.test.mjs && node env-callback.test.mjs && node precache-check.mjs"
+    "test": "node inputlog-truncate.test.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node engine-smoke.mjs && node runloop.test.mjs && node env-callback.test.mjs && node core-url-resolve.test.mjs && node precache-check.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.1.3"

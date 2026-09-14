@@ -32,6 +32,14 @@ for (const f of need) {
 }
 
 const version = (sw.match(/CACHE_VERSION\s*=\s*'([^']+)'/) || [])[1];
+// The cache version MUST bump whenever a precached shell file (e.g. core/core-loader.js)
+// changes, otherwise returning users' service worker keeps serving the OLD file. Pin the
+// expected version so an un-bumped edit is caught here.
+const EXPECTED_VERSION = 'tas-studio-v9';
+const versionOk = version === EXPECTED_VERSION;
+if (!versionOk) {
+  console.log(`CACHE_VERSION mismatch: expected ${EXPECTED_VERSION}, got ${version}`);
+}
 const appShellBlock = sw.split('APP_SHELL')[1].split(']')[0];
 const noRomInShell = !/\.(sfc|smc)/i.test(appShellBlock);
 const hasRomGuard = /isRomRequest/.test(sw) && /assets\//.test(sw);
@@ -60,6 +68,6 @@ console.log('ROM guard present (isRomRequest + assets/):', hasRomGuard);
 console.log('APP_SHELL contains no ROM (.sfc/.smc):', noRomInShell);
 console.log('OPTIONAL_CORE_FILES has both cores (accuracy + performance, .js + .wasm):', coresOk);
 console.log('OPTIONAL_CORE_FILES contains no ROM:', noRomInOptional);
-const pass = ok && noRomInShell && hasRomGuard && coresOk && noRomInOptional;
+const pass = ok && noRomInShell && hasRomGuard && coresOk && noRomInOptional && versionOk;
 console.log(pass ? 'PRECACHE OK' : 'PRECACHE FAIL');
 process.exit(pass ? 0 : 1);
