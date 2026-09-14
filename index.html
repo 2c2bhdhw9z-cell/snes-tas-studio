@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SNES TAS Studio</title>
+
+    <!-- Viewport + iOS gesture lockdown: no zoom, no bounce, respect the notch. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+
+    <!-- PWA / standalone -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="TAS Studio" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#0b0e14" />
+    <meta name="description" content="A pure, cycle-accurate SNES Tool-Assisted Speedrun studio. Offline and standalone." />
+
+    <link rel="manifest" href="manifest.json" />
+    <link rel="apple-touch-icon" href="icons/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Graceful notices: 'ROM missing' / 'core missing' render here. -->
+      <div id="notice" role="status" aria-live="polite" hidden></div>
+
+      <!-- Video output + low-opacity touch controls overlay. -->
+      <section id="stage" aria-label="Emulator screen">
+        <canvas id="screen" width="256" height="224"></canvas>
+        <div id="touch-controls" aria-label="On-screen controls">
+          <!-- Shoulder buttons -->
+          <div class="touch-cluster shoulders">
+            <button type="button" class="touch-btn shoulder" data-btn="L">L</button>
+            <button type="button" class="touch-btn shoulder" data-btn="R">R</button>
+          </div>
+          <!-- D-Pad -->
+          <div class="touch-cluster dpad">
+            <button type="button" class="touch-btn up" data-btn="UP" aria-label="Up">▲</button>
+            <button type="button" class="touch-btn left" data-btn="LEFT" aria-label="Left">◀</button>
+            <button type="button" class="touch-btn right" data-btn="RIGHT" aria-label="Right">▶</button>
+            <button type="button" class="touch-btn down" data-btn="DOWN" aria-label="Down">▼</button>
+          </div>
+          <!-- Start / Select -->
+          <div class="touch-cluster meta">
+            <button type="button" class="touch-btn meta-btn" data-btn="SELECT">Select</button>
+            <button type="button" class="touch-btn meta-btn" data-btn="START">Start</button>
+          </div>
+          <!-- Face buttons -->
+          <div class="touch-cluster buttons">
+            <button type="button" class="touch-btn" data-btn="Y">Y</button>
+            <button type="button" class="touch-btn" data-btn="X">X</button>
+            <button type="button" class="touch-btn" data-btn="B">B</button>
+            <button type="button" class="touch-btn" data-btn="A">A</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Side panel: Live HUD + save-state tree. -->
+      <aside id="side">
+        <div class="panel">
+          <h2 class="panel__title">Live HUD (read-only)</h2>
+          <div id="hud"></div>
+        </div>
+        <div class="panel">
+          <h2 class="panel__title">Save-State Tree</h2>
+          <div id="savestate-tree">
+            <div class="savestate-empty">No states yet.</div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Frame control toolbar + piano-roll timeline. -->
+      <div id="frame-controls">
+        <button type="button" id="btn-playpause" title="Play / Pause">▶ Play</button>
+        <button type="button" id="btn-frame-advance" title="Advance one frame">⏭ Frame +1</button>
+        <button type="button" id="btn-fast-forward" title="Fast-forward">⏩ FF</button>
+        <button type="button" id="btn-savestate" title="Save state">💾 Save</button>
+        <button type="button" id="btn-loadstate" title="Load state">📂 Load</button>
+        <div class="speed-group">
+          <label for="speed">Speed</label>
+          <input type="range" id="speed" min="0.1" max="2" step="0.1" value="1" />
+          <span id="speed-value">1.0x</span>
+        </div>
+        <span id="frame-counter" class="speed-group">Frame: 0</span>
+      </div>
+
+      <!-- Piano-roll timeline (populated in FEAT-002). -->
+      <div id="piano-roll" aria-label="Per-frame input timeline">
+        <div class="piano-roll__empty">Piano-roll input editor loads with the ROM.</div>
+      </div>
+    </div>
+
+    <!-- Engine + Studio UI + HUD as ES modules. Order does not matter for modules (deferred). -->
+    <script type="module" src="tas-engine.js"></script>
+    <script type="module" src="piano-roll.js"></script>
+    <script type="module" src="memory-watch.js"></script>
+
+    <!-- Bootstrap: register the service worker and start the engine. -->
+    <script type="module">
+      import engine from './tas-engine.js';
+
+      // Register the service worker for offline play (non-fatal if unsupported).
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('sw.js').catch((err) => {
+            console.warn('[bootstrap] service worker registration failed:', err);
+          });
+        });
+      }
+
+      // Wire the engine to the DOM and start it. init() never throws: on a missing ROM or
+      // core it renders a notice and leaves the UI usable in a disabled state.
+      window.addEventListener('DOMContentLoaded', () => {
+        const canvas = document.getElementById('screen');
+        const noticeEl = document.getElementById('notice');
+        engine.attach({ canvas, noticeEl });
+
+        // Frame counter readout. The full toolbar wiring (play/pause, frame advance,
+        // speed slider, fast-forward, save/load) lives in piano-roll.js (TASStudio).
+        const frameCounter = document.getElementById('frame-counter');
+        engine.onFrame((frame) => {
+          if (frameCounter) frameCounter.textContent = `Frame: ${frame}`;
+        });
+
+        // Auto-boot. No user action required; degrades gracefully.
+        engine.init().catch((err) => {
+          console.warn('[bootstrap] engine init error (handled):', err);
+        });
+      });
+
+      // ------------------------------------------------------------------
+      // iOS Safari bounce / pinch-zoom gesture suppression.
+      //
+      // 1) gesturestart/gesturechange/gestureend are Safari-only pinch-zoom gestures;
+      //    preventDefault stops page zoom entirely.
+      // 2) Multi-touch touchmove (2+ fingers) is a pinch: preventDefault it UNLESS the
+      //    touch is inside the piano-roll container, which must keep scrolling.
+      // 3) Double-tap-to-zoom is handled by the viewport meta (maximum-scale=1,
+      //    user-scalable=no) plus touch-action CSS.
+      // ------------------------------------------------------------------
+      const suppressGesture = (e) => e.preventDefault();
+      document.addEventListener('gesturestart', suppressGesture, { passive: false });
+      document.addEventListener('gesturechange', suppressGesture, { passive: false });
+      document.addEventListener('gestureend', suppressGesture, { passive: false });
+
+      const pianoRollEl = document.getElementById('piano-roll');
+      document.addEventListener(
+        'touchmove',
+        (e) => {
+          // Legacy WebKit reports a non-unit scale during a pinch.
+          if (e.scale && e.scale !== 1) {
+            e.preventDefault();
+            return;
+          }
+          // Multi-finger move = pinch/zoom. Allow it only inside the scrollable piano roll
+          // so single-finger scrolling of the timeline still works everywhere else.
+          if (e.touches && e.touches.length > 1) {
+            const target = e.target;
+            const insidePianoRoll =
+              pianoRollEl && target && typeof target.closest === 'function'
+                ? pianoRollEl.contains(target)
+                : false;
+            if (!insidePianoRoll) e.preventDefault();
+          }
+        },
+        { passive: false }
+      );
+    </script>
+  </body>
+</html>

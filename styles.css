@@ -1,0 +1,409 @@
+/* styles.css — SNES TAS Studio UI + low-opacity touch controls.
+   Dark, dense, studio-style layout. Gesture lockdown via touch-action/overscroll. */
+
+:root {
+  --bg: #0b0e14;
+  --panel: #131824;
+  --panel-2: #1b2130;
+  --border: #2a3346;
+  --text: #d7deea;
+  --muted: #8a94a6;
+  --accent: #4fd1c5;
+  --warn: #f6c453;
+  --error: #f56565;
+  --cell-on: #4fd1c5;
+  --cell-off: #232a3a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  /* Disable iOS Safari bounce/overscroll + pinch gestures. `position: fixed` + `overflow:
+     hidden` on a full-size root stops the whole-page rubber-band scroll; `touch-action:
+     none` disables browser-native pan/zoom so only our own handlers act. Scrollable
+     regions (the piano roll) re-enable touch-action locally. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  overscroll-behavior: none;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  overflow: hidden;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  grid-template-rows: auto 1fr auto auto;
+  grid-template-areas:
+    "notice notice"
+    "stage  side"
+    "controls controls"
+    "pianoroll pianoroll";
+  gap: 8px;
+  height: 100vh;
+  height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* Notice banner */
+#notice {
+  grid-area: notice;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+}
+.notice {
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+}
+.notice--warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.notice--error {
+  border-color: var(--error);
+  color: var(--error);
+}
+.notice--info {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Stage: canvas + touch overlay */
+#stage {
+  grid-area: stage;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 0;
+}
+#screen {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: 100%;
+  background: #000;
+}
+
+/* Low-opacity on-screen touch controls (minimal, unobtrusive fallback per spec).
+   The overlay itself never intercepts pointers (pointer-events:none); only the individual
+   buttons do, so the emulator screen underneath stays visible/clean. */
+#touch-controls {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.22;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "shoulders shoulders shoulders"
+    ".         .         .        "
+    "dpad      meta       buttons ";
+  padding: 14px;
+  gap: 8px;
+}
+#touch-controls .touch-cluster {
+  pointer-events: auto;
+  display: grid;
+  gap: 6px;
+  align-self: end;
+}
+#touch-controls .shoulders {
+  grid-area: shoulders;
+  grid-auto-flow: column;
+  justify-content: space-between;
+  align-self: start;
+}
+#touch-controls .dpad {
+  grid-area: dpad;
+  grid-template-columns: repeat(3, 42px);
+  grid-template-rows: repeat(3, 42px);
+}
+#touch-controls .buttons {
+  grid-area: buttons;
+  grid-template-columns: repeat(2, 48px);
+  grid-template-rows: repeat(2, 48px);
+}
+#touch-controls .meta {
+  grid-area: meta;
+  grid-auto-flow: column;
+  justify-content: center;
+  gap: 10px;
+}
+.touch-btn {
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  border-radius: 8px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Buttons must not pan/zoom the page on touch. */
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.touch-btn.shoulder {
+  width: 64px;
+  height: 32px;
+}
+.touch-btn.meta-btn {
+  width: 62px;
+  height: 28px;
+  font-size: 12px;
+}
+/* Active state for both :active (native) and .touch-btn--held (JS-driven live input). */
+.touch-btn:active,
+.touch-btn.touch-btn--held {
+  background: var(--accent);
+  color: #04211f;
+  border-color: var(--accent);
+}
+.dpad .up { grid-column: 2; grid-row: 1; }
+.dpad .left { grid-column: 1; grid-row: 2; }
+.dpad .right { grid-column: 3; grid-row: 2; }
+.dpad .down { grid-column: 2; grid-row: 3; }
+
+/* Side panel: HUD + save-state tree */
+#side {
+  grid-area: side;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+}
+.panel__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+
+/* HUD */
+#hud .hud__row {
+  display: flex;
+  justify-content: space-between;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.hud__label { color: var(--muted); }
+/* Emulation-dependent rows whose WRAM address map is not yet verified against a real
+   ROM are tagged "(unverified)" and dimmed/italicized so their values are never trusted
+   as confirmed. */
+.hud__label--unverified { font-style: italic; opacity: 0.75; }
+.hud__value { color: var(--accent); font-weight: 600; }
+
+/* Save-state tree */
+#savestate-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#savestate-tree .savestate-empty {
+  color: var(--muted);
+  font-size: 12px;
+}
+.savestate-node {
+  text-align: left;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.savestate-node:hover { border-color: var(--accent); }
+.savestate-node--active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Frame controls toolbar */
+#frame-controls {
+  grid-area: controls;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+#frame-controls button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+#frame-controls button:hover { border-color: var(--accent); }
+#frame-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+#frame-controls button.is-active {
+  background: var(--accent);
+  color: #04211f;
+  border-color: var(--accent);
+}
+#frame-controls .speed-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+#frame-controls input[type="range"] { width: 160px; }
+
+/* Piano roll */
+#piano-roll {
+  grid-area: pianoroll;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0;
+  overflow: auto;
+  max-height: 34vh;
+  /* The root sets touch-action:none to kill iOS zoom; re-enable panning HERE so the
+     timeline still scrolls by touch. -webkit-overflow-scrolling gives momentum on iOS. */
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+/* Side panel is also scrollable, so allow touch panning within it too. */
+#side {
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.piano-roll__empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px;
+}
+
+.pr-table {
+  display: table;
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+.pr-row {
+  display: flex;
+}
+/* Sticky header row so column labels stay visible while scrolling frames. */
+.pr-row--header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-2);
+}
+.pr-cell {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+/* Fixed-width frame-index column (sticky to the left edge). */
+.pr-cell--frame {
+  width: 54px;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.pr-cell--head {
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pr-cell--btn {
+  background: var(--cell-off);
+  border-top: none;
+  border-left: none;
+  cursor: pointer;
+  padding: 0;
+}
+.pr-cell--btn:hover {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+/* Toggled-cell highlight. */
+.pr-cell--btn.pr-cell--on {
+  background: var(--cell-on);
+  color: #04211f;
+}
+.pr-cell--btn.pr-cell--on::after {
+  content: "●";
+  font-size: 9px;
+}
+/* Current-frame row highlight. */
+.pr-row--current .pr-cell {
+  box-shadow: inset 0 0 0 9999px rgba(79, 209, 197, 0.12);
+}
+.pr-row--current .pr-cell--frame {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Landscape / small screens */
+@media (max-width: 720px) {
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "notice"
+      "stage"
+      "side"
+      "controls"
+      "pianoroll";
+  }
+  #side { max-height: 30vh; }
+}

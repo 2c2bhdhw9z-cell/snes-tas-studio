@@ -1,0 +1,20 @@
+{
+  "name": "tas-studio-tools",
+  "private": true,
+  "description": "Dev-only tooling for the SNES TAS Studio: icon generation and headless smoke tests. Not shipped with the app.",
+  "scripts": {
+    "icons": "node make-icons.js",
+    "test:dom": "node dom-smoke.test.js",
+    "test:engine": "node engine-smoke.mjs",
+    "test:runloop": "node runloop.test.mjs",
+    "test:env": "node env-callback.test.mjs",
+    "test:studio": "node studio-dom.test.mjs",
+    "test:mobile": "node mobile-smoke.test.mjs",
+    "test:inputlog": "node inputlog-truncate.test.mjs",
+    "test:precache": "node precache-check.mjs",
+    "test": "node inputlog-truncate.test.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node engine-smoke.mjs && node runloop.test.mjs && node env-callback.test.mjs && node precache-check.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

@@ -1,0 +1,16 @@
+# ROM files (copyrighted, supplied by the user at deploy time — NEVER commit)
+assets/*.sfc
+assets/*.smc
+assets/*.zip
+
+# Compiled WASM libretro core + its Emscripten JS loader (built/dropped at deploy time — NEVER commit)
+cores/*.wasm
+cores/*.js
+cores/*.data
+cores/*.mem
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+node_modules/
