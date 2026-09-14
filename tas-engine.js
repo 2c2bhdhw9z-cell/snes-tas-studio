@@ -94,6 +94,15 @@ class TASEngine {
     this.corePath = null;
     this.status = 'idle'; // idle | loading | ready | running | disabled | error
 
+    // Fine-grained diagnostic status for the on-screen debug banner (app.js reads these
+    // and/or subscribes via onStatus). These are STATUS/error strings only — they never
+    // add any emulation capability. tas-engine never touches the banner DOM itself.
+    //   coreStatus: 'Idle' | 'Loading' | 'Instantiated' | 'Failed'
+    //   romStatus:  'Idle' | 'Fetching' | 'HTTP <code>' | 'Loaded <N> bytes' | 'Error <msg>'
+    this.coreStatus = 'Idle';
+    this.romStatus = 'Idle';
+    this.romBytes = 0; // byte length of the successfully fetched ROM (0 until loaded)
+
     // Libretro wrapped functions (populated in _wrapCore).
     this._fn = {};
 
@@ -136,6 +145,7 @@ class TASEngine {
     // Callbacks / providers.
     this._onFrameCbs = [];
     this._onStateLoadedCbs = [];
+    this._onStatusCbs = []; // subscribers for the diagnostic banner (app.js)
     this._inputProvider = null; // (frame, port, device, index, id) => whole-joypad bitmask
 
     // Notice banner element (set via attach()).
@@ -186,6 +196,57 @@ class TASEngine {
     }
   }
 
+  // ------------------------------------------------------------------ status surface
+
+  /**
+   * Subscribe to diagnostic status updates for the on-screen debug banner. The callback
+   * receives a snapshot object { status, coreStatus, romStatus, romBytes }. Fires
+   * immediately with the current snapshot so late subscribers render at once. This is a
+   * READ-ONLY status channel — it exposes no emulation/memory/cheat capability.
+   * @param {(snap:{status:string,coreStatus:string,romStatus:string,romBytes:number})=>void} cb
+   */
+  onStatus(cb) {
+    if (typeof cb === 'function') {
+      this._onStatusCbs.push(cb);
+      try {
+        cb(this.statusSnapshot());
+      } catch (err) {
+        console.warn('[TASEngine] onStatus callback error', err);
+      }
+    }
+    return this;
+  }
+
+  /** Current diagnostic snapshot for the banner. */
+  statusSnapshot() {
+    return {
+      status: this.status,
+      coreStatus: this.coreStatus,
+      romStatus: this.romStatus,
+      romBytes: this.romBytes,
+    };
+  }
+
+  /**
+   * Update one or more diagnostic status fields and notify banner subscribers. Accepts a
+   * partial patch like { coreStatus:'Loading' } or { romStatus:'Loaded 12345 bytes' }.
+   */
+  _setStatus(patch) {
+    if (patch && typeof patch === 'object') {
+      if ('coreStatus' in patch) this.coreStatus = patch.coreStatus;
+      if ('romStatus' in patch) this.romStatus = patch.romStatus;
+      if ('romBytes' in patch) this.romBytes = patch.romBytes;
+    }
+    const snap = this.statusSnapshot();
+    for (const cb of this._onStatusCbs) {
+      try {
+        cb(snap);
+      } catch (err) {
+        console.warn('[TASEngine] onStatus callback error', err);
+      }
+    }
+  }
+
   // ------------------------------------------------------------------ init / boot
 
   /**
@@ -196,6 +257,7 @@ class TASEngine {
   async init(opts = {}) {
     this.status = 'loading';
     this.clearNotices();
+    this._setStatus({ coreStatus: 'Loading', romStatus: 'Idle', romBytes: 0 });
 
     // 1) Load the WASM libretro core (graceful failure).
     let coreResult;
@@ -205,10 +267,12 @@ class TASEngine {
       coreResult = { ok: false, reason: 'core-missing', detail: String(err) };
     }
 
-    // 2) Fetch the ROM (graceful failure; NEVER a file picker).
+    const coreOk = coreResult && coreResult.ok;
+    this._setStatus({ coreStatus: coreOk ? 'Instantiated' : 'Failed' });
+
+    // 2) Fetch the ROM (graceful failure; NEVER a file picker). _fetchRom drives romStatus.
     const romResult = await this._fetchRom();
 
-    const coreOk = coreResult && coreResult.ok;
     const romOk = romResult && romResult.ok;
 
     if (!coreOk) {
@@ -227,6 +291,7 @@ class TASEngine {
     if (!coreOk || !romOk) {
       // UI stays usable in a disabled state.
       this.status = 'disabled';
+      this._setStatus({});
       this._emitFrame(); // let listeners render an initial (empty) state
       return { ok: false, coreOk, romOk };
     }
@@ -244,32 +309,71 @@ class TASEngine {
       if (!loaded) {
         this.showNotice('The core refused to load the ROM (retro_load_game returned false).', 'error');
         this.status = 'error';
+        this._setStatus({});
         return { ok: false, coreOk: true, romOk: true };
       }
       this._captureMemoryRegion();
       this._captureAvInfo();
       this.status = 'ready';
       this.clearNotices();
+      this._setStatus({});
       // Auto-boot: start the run loop immediately, no user action required.
       this.play();
       return { ok: true, coreOk: true, romOk: true };
     } catch (err) {
       this.showNotice(`Failed to start emulation: ${err && err.message ? err.message : err}`, 'error');
       this.status = 'error';
+      this._setStatus({});
       return { ok: false, coreOk, romOk, error: String(err) };
     }
   }
 
+  /**
+   * Fetch the ROM from ROM_PATH. The path contains spaces and parentheses
+   * ('assets/Super Mario All-Stars (USA).sfc'), so we wrap it in encodeURI() at fetch time
+   * to avoid Safari HTTP 400/404 errors from unescaped spaces. ROM_PATH itself stays
+   * human-readable; only the request URL is encoded. Both the fetch and the arrayBuffer()
+   * conversion are wrapped in explicit try/catch so any failure surfaces a precise status
+   * to BOTH the notice banner and the diagnostic banner instead of silently halting.
+   * Never throws.
+   */
   async _fetchRom() {
+    // encodeURI leaves parentheses as-is (fine for HTTP) and escapes the spaces (the main
+    // culprit): 'assets/Super%20Mario%20All-Stars%20(USA).sfc'.
+    const url = encodeURI(ROM_PATH);
+    this._setStatus({ romStatus: 'Fetching', romBytes: 0 });
+
+    let res;
     try {
-      const res = await fetch(ROM_PATH, { cache: 'no-store' });
-      if (!res.ok) return { ok: false, reason: 'rom-missing', status: res.status };
-      const buf = await res.arrayBuffer();
-      if (!buf || buf.byteLength === 0) return { ok: false, reason: 'rom-empty' };
-      return { ok: true, bytes: new Uint8Array(buf) };
-    } catch (_err) {
-      return { ok: false, reason: 'rom-missing' };
+      res = await fetch(url, { cache: 'no-store' });
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      this._setStatus({ romStatus: `Error ${msg}` });
+      return { ok: false, reason: 'rom-fetch-error', detail: msg };
     }
+
+    if (!res || !res.ok) {
+      const code = res ? res.status : 'no-response';
+      this._setStatus({ romStatus: `HTTP ${code}` });
+      return { ok: false, reason: 'rom-missing', status: res ? res.status : 0 };
+    }
+
+    let buf;
+    try {
+      buf = await res.arrayBuffer();
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      this._setStatus({ romStatus: `Error ${msg}` });
+      return { ok: false, reason: 'rom-read-error', detail: msg };
+    }
+
+    if (!buf || buf.byteLength === 0) {
+      this._setStatus({ romStatus: 'Error empty ROM (0 bytes)' });
+      return { ok: false, reason: 'rom-empty' };
+    }
+
+    this._setStatus({ romStatus: `Loaded ${buf.byteLength} bytes`, romBytes: buf.byteLength });
+    return { ok: true, bytes: new Uint8Array(buf) };
   }
 
   // ------------------------------------------------------------------ core wrapping

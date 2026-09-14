@@ -46,8 +46,9 @@ body {
 #app {
   display: grid;
   grid-template-columns: 1fr 300px;
-  grid-template-rows: auto 1fr auto auto;
+  grid-template-rows: auto auto 1fr auto auto;
   grid-template-areas:
+    "banner banner"
     "notice notice"
     "stage  side"
     "controls controls"
@@ -56,6 +57,37 @@ body {
   height: 100vh;
   height: 100dvh;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* Always-visible on-screen debug banner (populated by app.js). Sits at the very top and
+   respects the notch via a safe-area top pad so it is never hidden behind the status bar. */
+#debug-banner {
+  grid-area: banner;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  padding: 6px 12px;
+  /* Add the notch inset on top of #app's own inset so the banner clears the status bar. */
+  padding-top: calc(6px + env(safe-area-inset-top));
+  margin-top: calc(-1 * env(safe-area-inset-top));
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  word-break: break-word;
+}
+#debug-banner.debug-banner--error {
+  border-color: var(--error);
+}
+#debug-banner .debug-banner__item strong {
+  color: var(--text);
+}
+#debug-banner .debug-banner__item--err {
+  color: var(--error);
 }
 
 /* Notice banner */
@@ -269,6 +301,16 @@ body {
   border-radius: 8px;
   padding: 10px 12px;
 }
+/* The root sets touch-action:none to kill iOS zoom/bounce. #frame-controls is NOT part of
+   the #touch-controls overlay, so its buttons and slider MUST stay fully touch-operable:
+   re-enable tap/drag here. Buttons use `manipulation` (taps fire immediately, no 300ms
+   delay, no double-tap-zoom); the range slider needs `pan-x` so a horizontal thumb drag is
+   delivered to the input instead of being swallowed by the root's touch-action:none. The
+   global touchmove handler in app.js only preventDefaults MULTI-finger pinches, so
+   single-finger taps and slider drags on these controls are never intercepted. */
+#frame-controls {
+  touch-action: manipulation;
+}
 #frame-controls button {
   background: var(--panel-2);
   color: var(--text);
@@ -277,6 +319,10 @@ body {
   padding: 8px 12px;
   font-size: 13px;
   cursor: pointer;
+  touch-action: manipulation;
+}
+#frame-controls input[type="range"] {
+  touch-action: pan-x;
 }
 #frame-controls button:hover { border-color: var(--accent); }
 #frame-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -394,16 +440,89 @@ body {
   font-weight: 700;
 }
 
-/* Landscape / small screens */
-@media (max-width: 720px) {
+/* ------------------------------------------------------------------ responsive layout
+
+   The layout is driven by ORIENTATION (not just max-width) because iOS landscape phones can
+   be wide yet still want the 2-column split, while portrait tablets can be wide yet want the
+   stacked layout.
+
+   PORTRAIT (phones/tablets held upright): single column. The SNES canvas sits on top at
+   full width and its correct 8:7 (256x224) aspect ratio; the HUD/save-state side panel,
+   frame controls, and piano roll stack and scroll underneath.
+
+   LANDSCAPE: 2-column split. The canvas fills the left column (scaling to the available
+   height while preserving 8:7); the side panel, frame controls, and piano roll occupy the
+   right column and scroll there. The canvas is never overlapped or crushed into a corner. */
+
+/* PORTRAIT — stacked, canvas on top full width. */
+@media (orientation: portrait) {
   #app {
     grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto auto auto;
     grid-template-areas:
+      "banner"
       "notice"
       "stage"
       "side"
       "controls"
       "pianoroll";
   }
-  #side { max-height: 30vh; }
+  /* Canvas full width, height derived from the 8:7 aspect so it never overflows. */
+  #stage {
+    width: 100%;
+    aspect-ratio: 8 / 7;
+    min-height: 0;
+  }
+  #screen {
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+  }
+  #side {
+    max-height: 30vh;
+  }
+  #piano-roll {
+    max-height: 40vh;
+  }
+}
+
+/* LANDSCAPE — 2-column: canvas left, controls/piano roll right. */
+@media (orientation: landscape) {
+  #app {
+    grid-template-columns: 1fr minmax(280px, 360px);
+    grid-template-rows: auto auto 1fr auto;
+    grid-template-areas:
+      "banner   banner"
+      "notice   notice"
+      "stage    side"
+      "controls pianoroll";
+  }
+  /* The stage fills the left column and full height; the canvas scales to the stage while
+     keeping its 8:7 aspect (height:100% + width:auto via the base #screen rule) so it never
+     shrinks into a corner and never overlaps the right column. */
+  #stage {
+    min-height: 0;
+    height: 100%;
+  }
+  /* Right-column regions each get their own scroll area so nothing pushes the canvas. */
+  #side {
+    max-height: none;
+    grid-area: side;
+  }
+  #piano-roll {
+    grid-area: pianoroll;
+    max-height: none;
+    height: 100%;
+  }
+  #frame-controls {
+    grid-area: controls;
+  }
+}
+
+/* Very narrow landscape (small phones on their side): keep the split but let the right
+   column shrink a little so the canvas keeps usable width. */
+@media (orientation: landscape) and (max-height: 420px) {
+  #app {
+    grid-template-columns: 1fr minmax(240px, 300px);
+  }
 }

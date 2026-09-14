@@ -26,6 +26,15 @@
   </head>
   <body>
     <div id="app">
+      <!-- Always-visible on-screen debug banner: live WASM core status, ROM fetch status,
+           and uncaught JS/WASM errors (via window.onerror in app.js). Positioned at the very
+           top so mobile errors are visible without a desktop console. Populated by app.js. -->
+      <div id="debug-banner" role="status" aria-live="polite" aria-label="Diagnostics">
+        <span class="debug-banner__item"><strong>Core: </strong>Idle</span>
+        <span class="debug-banner__item"><strong>ROM: </strong>Idle</span>
+        <span class="debug-banner__item"><strong>Err: </strong>none</span>
+      </div>
+
       <!-- Graceful notices: 'ROM missing' / 'core missing' render here. -->
       <div id="notice" role="status" aria-live="polite" hidden></div>
 
@@ -100,76 +109,9 @@
     <script type="module" src="piano-roll.js"></script>
     <script type="module" src="memory-watch.js"></script>
 
-    <!-- Bootstrap: register the service worker and start the engine. -->
-    <script type="module">
-      import engine from './tas-engine.js';
-
-      // Register the service worker for offline play (non-fatal if unsupported).
-      if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('sw.js').catch((err) => {
-            console.warn('[bootstrap] service worker registration failed:', err);
-          });
-        });
-      }
-
-      // Wire the engine to the DOM and start it. init() never throws: on a missing ROM or
-      // core it renders a notice and leaves the UI usable in a disabled state.
-      window.addEventListener('DOMContentLoaded', () => {
-        const canvas = document.getElementById('screen');
-        const noticeEl = document.getElementById('notice');
-        engine.attach({ canvas, noticeEl });
-
-        // Frame counter readout. The full toolbar wiring (play/pause, frame advance,
-        // speed slider, fast-forward, save/load) lives in piano-roll.js (TASStudio).
-        const frameCounter = document.getElementById('frame-counter');
-        engine.onFrame((frame) => {
-          if (frameCounter) frameCounter.textContent = `Frame: ${frame}`;
-        });
-
-        // Auto-boot. No user action required; degrades gracefully.
-        engine.init().catch((err) => {
-          console.warn('[bootstrap] engine init error (handled):', err);
-        });
-      });
-
-      // ------------------------------------------------------------------
-      // iOS Safari bounce / pinch-zoom gesture suppression.
-      //
-      // 1) gesturestart/gesturechange/gestureend are Safari-only pinch-zoom gestures;
-      //    preventDefault stops page zoom entirely.
-      // 2) Multi-touch touchmove (2+ fingers) is a pinch: preventDefault it UNLESS the
-      //    touch is inside the piano-roll container, which must keep scrolling.
-      // 3) Double-tap-to-zoom is handled by the viewport meta (maximum-scale=1,
-      //    user-scalable=no) plus touch-action CSS.
-      // ------------------------------------------------------------------
-      const suppressGesture = (e) => e.preventDefault();
-      document.addEventListener('gesturestart', suppressGesture, { passive: false });
-      document.addEventListener('gesturechange', suppressGesture, { passive: false });
-      document.addEventListener('gestureend', suppressGesture, { passive: false });
-
-      const pianoRollEl = document.getElementById('piano-roll');
-      document.addEventListener(
-        'touchmove',
-        (e) => {
-          // Legacy WebKit reports a non-unit scale during a pinch.
-          if (e.scale && e.scale !== 1) {
-            e.preventDefault();
-            return;
-          }
-          // Multi-finger move = pinch/zoom. Allow it only inside the scrollable piano roll
-          // so single-finger scrolling of the timeline still works everywhere else.
-          if (e.touches && e.touches.length > 1) {
-            const target = e.target;
-            const insidePianoRoll =
-              pianoRollEl && target && typeof target.closest === 'function'
-                ? pianoRollEl.contains(target)
-                : false;
-            if (!insidePianoRoll) e.preventDefault();
-          }
-        },
-        { passive: false }
-      );
-    </script>
+    <!-- App-level bootstrap: service worker registration, engine attach/init wiring, iOS
+         gesture suppression, and the on-screen debug banner. Moved out of an inline script
+         into app.js so it can be unit-tested and precached. -->
+    <script type="module" src="app.js"></script>
   </body>
 </html>

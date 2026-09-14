@@ -76,8 +76,9 @@ frame-advance, state serialize/deserialize, and raw read-only memory peek direct
 
 | File | Role |
 | --- | --- |
-| `index.html` | App shell: iOS/standalone/no-bounce meta tags, canvas, HUD, piano-roll, frame controls, save-state tree, touch controls, notice banner, bootstrap. |
-| `tas-engine.js` | libretro frontend + core glue: loads the WASM core, loads the ROM, run loop (pause/speed 0.1x-2x/fast-forward), frame advance, save/load state with re-record hook, per-frame input feed, framebuffer blit, read-only memory view. Exposed as `window.TASEngine`. |
+| `index.html` | App shell: iOS/standalone/no-bounce meta tags, canvas, HUD, piano-roll, frame controls, save-state tree, touch controls, notice banner, on-screen debug banner. Loads `app.js` as the bootstrap module. |
+| `app.js` | App-level bootstrap/orchestration: service-worker registration, engine attach/init wiring, iOS bounce/pinch gesture suppression, and the always-visible on-screen debug banner (WASM core status, ROM fetch status, and a `window.onerror`/`unhandledrejection` listener that prints uncaught JS/WASM errors on screen). Status/errors only — adds no emulation, memory-write, cheat, or level-select capability. |
+| `tas-engine.js` | libretro frontend + core glue: loads the WASM core, loads the ROM (via `encodeURI` at fetch time, with explicit try/catch surfacing precise status), run loop (pause/speed 0.1x-2x/fast-forward), frame advance, save/load state with re-record hook, per-frame input feed, framebuffer blit, read-only memory view. Exposes a diagnostic `onStatus`/`statusSnapshot` surface for the debug banner. Exposed as `window.TASEngine`. |
 | `piano-roll.js` | The TAS Studio UI (`TASStudio`): piano-roll input editor, frame-control toolbar, save-state tree with re-record truncation. Owns the shared `InputLog` and the `LiveInput`. |
 | `input-log.js` | Pure, DOM-free per-frame input log (`InputLog`): a libretro joypad bitmask per frame, plus the `truncateAfter` re-record primitive. Unit-testable in Node. |
 | `live-input.js` | Real-time controller input (`LiveInput`): HTML5 Gamepad API polling + on-screen touch controls, merged (OR-ed) into the current frame's input. |

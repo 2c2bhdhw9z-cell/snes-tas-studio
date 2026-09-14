@@ -11,6 +11,7 @@ const need = [
   'index.html',
   'styles.css',
   'manifest.json',
+  'app.js',
   'tas-engine.js',
   'piano-roll.js',
   'input-log.js',

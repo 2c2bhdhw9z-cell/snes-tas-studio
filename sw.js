@@ -10,7 +10,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v4';
+const CACHE_VERSION = 'tas-studio-v5';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell — always precached. These are the files this feature ships.
@@ -19,6 +19,7 @@ const APP_SHELL = [
   'index.html',
   'styles.css',
   'manifest.json',
+  'app.js',
   'tas-engine.js',
   'piano-roll.js',
   'input-log.js',

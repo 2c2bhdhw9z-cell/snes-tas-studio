@@ -86,6 +86,25 @@ check('public API surface present', () => {
   }
 });
 
+// --- Diagnostic status surface for the on-screen debug banner (app.js) ---
+check('onStatus() is a function', () => assert.strictEqual(typeof engine.onStatus, 'function'));
+check('statusSnapshot() returns the diagnostic fields', () => {
+  const snap = engine.statusSnapshot();
+  for (const k of ['status', 'coreStatus', 'romStatus', 'romBytes']) {
+    assert.ok(k in snap, `missing snapshot field: ${k}`);
+  }
+});
+check('core status is Failed when core is absent', () =>
+  assert.strictEqual(engine.coreStatus, 'Failed'));
+check('ROM status surfaces the HTTP code on 404', () =>
+  assert.strictEqual(engine.romStatus, 'HTTP 404'));
+check('onStatus fires immediately with a snapshot', () => {
+  let got = null;
+  engine.onStatus((snap) => { got = snap; });
+  assert.ok(got && got.coreStatus === 'Failed' && got.romStatus === 'HTTP 404',
+    'snapshot: ' + JSON.stringify(got));
+});
+
 let failed = 0;
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : '  -> ' + r.err}`);

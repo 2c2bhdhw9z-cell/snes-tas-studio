@@ -82,11 +82,41 @@ check('viewport maximum-scale=1', /maximum-scale=1/.test(vp));
 check('viewport user-scalable=no', /user-scalable=no/.test(vp));
 check('viewport viewport-fit=cover', /viewport-fit=cover/.test(vp));
 
-// Gesture-suppression + gamepad code present in the shipped source.
-const indexSrc = html;
-check('gesturestart handler present', /addEventListener\(\s*['"]gesturestart['"]/.test(indexSrc));
-check('gesturechange handler present', /addEventListener\(\s*['"]gesturechange['"]/.test(indexSrc));
-check('multi-touch pinch guard present', /e\.touches\.length\s*>\s*1/.test(indexSrc));
+// Gesture-suppression + bootstrap code now live in app.js (moved out of index.html's inline
+// script). Assert they exist there and that index.html loads app.js as a module.
+const appSrc = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
+check('index.html loads app.js as a module', /<script\s+type="module"\s+src="app\.js"><\/script>/.test(html));
+check('gesturestart handler present (app.js)', /addEventListener\(\s*['"]gesturestart['"]/.test(appSrc));
+check('gesturechange handler present (app.js)', /addEventListener\(\s*['"]gesturechange['"]/.test(appSrc));
+check('gestureend handler present (app.js)', /addEventListener\(\s*['"]gestureend['"]/.test(appSrc));
+check('multi-touch pinch guard present (app.js)', /e\.touches\.length\s*>\s*1/.test(appSrc));
+
+// app.js wires the equivalent of the old inline bootstrap: SW registration, engine
+// attach/init, and the debug banner + window.onerror.
+check('app.js registers the service worker', /serviceWorker\.register\(\s*['"]sw\.js['"]\)/.test(appSrc));
+check('app.js attaches the engine', /engine\.attach\(/.test(appSrc));
+check('app.js calls engine.init()', /engine\.init\(/.test(appSrc));
+check('app.js subscribes to engine status', /engine\.onStatus\(/.test(appSrc));
+check("app.js listens for uncaught errors (window.onerror)", /addEventListener\(\s*['"]error['"]/.test(appSrc));
+check('app.js listens for unhandledrejection', /addEventListener\(\s*['"]unhandledrejection['"]/.test(appSrc));
+
+// On-screen debug banner element + styling.
+check('#debug-banner element exists', document.getElementById('debug-banner'));
+check('#debug-banner styled to respect the notch (safe-area-inset-top)', /#debug-banner\s*\{[^}]*safe-area-inset-top/s.test(css));
+
+// ROM fetch uses encodeURI (item 2) so Safari does not 400/404 on spaces/parens.
+const engineSrc = fs.readFileSync(path.join(ROOT, 'tas-engine.js'), 'utf8');
+check('ROM fetch uses encodeURI', /encodeURI\(\s*ROM_PATH\s*\)/.test(engineSrc));
+check('ROM fetch + arrayBuffer wrapped in try/catch', /await res\.arrayBuffer\(\)/.test(engineSrc) && /catch/.test(engineSrc));
+
+// #frame-controls stays touch-operable (not part of the touch-controls overlay).
+check('#frame-controls buttons use touch-action:manipulation', /#frame-controls button\s*\{[^}]*touch-action:\s*manipulation/s.test(css));
+check('#frame-controls speed slider uses touch-action:pan-x', /#frame-controls input\[type="range"\]\s*\{[^}]*touch-action:\s*pan-x/s.test(css));
+
+// Orientation-based layout (item 4).
+check('CSS has orientation:portrait rules', /@media\s*\(orientation:\s*portrait\)/.test(css));
+check('CSS has orientation:landscape rules', /@media\s*\(orientation:\s*landscape\)/.test(css));
+
 const liveSrc = fs.readFileSync(path.join(ROOT, 'live-input.js'), 'utf8');
 check('gamepad polling (getGamepads) present', /navigator\.getGamepads/.test(liveSrc));
 check('gamepadconnected handled', /gamepadconnected/.test(liveSrc));
