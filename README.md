@@ -22,13 +22,43 @@ tradeoff:
 - **True cycle accuracy needs a bsnes / higan-derived core.** The accuracy profile of
   bsnes (and its libretro descendants) emulates the SNES at the cycle level.
 
-**What this project targets:** a **libretro accuracy core compiled to WebAssembly**, in
-priority order:
+**What this project ships:** a **bsnes-mercury accuracy** libretro core compiled to
+WebAssembly. This is the bsnes/higan-derived accuracy core that earns the "cycle-accurate"
+label. snes9x was explicitly **rejected** (compatibility-focused, not cycle-accurate).
 
-1. **`bsnes-mercury-accuracy`** (preferred) — a bsnes/higan-derived accuracy core. This is
-   the one that earns the "cycle-accurate" label.
-2. **`snes9x`** (fallback) — faster, broadly compatible, but *not* cycle-accurate. Provided
-   only so the studio is usable if the accuracy core cannot be built for a target.
+## Bundled core: from-source bsnes-mercury accuracy (cycle-accurate)
+
+A genuine **raw-libretro `bsnes-mercury` accuracy core**, **built from source** and compiled
+to WebAssembly with Emscripten, is now **bundled and committed** under `cores/`
+(`snes9x_libretro.js` + `snes9x_libretro.wasm`, plus `core.json`, `build.json`,
+`license.txt`). It is cycle-accurate — that is exactly why bsnes was chosen over snes9x.
+
+- **Source:** [`libretro/bsnes-mercury`](https://github.com/libretro/bsnes-mercury) @
+  commit `79d7f9d`, `PROFILE=accuracy`.
+- **Toolchain:** Emscripten (emsdk) **6.0.9**.
+- **Filenames:** the output keeps the historical `snes9x_libretro.*` names so the loader,
+  service worker and probe reference one consistent pair of paths. **The core inside is
+  bsnes-mercury accuracy, not snes9x** — see `cores/core.json` / `cores/build.json`.
+- **License:** bsnes-mercury is **GPLv3** (`cores/license.txt`); the app as shipped is
+  therefore subject to GPLv3.
+
+**It IS drivable by our thin frontend.** The core exports the raw `retro_*` C ABI and was
+linked with `-sALLOW_TABLE_GROWTH`, so `Module.addFunction` is available to register the
+libretro environment/video/audio/input callbacks. `tas-engine.js` (a raw-libretro frontend
+that `cwrap`s the `retro_*` exports) can drive it directly. Verified by the Node harness
+`tools/core-probe.mjs`, which instantiates the actual core and reports:
+
+```
+raw retro_* ABI exports present : 17/17
+Module.addFunction available    : yes
+```
+
+**Accuracy tradeoff (honest note):** the accuracy profile is larger (~1.5 MB WASM) and
+slower than a performance core. That is the correct tradeoff for a TAS studio, where
+frame-precise, hardware-faithful behavior matters more than raw speed.
+
+**Rebuilding the core** is documented in `cores/README.md` (emsdk install, bsnes-mercury
+clone, the Makefile emscripten-block edit, and the full Emscripten link flag set).
 
 **Why libretro specifically?** The libretro ABI exposes exactly the three primitives a TAS
 studio needs, which is why the whole engine is a thin libretro frontend:
@@ -57,7 +87,7 @@ frame-advance, state serialize/deserialize, and raw read-only memory peek direct
 | `manifest.json` | PWA manifest: standalone, landscape, dark theme, icons. |
 | `styles.css` | Studio UI + low-opacity on-screen touch controls. |
 | `icons/` | PWA icons (placeholder solids; regenerate with `tools/make-icons.js`). |
-| `cores/` | **Runtime drop location** for the compiled WASM core. Not committed. |
+| `cores/` | Bundled from-source **bsnes-mercury accuracy** WASM core (`snes9x_libretro.js` + `.wasm`, `core.json`, `build.json`, GPLv3 `license.txt`) — **committed** and deployed. Cycle-accurate and drivable by our raw-libretro frontend (probe: 17/17 `retro_*` + `addFunction`). Filenames are historical; the core is bsnes, not snes9x. |
 | `assets/` | **Runtime drop location** for the ROM. Not committed. |
 
 ### Verified libretro ABI hooks (from `libretro.h`)
@@ -83,50 +113,40 @@ assets/Super Mario All-Stars (USA).sfc
 If it is missing, the app shows a graceful "ROM not found" notice and stays usable — it
 never crashes and never falls back to a file chooser.
 
-## Building / obtaining the emulator core (at deploy time)
+## The emulator core (already built and committed)
 
-The compiled WASM core is a large, platform-specific binary that is **built/dropped at
-deploy time and never committed**. Preferred core: **bsnes-mercury-accuracy**
-(cycle-accurate); fallback: **snes9x** (faster, not cycle-accurate).
+Unlike the ROM, the compiled WASM core **is committed** to this repo (under `cores/`) so the
+app deploys with a working engine. It is a from-source **bsnes-mercury accuracy** core built
+with **Emscripten (emsdk 6.0.9)** from
+[`libretro/bsnes-mercury`](https://github.com/libretro/bsnes-mercury) @ `79d7f9d`.
 
-You build the libretro core to WebAssembly with **Emscripten (emsdk)**. Outline:
+To **rebuild** it yourself:
 
 ```sh
 # 1. Install and activate the Emscripten SDK.
 git clone https://github.com/emscripten-core/emsdk.git
 cd emsdk && ./emsdk install latest && ./emsdk activate latest
-source ./emsdk_env.sh
+source ./emsdk_env.sh && cd ..
 
 # 2. Build the accuracy core with the Emscripten toolchain.
-#    (bsnes-mercury exposes an emscripten platform target; snes9x builds via its libretro
-#     Makefile with emmake.)
+#    NOTE: the upstream emscripten platform block only emits an intermediate LLVM bitcode
+#    archive (.bc); it was edited to perform the full Emscripten link to .js + .wasm with
+#    the raw-libretro flags (ALLOW_TABLE_GROWTH, exported retro_* + runtime methods).
 git clone https://github.com/libretro/bsnes-mercury.git
 cd bsnes-mercury
-emmake make -f Makefile PROFILE=accuracy platform=emscripten
+emmake make platform=emscripten PROFILE=accuracy -j$(nproc)
 
-# 3. The build emits an Emscripten JS loader + a .wasm blob. Export the retro_* symbols and
-#    the runtime helpers the frontend uses (ccall/cwrap + HEAP access), e.g.:
-#      -s EXPORTED_FUNCTIONS='["_retro_init","_retro_load_game","_retro_run",
-#         "_retro_serialize_size","_retro_serialize","_retro_unserialize",
-#         "_retro_get_memory_data","_retro_get_memory_size", ...]'
-#      -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","HEAPU8","HEAPU16"]'
+# 3. Copy the two output files into cores/ under the historical snes9x_libretro.* names:
+cp bsnes_mercury_accuracy_libretro.js  ../<repo>/cores/snes9x_libretro.js
+cp bsnes_mercury_accuracy_libretro.wasm ../<repo>/cores/snes9x_libretro.wasm
 ```
 
-Then **drop the two output files into `cores/`** with the names the loader looks for
-(see `core/core-loader.js` — default list is
-`cores/bsnes_mercury_accuracy_libretro.js` + `.wasm`, then `cores/snes9x_libretro.js` +
-`.wasm`):
-
-```
-cores/bsnes_mercury_accuracy_libretro.js
-cores/bsnes_mercury_accuracy_libretro.wasm
-# or the snes9x fallback:
-cores/snes9x_libretro.js
-cores/snes9x_libretro.wasm
-```
+The full flag set and Makefile edit are documented in
+[`cores/README.md`](cores/README.md) and `cores/build.json`. The loader
+(`core/core-loader.js`) tries `cores/bsnes_mercury_accuracy_libretro.js` first, then
+`cores/snes9x_libretro.js` — the committed core uses the latter filename.
 
 If no core is present, the app shows a graceful "core not found" notice and stays usable.
-See [`cores/README.md`](cores/README.md) for more detail.
 
 ## Design guarantees (enforced in code)
 
@@ -200,8 +220,11 @@ piano-roll container re-enables touch panning so the timeline still scrolls.
 - On-screen touch controls render at low opacity; gamepad polling code + gesture-suppression
   handlers are present; no memory-write/cheat/level-select capability exists.
 - Offline: a second load with the network down still serves the cached shell.
+- The bundled **bsnes-mercury accuracy** WASM core instantiates and exposes the raw
+  libretro ABI our frontend needs: `node tools/core-probe.mjs` reports **17/17** `retro_*`
+  exports present and **`addFunction: yes`**, so `tas-engine.js` can drive it.
 
-**Requires the ROM + compiled WASM core (cannot be verified in this environment):**
+**Requires the ROM (the core is present; gameplay still needs a legally-owned ROM):**
 
 - Actual gameplay / video output.
 - Real save-state bytes via `retro_serialize` / `retro_unserialize`.
@@ -226,6 +249,9 @@ node studio-dom.test.mjs       # FEAT-002 studio UI (piano roll / toolbar / HUD)
 node inputlog-truncate.test.mjs # re-record truncation
 node mobile-smoke.test.mjs     # FEAT-003 gamepad + touch + gesture suppression
 node precache-check.mjs        # sw.js precaches the shell and excludes the ROM
+
+# From the repo root: verify the bundled WASM core exposes the raw libretro ABI
+node tools/core-probe.mjs      # expect 17/17 retro_* exports + addFunction: yes
 ```
 
 Full end-to-end emulation (real gameplay, real save states, real HUD values) can only be

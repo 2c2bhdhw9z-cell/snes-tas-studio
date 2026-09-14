@@ -3,11 +3,9 @@ assets/*.sfc
 assets/*.smc
 assets/*.zip
 
-# Compiled WASM libretro core + its Emscripten JS loader (built/dropped at deploy time — NEVER commit)
-cores/*.wasm
-cores/*.js
-cores/*.data
-cores/*.mem
+# NOTE: the from-source bsnes-mercury accuracy WASM core (cores/snes9x_libretro.js
+# + .wasm, plus core.json, build.json, license.txt) is bundled and TRACKED so it
+# deploys with the app shell to Netlify. It is not ignored here on purpose.
 
 # OS / editor cruft
 .DS_Store

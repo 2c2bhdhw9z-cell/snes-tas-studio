@@ -1,0 +1,10 @@
+{
+  "core": "bsnes-mercury",
+  "profile": "accuracy",
+  "source_repo": "https://github.com/libretro/bsnes-mercury",
+  "source_commit": "79d7f9de218b6ffa65a80bbdc5828532bc239232",
+  "emsdk_version": "6.0.9",
+  "target": "platform=emscripten PROFILE=accuracy",
+  "makefile_edits": "The upstream emscripten platform block only emitted an intermediate LLVM bitcode archive (.bc) with STATIC_LINKING=1. It was replaced to perform the full Emscripten link to snes9x_libretro.js + .wasm with CC=emcc/CXX=em++/LD=em++, STATIC_LINKING=0, and the raw-libretro flag set (ALLOW_TABLE_GROWTH, exported runtime methods incl. addFunction, exported retro_* functions). ERROR_ON_UNDEFINED_SYMBOLS=0 tolerates the core's unused socket/FS syscall references.",
+  "verified_with": "node tools/core-probe.mjs -> 17/17 raw libretro ABI exports present, Module.addFunction: yes"
+}

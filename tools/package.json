@@ -12,6 +12,7 @@
     "test:mobile": "node mobile-smoke.test.mjs",
     "test:inputlog": "node inputlog-truncate.test.mjs",
     "test:precache": "node precache-check.mjs",
+    "coreprobe": "node core-probe.mjs",
     "test": "node inputlog-truncate.test.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node engine-smoke.mjs && node runloop.test.mjs && node env-callback.test.mjs && node precache-check.mjs"
   },
   "devDependencies": {

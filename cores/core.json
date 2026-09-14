@@ -1,0 +1,35 @@
+{
+  "name": "bsnes-mercury (accuracy)",
+  "display_name": "bsnes-mercury accuracy (cycle-accurate SNES)",
+  "core": "bsnes-mercury",
+  "profile": "accuracy",
+  "cycle_accurate": true,
+  "abi": "raw libretro",
+  "extensions": ["smc", "sfc", "swc", "fig", "bs", "st"],
+  "save": "srm",
+  "license": "GPL-3.0-or-later",
+  "license_file": "license.txt",
+  "repo": "https://github.com/libretro/bsnes-mercury",
+  "source_commit": "79d7f9de218b6ffa65a80bbdc5828532bc239232",
+  "built_from_source": true,
+  "toolchain": "emscripten 6.0.9",
+  "output_files": {
+    "loader": "snes9x_libretro.js",
+    "wasm": "snes9x_libretro.wasm",
+    "note": "Historical snes9x_libretro.* filenames are kept so the loader, service worker and core-probe reference one consistent pair of paths. The core inside is bsnes-mercury accuracy, NOT snes9x."
+  },
+  "emscripten_flags": [
+    "-s WASM=1",
+    "-s ALLOW_TABLE_GROWTH=1",
+    "-s ALLOW_MEMORY_GROWTH=1",
+    "-s INITIAL_MEMORY=134217728",
+    "-s STACK_SIZE=8388608",
+    "-s MODULARIZE=1",
+    "-s EXPORT_NAME=snes9x_libretro",
+    "-s INVOKE_RUN=0",
+    "-s EXIT_RUNTIME=0",
+    "-s ERROR_ON_UNDEFINED_SYMBOLS=0",
+    "-s ENVIRONMENT=web,worker,node",
+    "single-threaded (no pthreads / no SharedArrayBuffer)"
+  ]
+}

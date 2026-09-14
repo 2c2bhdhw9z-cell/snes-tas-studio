@@ -100,6 +100,13 @@ async function resolveModuleFactory(url) {
     'createModule',
     'bsnes_mercury_accuracy_libretro',
     'snes9x_libretro',
+    // Legacy fallback name: some prebuilt EmulatorJS cores expose their factory as a UMD
+    // global `EJS_Runtime`. Harmless to keep in the guess list. The core actually bundled
+    // here is a from-source bsnes-mercury accuracy core built with MODULARIZE +
+    // EXPORT_NAME=snes9x_libretro, so it resolves via the ES-module/UMD default export or
+    // the `snes9x_libretro` global above — not this name. See cores/README.md and
+    // tools/core-probe.mjs (probe reports 17/17 retro_* + addFunction: yes).
+    'EJS_Runtime',
   ];
 
   const before = new Set(Object.keys(globalThis));
