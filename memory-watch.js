@@ -61,33 +61,87 @@
 // read-only display concern, never a write path) so the map can be re-based if needed.
 export const SMB_WRAM_BASE = 0x0000;
 
-// GLOBAL verified flag = true only when EVERY emulation-dependent field is empirically
-// confirmed. It now ships TRUE: H-Speed, X pixel/page/sub-pixel, and Y pixel/sub-pixel are ALL
-// proven by tools/hud-calibrate.mjs (velocity-integral carry-match for X + gravity parabola
-// for Y; that harness exits non-zero unless every field verifies). Per-field verification is
-// still tracked in SMB_FIELD_VERIFIED for the HUD's per-row display logic.
-export const CALIBRATION_VERIFIED = true;
+// ---------------------------- PER-CORE WRAM MAPS (empirical) -----------------------------
+//
+// IMPORTANT (empirically established): different libretro cores can expose
+// RETRO_MEMORY_SYSTEM_RAM with a different base / mirroring even when the reported size is
+// identical. tools/run-smoke.mjs shows BOTH bsnes-mercury and snes9x report a 131072-byte
+// SYSTEM_RAM region, yet the bsnes-verified SMB1 offsets do NOT read the same variables on
+// snes9x: tools/hud-crosscheck.mjs (run against cores/snes9x_libretro.js) shows the bsnes
+// $005D / $0042 / $0002 offsets fail every physics proof there (no velocity-integral carry
+// match, no gravity parabola). So the HUD keeps a PER-CORE map, selected by the engine's
+// active core id (engine.activeCoreId), and each core's map carries its own verification
+// state so the HUD never presents an unproven address as if it were confirmed.
+//
+//   * bsnes cores (accuracy + performance): the map below is EMPIRICALLY PROVEN by
+//     tools/hud-calibrate.mjs (velocity-integral carry-match for X, gravity parabola for Y,
+//     accel/friction/signed-reversal for speed). CALIBRATION_VERIFIED = true for them.
+//
+//   * snes9x (real-time core): the correct SMB1 offsets for snes9x's SYSTEM_RAM region are
+//     NOT YET empirically confirmed (the bsnes offsets are proven WRONG on it, and an
+//     automated derivation did not converge on a provable map in this pass). Rather than
+//     display fabricated/unverified values as if trustworthy — which would violate this
+//     project's read-only, observation-only, prove-every-address discipline — the snes9x map
+//     ships with verified=false. While a field is unverified the HUD renders it with an
+//     explicit "(unverified)" tag (see the render logic) instead of a confidently-wrong
+//     number. The frame counter (engine-sourced, not WRAM) is always correct on every core.
+//
+// The bsnes offset set (all proven by tools/hud-calibrate.mjs; see the header proofs):
+const BSNES_MAP = Object.freeze({
+  verified: true,
+  addr: Object.freeze({
+    PLAYER_X_SPEED: 0x005d, // signed horizontal speed (accel/friction/reversal proof)
+    PLAYER_X_POSITION: 0x0042, // on-screen X pixel (low byte)  — velocity-integral proof
+    PLAYER_PAGE_LOC: 0x0043, // horizontal page (high byte of X) — rollover proof
+    PLAYER_X_SUBPIXEL: 0x0401, // X sub-pixel (Player_X_MoveForce) — carry-match + idle-freeze
+    PLAYER_Y_POSITION: 0x0002, // on-screen Y pixel — gravity parabola proof
+    PLAYER_Y_SUBPIXEL: 0x041c, // Y sub-pixel (Player_Y_MoveForce) — constant-gravity parabola
+  }),
+});
 
-// Per-field empirical verification. All emulation-dependent fields are proven:
-//   speedX: $005D via accel / friction / signed reversal
-//   marioX: $0042 pixel + $0043 page + $0401 sub-pixel via velocity-integral carry match
-//   marioY: $0002 pixel + $041C sub-pixel via the constant-gravity jump parabola
-// Read-only display metadata only.
+// The snes9x offset set. Placeholder = the bsnes offsets (so the HUD reads a valid, in-range
+// WRAM location and never dereferences out of bounds), but flagged UNVERIFIED because those
+// offsets are proven not to track Mario on snes9x. When the snes9x SMB1 offsets are
+// empirically proven (tools/hud-crosscheck.mjs against cores/snes9x_libretro.js, all fields
+// VERIFIED), replace these values and set verified:true.
+const SNES9X_MAP = Object.freeze({
+  verified: false,
+  addr: BSNES_MAP.addr, // in-range placeholder; NOT proven to be Mario's vars on snes9x
+});
+
+// Per-core map registry, keyed by the catalog core id exposed via engine.activeCoreId.
+export const CORE_WRAM_MAPS = Object.freeze({
+  accuracy: BSNES_MAP,
+  performance: BSNES_MAP,
+  realtime: SNES9X_MAP, // snes9x — unverified until hud-crosscheck proves it
+});
+
+// The default map when the active core is unknown (e.g. before a core loads). We default to
+// the bsnes (verified) map since the HUD only reads once a core+ROM are present; the actual
+// map used at read time is always re-selected from engine.activeCoreId in update().
+const DEFAULT_MAP = BSNES_MAP;
+
+/** Resolve the WRAM map for a core id, falling back to the default map. */
+export function mapForCore(coreId) {
+  return (coreId && CORE_WRAM_MAPS[coreId]) || DEFAULT_MAP;
+}
+
+// GLOBAL verified flag — true only when EVERY core's map is empirically confirmed. Because the
+// snes9x map is not yet proven, this now ships FALSE (bsnes-only calibration is proven; the
+// added third core still needs its own proof). Per-core / per-field verification below drives
+// the HUD's per-row display, so bsnes rows still render clean while snes9x rows are tagged.
+export const CALIBRATION_VERIFIED = BSNES_MAP.verified && SNES9X_MAP.verified;
+
+// Legacy alias retained for callers/tests that referenced the flat bsnes offset table. It
+// mirrors the bsnes (proven) map. New code should use mapForCore(engine.activeCoreId).addr.
+export const SMB_ADDR = BSNES_MAP.addr;
+
+// Per-field empirical verification for the DEFAULT (bsnes) map, retained for back-compat.
+// The live HUD computes per-field verification per active core in update() via mapForCore().
 export const SMB_FIELD_VERIFIED = Object.freeze({
   speedX: true,
   marioX: true,
   marioY: true,
-});
-
-// WRAM addresses — all EMPIRICALLY MEASURED for SMB1 within Super Mario All-Stars (USA) by
-// tools/hud-calibrate.mjs (see the header for the proof of each). Observation-only constants.
-export const SMB_ADDR = Object.freeze({
-  PLAYER_X_SPEED: 0x005d, // signed horizontal speed (accel/friction/reversal proof)
-  PLAYER_X_POSITION: 0x0042, // on-screen X pixel (low byte)  — velocity-integral proof
-  PLAYER_PAGE_LOC: 0x0043, // horizontal page (high byte of X) — rollover proof
-  PLAYER_X_SUBPIXEL: 0x0401, // X sub-pixel (Player_X_MoveForce) — carry-match + idle-freeze
-  PLAYER_Y_POSITION: 0x0002, // on-screen Y pixel — gravity parabola proof
-  PLAYER_Y_SUBPIXEL: 0x041c, // Y sub-pixel (Player_Y_MoveForce) — constant-gravity parabola
 });
 
 /**
@@ -111,19 +165,32 @@ export function createMemoryWatch(engine, hudEl) {
     { key: 'speedX', label: 'H-Speed', emu: true },
   ];
 
-  // Suffix appended to any emulation-dependent label whose address is not empirically proven.
+  // Suffix appended to any emulation-dependent label whose address is not empirically proven
+  // FOR THE ACTIVE CORE. Because the map is per-core, this is recomputed whenever the active
+  // core changes (bsnes rows render clean; snes9x rows are tagged until its map is proven).
   const UNVERIFIED_TAG = ' (unverified)';
 
   const PLACEHOLDER = '--';
 
-  // A field is shown "unverified" when it depends on WRAM (emu) and its address has NOT been
-  // empirically confirmed (per-field flag). The frame counter is never marked unverified.
+  // Track the core id the current skeleton was rendered for, so we can re-render the labels
+  // (verified vs "(unverified)") when the user swaps cores from the dropdown.
+  let renderedCoreId = null;
+
+  function activeCoreId() {
+    return engine && typeof engine.activeCoreId === 'string' ? engine.activeCoreId : null;
+  }
+
+  // A field is shown "unverified" when it depends on WRAM (emu) and the ACTIVE CORE's map is
+  // not empirically confirmed. The frame counter (engine-sourced) is never marked unverified.
   function isUnverified(f) {
-    return !!f.emu && SMB_FIELD_VERIFIED[f.key] !== true;
+    if (!f.emu) return false;
+    const map = mapForCore(activeCoreId());
+    return map.verified !== true;
   }
 
   function renderSkeleton() {
     if (!hudEl) return;
+    renderedCoreId = activeCoreId();
     hudEl.innerHTML = '';
     for (const f of FIELDS) {
       const row = document.createElement('div');
@@ -161,6 +228,12 @@ export function createMemoryWatch(engine, hudEl) {
   function update() {
     if (!hudEl) return;
 
+    // If the active core changed (dropdown swap), re-render the skeleton so the labels'
+    // verified vs "(unverified)" tags track the newly-selected core's map.
+    if (activeCoreId() !== renderedCoreId) {
+      renderSkeleton();
+    }
+
     // The engine frame counter is always available and never a memory write.
     const frame = engine && typeof engine.currentFrame === 'number' ? engine.currentFrame : 0;
     setValue('frame', String(frame));
@@ -174,14 +247,18 @@ export function createMemoryWatch(engine, hudEl) {
       return;
     }
 
+    // Select the per-core WRAM offset map for whichever core is currently active. The HUD
+    // stays correct across snes9x <-> bsnes swaps because the offsets used are always THIS
+    // core's offsets (and any core whose map is unverified renders tagged, never fake-precise).
+    const ADDR = mapForCore(activeCoreId()).addr;
     const base = SMB_WRAM_BASE;
     // READ-ONLY reads via the engine's read accessors.
-    const xPage = mem.readU8(base + SMB_ADDR.PLAYER_PAGE_LOC);
-    const xPos = mem.readU8(base + SMB_ADDR.PLAYER_X_POSITION);
-    const xSub = mem.readU8(base + SMB_ADDR.PLAYER_X_SUBPIXEL);
-    const yPos = mem.readU8(base + SMB_ADDR.PLAYER_Y_POSITION);
-    const ySub = mem.readU8(base + SMB_ADDR.PLAYER_Y_SUBPIXEL);
-    const xSpeedRaw = mem.readU8(base + SMB_ADDR.PLAYER_X_SPEED);
+    const xPage = mem.readU8(base + ADDR.PLAYER_PAGE_LOC);
+    const xPos = mem.readU8(base + ADDR.PLAYER_X_POSITION);
+    const xSub = mem.readU8(base + ADDR.PLAYER_X_SUBPIXEL);
+    const yPos = mem.readU8(base + ADDR.PLAYER_Y_POSITION);
+    const ySub = mem.readU8(base + ADDR.PLAYER_Y_SUBPIXEL);
+    const xSpeedRaw = mem.readU8(base + ADDR.PLAYER_X_SPEED);
 
     // Full X = page * 256 + on-screen position; sub-pixel shown as a fraction (/256).
     const marioX = xPage * 256 + xPos;

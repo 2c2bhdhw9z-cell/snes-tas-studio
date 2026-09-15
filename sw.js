@@ -10,7 +10,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v11';
+const CACHE_VERSION = 'tas-studio-v12';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell — always precached. These are the files this feature ships.
@@ -31,9 +31,12 @@ const APP_SHELL = [
 ];
 
 // Optional core binaries — cached if present, tolerated if absent (404 must not fail install).
-// BOTH selectable ASYNCIFY cores (accuracy + performance) are precached so either can be
-// chosen from the Core dropdown and still work fully offline. The ROM is NEVER listed here.
+// ALL THREE selectable cores are precached so any can be chosen from the Core dropdown and
+// still work fully offline: the synchronous snes9x real-time core (default boot core) plus
+// both ASYNCIFY bsnes-mercury profiles (accuracy + performance). The ROM is NEVER listed here.
 const OPTIONAL_CORE_FILES = [
+  'cores/snes9x_libretro.js',
+  'cores/snes9x_libretro.wasm',
   'cores/bsnes_mercury_accuracy_libretro.js',
   'cores/bsnes_mercury_accuracy_libretro.wasm',
   'cores/bsnes_mercury_performance_libretro.js',

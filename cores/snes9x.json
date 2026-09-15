@@ -1,0 +1,42 @@
+{
+  "name": "snes9x (synchronous, no ASYNCIFY)",
+  "display_name": "Real-Time (snes9x) (SNES)",
+  "core": "snes9x",
+  "abi": "raw libretro",
+  "role": "Real-time routing/playback. DEFAULT boot core. Paired with the bsnes-mercury cores which stay available for paused, frame-perfect sub-pixel work.",
+  "extensions": ["smc", "sfc", "swc", "fig", "bs", "st"],
+  "license": "Non-commercial (Snes9x license); see the snes9x source LICENSE.",
+  "repo": "https://github.com/libretro/snes9x",
+  "branch": "master",
+  "built_from_source": true,
+  "toolchain": "emscripten 6.0.9",
+  "asyncify": {
+    "enabled": false,
+    "why": "snes9x does NOT use libco cooperative cothreads the way bsnes does, so retro_run is a normal SYNCHRONOUS call that returns each frame with NO ASYNCIFY. That is the whole performance point: real-time playback on the mobile main thread. Verified by tools/run-smoke.mjs — retro_run returns each frame synchronously and the JS loader contains zero 'asyncify' references."
+  },
+  "loader": "snes9x_libretro.js",
+  "wasm": "snes9x_libretro.wasm",
+  "export_name": "snes9x",
+  "wasm_bytes": 3347860,
+  "verified": "tools/run-smoke.mjs cores/snes9x_libretro.js 60 — ALL ASSERTIONS PASSED: retro_load_game true, retro_run returns each frame with NO hang, video_refresh non-null 256x224 RGB565, frames advance. Timing ~1.1 ms/frame (60 frames in 66 ms), vs the bsnes ASYNCIFY cores' ~73-235 ms/frame. WRAM (RETRO_MEMORY_SYSTEM_RAM) size = 131072. tools/core-probe.mjs: 17/17 raw retro_* exports + Module.addFunction present, 0/10 EmulatorJS high-level API (i.e. this is the fresh from-source raw-libretro build, NOT the old removed EmulatorJS file of the same name).",
+  "hud_memory_map": "NOT YET empirically verified for snes9x. tools/hud-crosscheck.mjs (against cores/snes9x_libretro.js) shows the bsnes-verified SMB1 All-Stars offsets ($005D H-Speed, $0042/$0043/$0401 X, $0002/$041C Y) do NOT track Mario on snes9x's SYSTEM_RAM region even though the region size matches bsnes (131072) — different base/mirroring. memory-watch.js therefore uses a PER-CORE map keyed on engine.activeCoreId: bsnes rows stay proven (render clean), snes9x rows render an explicit '(unverified)' tag until snes9x's own offsets are proven. The frame counter (engine-sourced) is always correct on every core.",
+  "emscripten_flags": [
+    "-s WASM=1",
+    "-s ALLOW_TABLE_GROWTH=1",
+    "-s ALLOW_MEMORY_GROWTH=1",
+    "-s INITIAL_MEMORY=67108864",
+    "-s STACK_SIZE=5242880",
+    "NO -s ASYNCIFY (synchronous retro_run — the performance win)",
+    "-s MODULARIZE=1",
+    "-s EXPORT_ES6=1",
+    "-s EXPORT_NAME=snes9x",
+    "-s INVOKE_RUN=0",
+    "-s EXIT_RUNTIME=0",
+    "-s ERROR_ON_UNDEFINED_SYMBOLS=0",
+    "-s ENVIRONMENT=web,worker,node",
+    "-s EXPORTED_FUNCTIONS=[22 raw retro_* + malloc/free; NO retro_cheat_*]",
+    "-s EXPORTED_RUNTIME_METHODS=[ccall,cwrap,addFunction,removeFunction,setValue,getValue,UTF8ToString,stringToUTF8,HEAPU8,HEAPU16,HEAP32,HEAPU32,HEAPF64]",
+    "single-threaded (no pthreads / no SharedArrayBuffer) for iOS"
+  ],
+  "makefile_edits": "Added an 'else ifeq ($(platform), emscripten)' block to snes9x/libretro/Makefile modeled on the bsnes-mercury emscripten block but WITHOUT ASYNCIFY: CC=emcc/CXX=em++/LD=em++, fpic/LTO cleared, -fno-strict-aliasing, TARGET=snes9x_libretro.js, and the SHARED link flags above. Built with `emmake make platform=emscripten -j8`."
+}

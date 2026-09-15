@@ -127,15 +127,28 @@ check('core-select is a <select>', coreSelect && coreSelect.tagName === 'SELECT'
 const coreOptionValues = coreSelect
   ? Array.from(coreSelect.querySelectorAll('option')).map((o) => o.value)
   : [];
+check('core-select has a Real-Time (snes9x) option', coreOptionValues.includes('realtime'));
 check('core-select has an Accuracy option', coreOptionValues.includes('accuracy'));
 check('core-select has a Performance option', coreOptionValues.includes('performance'));
+check(
+  'Real-Time (snes9x) is the first/default option',
+  coreOptionValues[0] === 'realtime'
+);
 check('core-select is NOT a file/ROM picker', coreSelect && coreSelect.tagName !== 'INPUT');
 check('no file input introduced anywhere', document.querySelectorAll('input[type="file"]').length === 0);
 
 // Core catalog + resolver from core-loader.
 const loaderMod = await import('../core/core-loader.js');
 const { CORE_CATALOG, coreById, DEFAULT_CORE_PATHS } = loaderMod;
-check('CORE_CATALOG has two cores', Array.isArray(CORE_CATALOG) && CORE_CATALOG.length === 2);
+check('CORE_CATALOG has three cores', Array.isArray(CORE_CATALOG) && CORE_CATALOG.length === 3);
+check(
+  'catalog realtime path is the snes9x core',
+  coreById('realtime') && coreById('realtime').path === 'cores/snes9x_libretro.js'
+);
+check(
+  'catalog realtime is the FIRST catalog entry (default-selected)',
+  CORE_CATALOG[0] && CORE_CATALOG[0].id === 'realtime'
+);
 check(
   'catalog accuracy path is the accuracy core',
   coreById('accuracy') && coreById('accuracy').path === 'cores/bsnes_mercury_accuracy_libretro.js'
@@ -145,12 +158,12 @@ check(
   coreById('performance') && coreById('performance').path === 'cores/bsnes_mercury_performance_libretro.js'
 );
 check(
-  'accuracy and performance have DISTINCT export names',
-  coreById('accuracy').exportName !== coreById('performance').exportName
+  'all three cores have DISTINCT export names',
+  new Set(CORE_CATALOG.map((c) => c.exportName)).size === 3
 );
 check(
-  'DEFAULT_CORE_PATHS still defaults to accuracy',
-  Array.isArray(DEFAULT_CORE_PATHS) && DEFAULT_CORE_PATHS[0] === 'cores/bsnes_mercury_accuracy_libretro.js'
+  'DEFAULT_CORE_PATHS now defaults to snes9x (real-time)',
+  Array.isArray(DEFAULT_CORE_PATHS) && DEFAULT_CORE_PATHS[0] === 'cores/snes9x_libretro.js'
 );
 
 // Engine exposes a setCore() API for the dropdown to call. Without a core present it must

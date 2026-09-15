@@ -43,7 +43,7 @@
 
 'use strict';
 
-import { loadCore, DEFAULT_CORE_PATHS } from './core/core-loader.js';
+import { loadCore, DEFAULT_CORE_PATHS, CORE_CATALOG } from './core/core-loader.js';
 
 // The exact ROM path the app auto-boots. No file picker anywhere.
 export const ROM_PATH = 'assets/Super Mario All-Stars (USA).sfc';
@@ -1165,6 +1165,18 @@ class TASEngine {
         return new Uint8Array(M.HEAPU8.subarray(base, base + size));
       },
     });
+  }
+
+  /**
+   * The catalog id of the currently active core ('realtime' | 'accuracy' | 'performance'),
+   * resolved from the active corePath, or null when no core is loaded. READ-ONLY metadata:
+   * memory-watch.js uses this to select the correct per-core WRAM offset map so the Live HUD
+   * stays correct across core swaps. It grants no capability — it only names the active core.
+   */
+  get activeCoreId() {
+    if (!this.corePath) return null;
+    const entry = CORE_CATALOG.find((c) => c.path === this.corePath);
+    return entry ? entry.id : null;
   }
 
   // ------------------------------------------------------------------ frame callbacks

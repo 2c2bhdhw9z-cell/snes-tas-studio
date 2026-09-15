@@ -1,4 +1,15 @@
 {
+  "cores": ["snes9x", "bsnes-mercury"],
+  "snes9x": {
+    "source_repo": "https://github.com/libretro/snes9x",
+    "branch": "master",
+    "emsdk_version": "6.0.9",
+    "target": "platform=emscripten (added block; NO ASYNCIFY)",
+    "output": ["snes9x_libretro.js", "snes9x_libretro.wasm"],
+    "export_name": "snes9x",
+    "role": "Default real-time playback core (synchronous retro_run).",
+    "verified_with": "node tools/run-smoke.mjs cores/snes9x_libretro.js 60 — ALL ASSERTIONS PASSED, ~1.1 ms/frame, no ASYNCIFY. See cores/snes9x.json."
+  },
   "core": "bsnes-mercury",
   "profiles": ["accuracy", "performance"],
   "source_repo": "https://github.com/libretro/bsnes-mercury",

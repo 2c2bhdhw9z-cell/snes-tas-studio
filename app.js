@@ -23,15 +23,19 @@
 import engine from './tas-engine.js';
 import { CORE_CATALOG, coreById } from './core/core-loader.js';
 
-// localStorage key for the persisted core choice (nice-to-have; defaults to accuracy).
+// localStorage key for the persisted core choice (nice-to-have). DEFAULT is 'realtime'
+// (snes9x): with no stored preference the app boots the synchronous snes9x core for
+// real-time playback. bsnes accuracy/performance remain selectable for paused frame-perfect
+// work and persist across reloads once chosen.
 const CORE_PREF_KEY = 'tas-studio.core';
+const DEFAULT_CORE_ID = 'realtime';
 
 function readCorePref() {
   try {
     const v = window.localStorage ? window.localStorage.getItem(CORE_PREF_KEY) : null;
-    return v && coreById(v) ? v : 'accuracy';
+    return v && coreById(v) ? v : DEFAULT_CORE_ID;
   } catch (_err) {
-    return 'accuracy';
+    return DEFAULT_CORE_ID;
   }
 }
 
@@ -159,8 +163,8 @@ window.addEventListener('DOMContentLoaded', () => {
     renderBanner();
   });
 
-  // Core selection dropdown. Populated from the core catalog; defaults to Accuracy (or the
-  // persisted choice). Changing it dynamically swaps the WASM core via engine.setCore(),
+  // Core selection dropdown. Populated from the core catalog; defaults to Real-Time (snes9x)
+  // (or the persisted choice). Changing it dynamically swaps the WASM core via engine.setCore(),
   // which tears down the old core/run loop and re-inits with the new one (no leaked Module,
   // no double rAF loop). This is emulator-core selection ONLY — never a ROM/level picker.
   const coreSelect = document.getElementById('core-select');
@@ -177,7 +181,7 @@ window.addEventListener('DOMContentLoaded', () => {
     coreSelect.value = initialCoreId;
 
     coreSelect.addEventListener('change', () => {
-      const entry = coreById(coreSelect.value) || coreById('accuracy');
+      const entry = coreById(coreSelect.value) || coreById(DEFAULT_CORE_ID);
       if (!entry) return;
       writeCorePref(entry.id);
       coreSelect.disabled = true;
@@ -194,7 +198,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Auto-boot with the selected/persisted core. No user action required; degrades
   // gracefully (missing core/ROM -> banner notice, no crash, no file picker).
-  const bootEntry = coreById(initialCoreId) || coreById('accuracy');
+  const bootEntry = coreById(initialCoreId) || coreById(DEFAULT_CORE_ID);
   engine.init({ corePaths: bootEntry ? [bootEntry.path] : undefined }).catch((err) => {
     console.warn('[app] engine init error (handled):', err);
     recordError(`engine init: ${err && err.message ? err.message : err}`);

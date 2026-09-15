@@ -35,7 +35,7 @@ const version = (sw.match(/CACHE_VERSION\s*=\s*'([^']+)'/) || [])[1];
 // The cache version MUST bump whenever a precached shell file (e.g. core/core-loader.js)
 // changes, otherwise returning users' service worker keeps serving the OLD file. Pin the
 // expected version so an un-bumped edit is caught here.
-const EXPECTED_VERSION = 'tas-studio-v11';
+const EXPECTED_VERSION = 'tas-studio-v12';
 const versionOk = version === EXPECTED_VERSION;
 if (!versionOk) {
   console.log(`CACHE_VERSION mismatch: expected ${EXPECTED_VERSION}, got ${version}`);
@@ -44,11 +44,14 @@ const appShellBlock = sw.split('APP_SHELL')[1].split(']')[0];
 const noRomInShell = !/\.(sfc|smc)/i.test(appShellBlock);
 const hasRomGuard = /isRomRequest/.test(sw) && /assets\//.test(sw);
 
-// Both selectable ASYNCIFY cores (accuracy + performance, .js + .wasm) must be listed in
-// OPTIONAL_CORE_FILES so either can be chosen from the dropdown and still work offline. The
-// ROM must NEVER appear there.
+// All three selectable cores must be listed in OPTIONAL_CORE_FILES so any can be chosen from
+// the dropdown and still work offline: the synchronous snes9x real-time core (default) plus
+// both ASYNCIFY bsnes profiles (accuracy + performance), each .js + .wasm. The ROM must NEVER
+// appear there.
 const optionalBlock = (sw.split('OPTIONAL_CORE_FILES')[1] || '').split(']')[0];
 const bothCores = [
+  'cores/snes9x_libretro.js',
+  'cores/snes9x_libretro.wasm',
   'cores/bsnes_mercury_accuracy_libretro.js',
   'cores/bsnes_mercury_accuracy_libretro.wasm',
   'cores/bsnes_mercury_performance_libretro.js',
@@ -66,7 +69,7 @@ const noRomInOptional = !/\.(sfc|smc)/i.test(optionalBlock);
 console.log('cache version:', version);
 console.log('ROM guard present (isRomRequest + assets/):', hasRomGuard);
 console.log('APP_SHELL contains no ROM (.sfc/.smc):', noRomInShell);
-console.log('OPTIONAL_CORE_FILES has both cores (accuracy + performance, .js + .wasm):', coresOk);
+console.log('OPTIONAL_CORE_FILES has all cores (snes9x + accuracy + performance, .js + .wasm):', coresOk);
 console.log('OPTIONAL_CORE_FILES contains no ROM:', noRomInOptional);
 const pass = ok && noRomInShell && hasRomGuard && coresOk && noRomInOptional && versionOk;
 console.log(pass ? 'PRECACHE OK' : 'PRECACHE FAIL');

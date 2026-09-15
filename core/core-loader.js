@@ -51,20 +51,35 @@
 
 'use strict';
 
+// snes9x is the DEFAULT boot core: it is a synchronous (NO ASYNCIFY) build, so retro_run
+// returns each frame without unwinding/suspending, which is fast enough for REAL-TIME
+// playback on the mobile main thread. The bsnes cores stay available for paused,
+// frame-perfect sub-pixel work.
 export const DEFAULT_CORE_PATHS = [
-  'cores/bsnes_mercury_accuracy_libretro.js',
+  'cores/snes9x_libretro.js',
 ];
 
-// The catalog of selectable emulator cores. Both are bsnes-mercury profiles compiled to
-// WASM with -s ASYNCIFY (so retro_run yields to the browser and returns) + the Emscripten
-// Fibers libco backend (so bsnes's cooperative cothreads cooperate with ASYNCIFY).
+// The catalog of selectable emulator cores.
+//   - snes9x  : from-source raw-libretro snes9x compiled to WASM WITHOUT ASYNCIFY (retro_run
+//               is a normal synchronous call). Real-time routing/playback; DEFAULT boot core.
+//   - bsnes-mercury accuracy + performance : compiled to WASM with -s ASYNCIFY (so retro_run
+//               yields to the browser and returns) + the Emscripten Fibers libco backend (so
+//               bsnes's cooperative cothreads cooperate with ASYNCIFY). Paused, frame-perfect
+//               sub-pixel accuracy.
 //
 // This is CORE selection only — an emulator-accuracy choice. It is NOT a ROM/level picker
 // and grants no cheat/memory-write capability. Each entry records the MODULARIZE
 // EXPORT_NAME baked into that build so factory resolution can find the right global if the
-// ES-module default-export path is unavailable (the two cores use DISTINCT export names so
-// they never collide when both are referenced).
+// ES-module default-export path is unavailable (all cores use DISTINCT export names so
+// they never collide when both are referenced). snes9x is listed FIRST so it is the
+// default-selected dropdown option.
 export const CORE_CATALOG = Object.freeze([
+  Object.freeze({
+    id: 'realtime',
+    label: 'Real-Time (snes9x)',
+    path: 'cores/snes9x_libretro.js',
+    exportName: 'snes9x',
+  }),
   Object.freeze({
     id: 'accuracy',
     label: 'Accuracy (bsnes-mercury)',

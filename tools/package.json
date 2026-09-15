@@ -15,9 +15,11 @@
     "test:coreurl": "node core-url-resolve.test.mjs",
     "coreprobe": "node core-probe.mjs",
     "hud:calibrate": "node hud-calibrate.mjs",
+    "hud:crosscheck:snes9x": "CORE=cores/snes9x_libretro.js node hud-crosscheck.mjs",
     "test:runsmoke": "node run-smoke.mjs",
     "test:runsmoke:accuracy": "node run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12",
     "test:runsmoke:performance": "node run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12",
+    "test:runsmoke:snes9x": "node run-smoke.mjs cores/snes9x_libretro.js 60",
     "test": "node inputlog-truncate.test.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node engine-smoke.mjs && node runloop.test.mjs && node env-callback.test.mjs && node core-url-resolve.test.mjs && node precache-check.mjs"
   },
   "devDependencies": {

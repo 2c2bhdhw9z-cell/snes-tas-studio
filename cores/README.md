@@ -2,18 +2,44 @@
 
 This directory holds the libretro SNES cores compiled to WebAssembly via Emscripten.
 
-**Now bundled + committed:** two **from-source, raw-libretro `bsnes-mercury`** cores compiled
-to WebAssembly ship here so the app deploys to Netlify with a working, user-selectable engine:
+**Now bundled + committed:** three **from-source, raw-libretro** cores compiled to
+WebAssembly ship here so the app deploys to Netlify with a working, user-selectable engine:
 
-| Profile | Files | Export name | Cycle-accurate |
-| --- | --- | --- | --- |
-| Accuracy | `bsnes_mercury_accuracy_libretro.js` + `.wasm` | `bsnes_accuracy` | yes |
-| Performance | `bsnes_mercury_performance_libretro.js` + `.wasm` | `bsnes_performance` | no |
+| Core | Files | Export name | ASYNCIFY | Role |
+| --- | --- | --- | --- | --- |
+| Real-Time (snes9x) | `snes9x_libretro.js` + `.wasm` | `snes9x` | **no** | real-time playback (default) |
+| Accuracy (bsnes-mercury) | `bsnes_mercury_accuracy_libretro.js` + `.wasm` | `bsnes_accuracy` | yes | paused frame-perfect (cycle-accurate) |
+| Performance (bsnes-mercury) | `bsnes_mercury_performance_libretro.js` + `.wasm` | `bsnes_performance` | yes | faster bsnes profile |
 
-`core.json`, `build.json` and `license.txt` accompany them. These files are intentionally
-**not** git-ignored. The **Core** dropdown in the toolbar switches between the two at
-runtime (defaults to Accuracy). This is an emulator-accuracy choice only — **not** a
-ROM/level picker, and it grants no cheat/memory-write capability.
+`core.json`, `snes9x.json`, `build.json` and `license.txt` accompany them. These files are
+intentionally **not** git-ignored. The **Core** dropdown in the toolbar switches between the
+three at runtime (defaults to **Real-Time (snes9x)**). This is an emulator-core choice only
+— **not** a ROM/level picker, and it grants no cheat/memory-write capability.
+
+## snes9x — the default real-time core (NO ASYNCIFY)
+
+`snes9x_libretro.*` is a fresh from-source raw-libretro build of
+[`libretro/snes9x`](https://github.com/libretro/snes9x) (`master`) compiled to WASM with an
+added `platform=emscripten` Makefile block modeled on the bsnes one but **without ASYNCIFY**.
+snes9x does not use libco cooperative cothreads, so `retro_run()` returns each frame
+**synchronously** — fast enough for real-time playback on the mobile main thread (the whole
+reason this core was added). Verified:
+
+```sh
+node tools/run-smoke.mjs cores/snes9x_libretro.js 60   # ALL ASSERTIONS PASSED, ~1.1 ms/frame
+node tools/core-probe.mjs   # (CORE=cores/snes9x_libretro.js) 17/17 retro_*, addFunction yes
+```
+
+Build (reproduce): clone `libretro/snes9x`, add the emscripten block (see `snes9x.json` for
+the exact flag set — same 22 `retro_*` exports + runtime methods as bsnes, `EXPORT_NAME=snes9x`,
+`MODULARIZE`+`EXPORT_ES6`, `ALLOW_TABLE_GROWTH`, **no** `-s ASYNCIFY`), then
+`emmake make platform=emscripten -j$(nproc)` and copy `snes9x_libretro.{js,wasm}` here.
+
+Its Live-HUD WRAM map is tracked separately and is currently **unverified** on snes9x (see
+`snes9x.json` and `memory-watch.js`'s per-core map) — the bsnes offsets do not track Mario on
+snes9x's `SYSTEM_RAM` region.
+
+## bsnes-mercury (accuracy + performance)
 
 ## ASYNCIFY (why the cores changed)
 
@@ -38,9 +64,8 @@ Each profile is emitted with a **distinct filename** and a **distinct MODULARIZE
 `EXPORT_NAME`** (`bsnes_accuracy` / `bsnes_performance`) so the two cores never collide on a
 shared global/UMD symbol when both are referenced. Both are emitted as **ES6 modules**
 (`-s EXPORT_ES6=1`), so `core/core-loader.js` resolves either one via its dynamic-import
-default-export path. The legacy `snes9x_libretro` name is retained only in
-`core-loader.js`'s `factoryNameGuesses` for backward compatibility with an older
-pre-ASYNCIFY core.
+default-export path. (The `snes9x` core above uses its own distinct `EXPORT_NAME=snes9x`, so
+all three coexist without colliding.)
 
 ## Verified drivable (retro_run proven to yield)
 
