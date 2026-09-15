@@ -99,21 +99,22 @@ const BSNES_MAP = Object.freeze({
   }),
 });
 
-// The snes9x offset set. Placeholder = the bsnes offsets (so the HUD reads a valid, in-range
-// WRAM location and never dereferences out of bounds), but flagged UNVERIFIED because those
-// offsets are proven not to track Mario on snes9x. When the snes9x SMB1 offsets are
-// empirically proven (tools/hud-crosscheck.mjs against cores/snes9x_libretro.js, all fields
-// VERIFIED), replace these values and set verified:true.
-const SNES9X_MAP = Object.freeze({
-  verified: false,
-  addr: BSNES_MAP.addr, // in-range placeholder; NOT proven to be Mario's vars on snes9x
-});
+// The snes9x offset set. EMPIRICALLY VERIFIED to be IDENTICAL to the bsnes offsets:
+// retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM) exposes the same standard 128KB SNES WRAM
+// (131072 bytes) in both cores, so the same logical SMB1 addresses hold. Proven by running
+// the authoritative tools/hud-calibrate.mjs against cores/snes9x_libretro.js:
+//   ALL_VERIFIED: true — H-Speed $005D (accel/friction/signed-reversal), X pixel $0042 +
+//   page $0043 + sub-pixel $0401 (velocity-integral carry-match + idle-freeze + rollover),
+//   Y pixel $0002 + sub-pixel $041C (constant-gravity parabola). Same offsets, same values
+//   as bsnes. (The earlier "0/6 on snes9x" was a weakness in the hud-crosscheck harness that
+//   could not drive Mario into free motion — NOT a real WRAM-layout difference.)
+const SNES9X_MAP = BSNES_MAP;
 
 // Per-core map registry, keyed by the catalog core id exposed via engine.activeCoreId.
 export const CORE_WRAM_MAPS = Object.freeze({
   accuracy: BSNES_MAP,
   performance: BSNES_MAP,
-  realtime: SNES9X_MAP, // snes9x — unverified until hud-crosscheck proves it
+  realtime: SNES9X_MAP, // snes9x — verified identical to bsnes (same 128KB WRAM, same offsets)
 });
 
 // The default map when the active core is unknown (e.g. before a core loads). We default to
