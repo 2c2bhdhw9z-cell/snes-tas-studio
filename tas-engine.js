@@ -20,10 +20,14 @@
 //
 // VIDEO (OffscreenCanvas): attach() FEATURE-DETECTS transferControlToOffscreen + an
 // OffscreenCanvas 2d context. If supported, it transfers control of #screen to the worker
-// (postMessage as a transferable) so the WORKER blits directly — the main thread never takes
-// a 2d context on that canvas (a transferred canvas cannot getContext('2d') on the main
-// thread). If NOT supported, the proxy keeps the 2d context and blits {type:'video'} frames
-// the worker posts. BOTH paths are implemented here.
+// (postMessage as a transferable) so the WORKER presents directly — the main thread never
+// takes a context on that canvas (a transferred canvas cannot getContext on the main thread).
+// If NOT supported, the proxy presents {type:'video'} frames the worker posts. On BOTH paths
+// the actual renderer is WebGL (gl-presenter.js: ONE texture + per-frame texSubImage2D
+// upload, NO per-frame putImageData) whenever WebGL is available, with a 2D putImageData
+// context kept only as a last resort. Repeated getContext('2d')/putImageData blits leak
+// native memory on iOS Safari even when JS pools its buffers; WebGL is the fix. The active
+// present path is surfaced in the status snapshot (videoPath) for the debug banner.
 //
 // INPUT DETERMINISM: the authoritative scripted InputLog lives in the WORKER. The UI sends
 // {type:'inputEdit'} edits and streams {type:'liveMask'} each animation frame; the worker
@@ -37,6 +41,7 @@
 'use strict';
 
 import { CORE_CATALOG, coreById } from './core/core-loader.js';
+import { createGLPresenter } from './gl-presenter.js';
 // Re-export the extracted runner + verified HUD address map so consumers can reach them from
 // one place (the runner itself now executes inside the worker, not on the main thread).
 export { EmuCoreRunner, SMB1_HUD_ADDR } from './emu-core-runner.js';
@@ -109,12 +114,22 @@ class TASEngine {
     this._workerReady = false;
     this._usingOffscreen = false;
 
-    // Canvas presentation (fallback path only — when OffscreenCanvas is unavailable).
+    // Canvas presentation (fallback path only — when OffscreenCanvas is unavailable). The
+    // worker posts decoded RGBA; the main thread presents it. PRIMARY: a WebGL presenter
+    // (gl-presenter.js) uploading the received buffer into ONE texture per frame — no
+    // per-frame putImageData (the iOS-native-leak fix). LAST RESORT: a 2D putImageData
+    // context, used only if WebGL is unavailable on the main-thread canvas.
     this.canvas = null;
-    this._ctx = null;
+    this._gl = null; // GLPresenter | null (primary fallback present path)
+    this._ctx = null; // 2d context | null (last-resort fallback present path)
     this._imageData = null;
     this._fbWidth = 0;
     this._fbHeight = 0;
+
+    // The active video path string, mirrored from the worker's 'videoPath' message and
+    // refined to the exact main-thread renderer on the fallback path. Surfaced in the status
+    // snapshot so the debug banner reports which renderer is live on the device.
+    this.videoPath = 'none';
 
     // Notice banner element (set via attach()).
     this._noticeEl = null;
@@ -172,13 +187,37 @@ class TASEngine {
     return this;
   }
 
+  /**
+   * Set up the main-thread presenter for the fallback path (no OffscreenCanvas). PRIMARY:
+   * a WebGL presenter (one texture, per-frame texSubImage2D — no putImageData leak). LAST
+   * RESORT: a 2D putImageData context if WebGL is unavailable. Records the refined video path.
+   */
   _takeMainThreadContext(canvas) {
+    // Try WebGL (WebGL2 preferred, WebGL1 fallback) FIRST — this is the iOS-native-leak fix.
+    try {
+      this._gl = createGLPresenter(canvas, 'fallback');
+    } catch (_err) {
+      this._gl = null;
+    }
+    if (this._gl) {
+      this._setVideoPath(this._gl.label); // 'fallback-webgl2' | 'fallback-webgl1'
+      return;
+    }
+    // WebGL unavailable: last-resort 2D putImageData.
     try {
       this._ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     } catch (err) {
       this._ctx = null;
       console.warn('[TASEngine] 2d context unavailable:', err);
     }
+    this._setVideoPath(this._ctx ? 'fallback-2d' : 'none');
+  }
+
+  /** Record the active video path and notify status subscribers (for the debug banner). */
+  _setVideoPath(path) {
+    if (this.videoPath === path) return;
+    this.videoPath = path;
+    this._notifyStatus();
   }
 
   /** Render a non-blocking notice. Appends a line; never throws. */
@@ -276,6 +315,18 @@ class TASEngine {
       case 'video':
         this._blitVideoMessage(msg);
         break;
+      case 'videoPath':
+        // The worker reports which present path it initialized. On the OffscreenCanvas direct
+        // path the worker owns the renderer, so its label ('offscreen-webgl2'|'offscreen-2d')
+        // is authoritative. On the fallback path the worker reports 'fallback' and the MAIN
+        // thread's renderer is authoritative — the proxy already set the refined label
+        // ('fallback-webgl2'|'fallback-2d') in _takeMainThreadContext, so keep that.
+        if (typeof msg.path === 'string' && msg.path !== 'fallback' && msg.path !== 'none') {
+          this._setVideoPath(msg.path);
+        } else if (this.videoPath === 'none' && typeof msg.path === 'string') {
+          this._setVideoPath(msg.path);
+        }
+        break;
       case 'saved':
         this._resolveSave(msg.bytes ? new Uint8Array(msg.bytes) : null);
         break;
@@ -323,24 +374,36 @@ class TASEngine {
       if (buffer instanceof ArrayBuffer) this._ackVideo(buffer);
       return;
     }
-    if (!this._ctx || this._usingOffscreen) {
+    if (this._usingOffscreen || (!this._gl && !this._ctx)) {
       this._ackVideo(buffer);
       return;
     }
-    try {
-      if (this._fbWidth !== width || this._fbHeight !== height || !this._imageData) {
-        this._fbWidth = width;
-        this._fbHeight = height;
-        if (this.canvas) {
-          this.canvas.width = width;
-          this.canvas.height = height;
-        }
-        this._imageData = this._ctx.createImageData(width, height);
+    // PRIMARY: upload the received RGBA into the single WebGL texture and draw it. We wrap the
+    // transferred ArrayBuffer in a Uint8ClampedArray view (no copy) and hand it to the
+    // presenter — no per-frame putImageData, which is the iOS-native-leak fix.
+    if (this._gl) {
+      try {
+        this._gl.present(new Uint8ClampedArray(buffer), width, height);
+      } catch (err) {
+        console.warn('[TASEngine] GL present failed:', err);
       }
-      this._imageData.data.set(new Uint8Array(buffer));
-      this._ctx.putImageData(this._imageData, 0, 0);
-    } catch (err) {
-      console.warn('[TASEngine] video blit failed:', err);
+    } else if (this._ctx) {
+      // LAST RESORT: 2D putImageData (only when WebGL was unavailable on this canvas).
+      try {
+        if (this._fbWidth !== width || this._fbHeight !== height || !this._imageData) {
+          this._fbWidth = width;
+          this._fbHeight = height;
+          if (this.canvas) {
+            this.canvas.width = width;
+            this.canvas.height = height;
+          }
+          this._imageData = this._ctx.createImageData(width, height);
+        }
+        this._imageData.data.set(new Uint8Array(buffer));
+        this._ctx.putImageData(this._imageData, 0, 0);
+      } catch (err) {
+        console.warn('[TASEngine] video blit failed:', err);
+      }
     }
     // ACK after drawing: transfer the buffer BACK to the worker so it reuses it (no per-frame
     // allocation) and is unblocked to post the next frame. This ack-gating is the backpressure
@@ -379,6 +442,7 @@ class TASEngine {
       romBytes: this.romBytes,
       engineStatus: this.engineStatus,
       frame: this.currentFrame,
+      videoPath: this.videoPath,
     };
   }
 

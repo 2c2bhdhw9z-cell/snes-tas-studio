@@ -10,13 +10,15 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v18';
+const CACHE_VERSION = 'tas-studio-v19';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell — always precached. These are the files this feature ships. The emulator
 // now runs OFF the main thread: emu-worker.js is the MODULE worker entry (loaded via
 // `new Worker(url, {type:'module'})`) and it statically imports emu-core-runner.js +
-// input-resolver.js, so all three MUST be precached for the studio to boot fully offline.
+// input-resolver.js + gl-presenter.js (the WebGL video presenter), so all MUST be precached
+// for the studio to boot fully offline. gl-presenter.js is also imported by tas-engine.js
+// (the main-thread proxy) for the fallback present path, so it is shared shell.
 const APP_SHELL = [
   './',
   'index.html',
@@ -25,6 +27,7 @@ const APP_SHELL = [
   'app.js',
   'fps-meter.js',
   'tas-engine.js',
+  'gl-presenter.js',
   'emu-worker.js',
   'emu-core-runner.js',
   'input-resolver.js',

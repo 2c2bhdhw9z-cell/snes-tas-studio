@@ -64,15 +64,22 @@ const noticeEl = {
   set innerHTML(v) { if (v === '') recorded.length = 0; },
   get innerHTML() { return ''; },
 };
-// A fake canvas WITHOUT transferControlToOffscreen -> proxy keeps a main-thread 2d context.
+// A fake canvas WITHOUT transferControlToOffscreen -> proxy keeps a main-thread present path.
+// It has NO WebGL (getContext('webgl2'/'webgl') -> null), so the proxy's WebGL-first present
+// path feature-detects to null and falls back to the 2D putImageData blit — exactly like an
+// older Safari without WebGL. (Modern iOS gets 'fallback-webgl2'; this harness proves the 2D
+// last-resort still draws + backpressures.)
 const blits = [];
 const fakeCanvas = {
   width: 0,
   height: 0,
-  getContext: () => ({
-    createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
-    putImageData: (img) => blits.push({ w: img.width, h: img.height }),
-  }),
+  getContext: (type) => {
+    if (type !== '2d') return null; // no WebGL here -> 2D fallback present path
+    return {
+      createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+      putImageData: (img) => blits.push({ w: img.width, h: img.height }),
+    };
+  },
 };
 
 engine.attach({ canvas: fakeCanvas, noticeEl });
@@ -259,6 +266,24 @@ check('proxy blits {type:"video"} frames on the fallback (no-OffscreenCanvas) pa
   assert.strictEqual(blits.length, 1, 'proxy drew the posted frame to the main-thread 2d context');
   assert.strictEqual(fakeCanvas.width, w);
   assert.strictEqual(fakeCanvas.height, h);
+});
+
+check('proxy ACKs the drawn video buffer back to the worker (backpressure release + pool reuse)', () => {
+  worker.__clear();
+  const w = 4, h = 2;
+  const buf = new Uint8Array(w * h * 4).fill(128).buffer;
+  worker.__emit({ type: 'video', buffer: buf, width: w, height: h, pitch: w * 2, pixelFormat: 2 });
+  const ack = worker.__last('videoAck');
+  assert.ok(ack, 'a videoAck was posted after drawing');
+  assert.ok(ack.transfer && ack.transfer[0] === ack.msg.buffer, 'the buffer is transferred BACK for reuse');
+});
+
+check('fallback video path reports videoPath in the status snapshot (banner diagnostic)', () => {
+  // This harness canvas has no WebGL, so the proxy took the 2D last-resort present path and
+  // reported it. On modern iOS this would be 'fallback-webgl2'.
+  const snap = engine.statusSnapshot();
+  assert.ok('videoPath' in snap, 'status snapshot carries the active video path');
+  assert.strictEqual(snap.videoPath, 'fallback-2d', 'no-WebGL fake canvas -> 2D last-resort path reported');
 });
 
 // ======================================================================================

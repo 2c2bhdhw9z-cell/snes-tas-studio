@@ -28,6 +28,7 @@
 // OUT (worker -> main):
 //   { type:'status', snapshot } | { type:'frame', frame, status } | { type:'hud', values }
 //   { type:'video', buffer:ArrayBuffer, width, height, pitch, pixelFormat }  // fallback only
+//   { type:'videoPath', path }                             // active present path (banner diag)
 //   { type:'saved', bytes:ArrayBuffer }                    // transferable
 //   { type:'stateLoaded', frame } | { type:'error', message } | { type:'ready', ok, ... }
 //
@@ -46,10 +47,15 @@
 //
 // ==================== OFFSCREENCANVAS TRANSFER ORDERING ====================
 // When the main thread transfers an OffscreenCanvas (feature-detected there), the worker
-// gets its 2d context HERE and blits decoded RGBA directly — no 'video' message crosses the
-// boundary. If NO OffscreenCanvas was transferred, the worker posts a 'video' message with a
-// transferable ArrayBuffer of decoded RGBA + dims/format and the main thread blits. Both
-// paths use emu-core-runner.js's decoder (RGBA out); only the presentation differs.
+// PRESENTS decoded RGBA directly onto it HERE — no 'video' message crosses the boundary. The
+// present path is WebGL (gl-presenter.js: ONE texture/program/quad, per-frame texSubImage2D)
+// whenever WebGL is available on the transferred canvas, falling back to a 2D putImageData
+// context only if WebGL is unavailable. WebGL is the iOS-native-leak fix — repeated
+// getContext('2d')/putImageData blits leak native memory on iOS even when JS pools perfectly.
+// If NO OffscreenCanvas was transferred, the worker posts a 'video' message with a
+// transferable ArrayBuffer of decoded RGBA + dims/format and the MAIN thread presents it
+// (also via WebGL, falling back to 2D). Both paths use emu-core-runner.js's decoder (RGBA
+// out); only the presentation surface differs. The ACTIVE path is reported via 'videoPath'.
 //
 // HARD RULES preserved: memory is STRICTLY READ-ONLY (HUD values only; no write path crosses
 // the boundary); no cheat/level-select; retro_cheat_* is never wrapped; no file picker.
@@ -59,6 +65,7 @@
 import { EmuCoreRunner } from './emu-core-runner.js';
 import { InputResolver } from './input-resolver.js';
 import { DEFAULT_CORE_PATHS } from './core/core-loader.js';
+import { createGLPresenter } from './gl-presenter.js';
 
 // The worker's global scope. In a module worker `self` is the DedicatedWorkerGlobalScope.
 const workerScope = self;
@@ -79,12 +86,29 @@ class EmuWorker {
     // from one frame to the next except as the "current live state" the TAS contract wants.
     this.liveMask = 0;
 
-    // OffscreenCanvas + its 2d context (direct-blit path). Null when the main thread blits.
+    // OffscreenCanvas presentation (direct-present path). Null when the main thread presents.
+    //
+    // PRIMARY: a WebGL presenter (gl-presenter.js) — ONE texture + ONE program + ONE quad,
+    // created once, per-frame texSubImage2D upload + draw. This is the iOS-native-leak fix:
+    // it never allocates a per-frame ImageData/2D-canvas blit, which is what iOS Safari leaks.
+    // LAST RESORT: a 2D putImageData context, used only if WebGL is unavailable on the
+    // transferred OffscreenCanvas in this environment.
     this.offscreen = null;
-    this.offCtx = null;
+    this.offGL = null; // GLPresenter | null (primary offscreen present path)
+    this.offCtx = null; // 2d context | null (fallback offscreen present path)
     this._offImageData = null;
     this._offW = 0;
     this._offH = 0;
+
+    // The ACTIVE video path, surfaced to the main thread (and on to the debug banner) so the
+    // device can report which renderer actually engaged. One of:
+    //   'offscreen-webgl2' | 'offscreen-webgl1' | 'offscreen-2d'  (worker presents)
+    //   'fallback-webgl2'  | 'fallback-webgl1'  | 'fallback-2d'   (main thread presents)
+    //   'none' (no canvas yet)
+    // On the fallback path the WORKER only decodes+posts; the ACTUAL renderer lives on the
+    // main thread, so the worker reports 'fallback-*' and the proxy refines it to the exact
+    // renderer it created (webgl2/webgl1/2d) and shows that in the banner.
+    this.videoPath = 'none';
 
     // ---- Fallback video path: BACKPRESSURE + BUFFER REUSE (steady-decay fix) ----
     // The fallback posts decoded RGBA to the main thread. Two mechanisms prevent the
@@ -152,6 +176,17 @@ class EmuWorker {
    * transferable ArrayBuffer so it blits. Both receive the SAME decoded RGBA from the runner.
    */
   _presentFrame(rgba, width, height, pitch, pixelFormat) {
+    // PRIMARY offscreen path: upload the RGBA into the single WebGL texture and draw. No
+    // per-frame native ImageData/2D-canvas allocation (the iOS-native-leak fix).
+    if (this.offGL) {
+      try {
+        this.offGL.present(rgba, width, height);
+      } catch (err) {
+        this.post({ type: 'error', message: `offscreen GL present failed: ${String(err)}` });
+      }
+      return;
+    }
+    // Last-resort offscreen path: 2D putImageData (only when WebGL was unavailable).
     if (this.offCtx) {
       this._blitOffscreen(rgba, width, height);
       return;
@@ -224,13 +259,38 @@ class EmuWorker {
     }
   }
 
-  /** Adopt a transferred OffscreenCanvas and take its 2d context in the worker. */
+  /**
+   * Adopt a transferred OffscreenCanvas and set up the WORKER-side presenter on it.
+   *
+   * PRIMARY: build a WebGL presenter (gl-presenter.js) — one texture/program/quad created
+   * once, per-frame texSubImage2D uploads. This avoids the iOS-native leak of repeated
+   * getContext('2d')/putImageData blits. FALLBACK (only if WebGL is unavailable on this
+   * transferred OffscreenCanvas): take a 2D context and use putImageData as before.
+   *
+   * The resolved path is recorded in this.videoPath and reported to the main thread so the
+   * debug banner shows which renderer is actually live on the device.
+   */
   _adoptOffscreen(canvas) {
     if (!canvas) return;
     this.offscreen = canvas;
+    this.offGL = null;
+    this.offCtx = null;
     this._offImageData = null;
     this._offW = 0;
     this._offH = 0;
+
+    // Try WebGL (WebGL2 preferred, WebGL1 fallback) FIRST.
+    try {
+      this.offGL = createGLPresenter(canvas, 'offscreen');
+    } catch (_err) {
+      this.offGL = null;
+    }
+    if (this.offGL) {
+      this._setVideoPath(this.offGL.label); // 'offscreen-webgl2' | 'offscreen-webgl1'
+      return;
+    }
+
+    // WebGL unavailable on this OffscreenCanvas: last-resort 2D putImageData.
     try {
       this.offCtx =
         typeof canvas.getContext === 'function'
@@ -240,6 +300,13 @@ class EmuWorker {
       this.offCtx = null;
       this.post({ type: 'error', message: `OffscreenCanvas 2d unavailable: ${String(err)}` });
     }
+    this._setVideoPath(this.offCtx ? 'offscreen-2d' : 'none');
+  }
+
+  /** Record the active video path and report it to the main thread (for the debug banner). */
+  _setVideoPath(path) {
+    this.videoPath = path;
+    this.post({ type: 'videoPath', path });
   }
 
   // ------------------------------------------------------------------ boot / core swap
@@ -296,7 +363,13 @@ class EmuWorker {
     try {
       switch (msg.type) {
         case 'init': {
-          if (msg.offscreen) this._adoptOffscreen(msg.offscreen);
+          if (msg.offscreen) {
+            this._adoptOffscreen(msg.offscreen);
+          } else {
+            // No OffscreenCanvas: the MAIN thread will present the posted frames. Report the
+            // fallback path; the proxy refines it to the exact renderer it created.
+            this._setVideoPath('fallback');
+          }
           await this._boot(msg.corePath, msg.asyncify);
           break;
         }

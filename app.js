@@ -62,6 +62,7 @@ const bannerState = {
   engine: 'Init', // Engine lifecycle: Init | GameLoaded | RunLoop Active | Stopped
   frame: 0, // live frame number (advances one per retro_run)
   fps: 0, // live measured FPS over a rolling 1-second window (see FpsMeter)
+  video: 'none', // ACTIVE present path: offscreen-webgl2|offscreen-2d|fallback-webgl2|fallback-2d|...
   errors: [], // captured uncaught errors (most-recent last, capped)
 };
 const MAX_BANNER_ERRORS = 5;
@@ -97,9 +98,9 @@ function renderFps() {
 // node's textContent ONLY when its value actually changed (no churn, no needless layout).
 const bannerDom = {
   el: null, // the #debug-banner container the skeleton was built into
-  values: null, // { core, rom, engine, fps, err } -> the Text node holding each value
+  values: null, // { core, rom, engine, fps, video, err } -> the Text node holding each value
   items: null, // { err } -> the wrapper span (for the per-error class toggle)
-  last: { core: null, rom: null, engine: null, fps: null, err: null, hasError: null, errItem: null },
+  last: { core: null, rom: null, engine: null, fps: null, video: null, err: null, hasError: null, errItem: null },
 };
 
 function buildBannerSkeleton(el) {
@@ -122,11 +123,12 @@ function buildBannerSkeleton(el) {
   mk('rom', 'ROM');
   mk('engine', 'Engine');
   mk('fps', 'FPS');
+  mk('video', 'Video');
   mk('err', 'Err');
   bannerDom.el = el;
   bannerDom.values = values;
   bannerDom.items = items;
-  bannerDom.last = { core: null, rom: null, engine: null, fps: null, err: null, hasError: null, errItem: null };
+  bannerDom.last = { core: null, rom: null, engine: null, fps: null, video: null, err: null, hasError: null, errItem: null };
 }
 
 // Update a cached Text node only when its value changed (avoids needless layout invalidation).
@@ -160,6 +162,9 @@ function renderBanner() {
   setBannerText('engine', `${bannerState.engine} | Frame: ${bannerState.frame}`);
   // Live measured FPS (rolling 1-second window of actual advanced frames).
   setBannerText('fps', String(bannerState.fps));
+  // ACTIVE video present path (so the device can report which renderer engaged). This is the
+  // diagnostic that tells us whether OffscreenCanvas + WebGL actually initialized on-device.
+  setBannerText('video', bannerState.video);
   setBannerText('err', errLine);
 
   // Toggle the error class on the Err item only when it changes.
@@ -201,6 +206,7 @@ engine.onStatus((snap) => {
   bannerState.rom = snap.romStatus;
   if (typeof snap.engineStatus === 'string') bannerState.engine = snap.engineStatus;
   if (typeof snap.frame === 'number') bannerState.frame = snap.frame;
+  if (typeof snap.videoPath === 'string') bannerState.video = snap.videoPath;
   renderBanner();
 });
 

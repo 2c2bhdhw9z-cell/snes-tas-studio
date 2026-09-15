@@ -57,6 +57,11 @@ function makeFakeScope() {
 }
 
 // --- Fake OffscreenCanvas + 2d context -------------------------------------------------
+// By default this canvas exposes ONLY a 2d context (no WebGL), so the worker's WebGL-first
+// present path feature-detects to null and falls back to the 2D putImageData blit — exactly
+// what happens on an environment without WebGL on an OffscreenCanvas. The webgl:true variant
+// (makeFakeOffscreenGL) exposes a mock WebGL context so we can assert the primary present
+// path engages and reports 'offscreen-webgl*'.
 function makeFakeOffscreen() {
   const blits = [];
   const ctx = {
@@ -67,8 +72,55 @@ function makeFakeOffscreen() {
   return {
     width: 256,
     height: 224,
-    getContext: (type, opts) => { ctxOpts.push({ type, opts }); return ctx; },
+    getContext: (type, opts) => {
+      ctxOpts.push({ type, opts });
+      if (type === '2d') return ctx;
+      return null; // NO WebGL here -> worker uses the 2D fallback present path
+    },
     __blits: blits,
+    __ctxOpts: ctxOpts,
+  };
+}
+
+// A fake OffscreenCanvas whose getContext('webgl2') returns a mock WebGL context that records
+// per-frame uploads/draws — the worker should build a GLPresenter on this and NEVER touch 2d.
+function makeFakeOffscreenGL() {
+  const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+  let id = 1;
+  const gl = {
+    VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, ARRAY_BUFFER: 3, STATIC_DRAW: 4, TEXTURE_2D: 5,
+    TEXTURE0: 6, TEXTURE_MIN_FILTER: 7, TEXTURE_MAG_FILTER: 8, TEXTURE_WRAP_S: 9, TEXTURE_WRAP_T: 10,
+    NEAREST: 11, CLAMP_TO_EDGE: 12, RGBA: 13, UNSIGNED_BYTE: 14, UNPACK_ALIGNMENT: 15, FLOAT: 16,
+    TRIANGLES: 17, LINK_STATUS: 18, COMPILE_STATUS: 19,
+    createShader: () => ({ id: id++ }), shaderSource() {}, compileShader() {},
+    getShaderParameter: () => true, getShaderInfoLog: () => '', deleteShader() {},
+    createProgram: () => { gpu.createProgram++; return { id: id++ }; }, attachShader() {},
+    bindAttribLocation() {}, linkProgram() {}, getProgramParameter: () => true,
+    getProgramInfoLog: () => '', useProgram() {}, getUniformLocation: () => ({ id: id++ }), uniform1i() {},
+    createBuffer: () => ({ id: id++ }), bindBuffer() {}, bufferData() {},
+    enableVertexAttribArray() {}, vertexAttribPointer() {},
+    createVertexArray: () => ({ id: id++ }), bindVertexArray() {}, deleteVertexArray() {},
+    createTexture: () => { gpu.createTexture++; return { id: id++ }; }, activeTexture() {},
+    bindTexture() {}, texParameteri() {}, pixelStorei() {},
+    texImage2D: () => { gpu.texImage2D++; }, texSubImage2D: () => { gpu.texSubImage2D++; },
+    viewport() {}, drawArrays: () => { gpu.drawArrays++; },
+    deleteTexture() {}, deleteBuffer() {}, deleteProgram() {},
+  };
+  const ctx2d = {
+    createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    putImageData: () => { throw new Error('2d putImageData must NOT be used when WebGL is available'); },
+  };
+  const ctxOpts = [];
+  return {
+    width: 256,
+    height: 224,
+    getContext: (type, opts) => {
+      ctxOpts.push({ type, opts });
+      if (type === 'webgl2') return gl;
+      if (type === '2d') return ctx2d;
+      return null;
+    },
+    __gpu: gpu,
     __ctxOpts: ctxOpts,
   };
 }
@@ -294,6 +346,56 @@ await checkAsync('VIDEO direct path: OffscreenCanvas transferred -> worker blits
   assert.ok(got, 'a 2d context was requested');
   assert.strictEqual(got.opts && got.opts.alpha, false, "getContext('2d') requested with alpha:false");
   assert.strictEqual(got.opts && got.opts.desynchronized, true, "getContext('2d') requested with desynchronized:true (low-latency present)");
+});
+
+await checkAsync('VIDEO WebGL path: OffscreenCanvas with WebGL -> worker presents via GL (texSubImage2D), NO 2d, NO video msg', async () => {
+  scope.__posted.length = 0;
+  const { worker } = makeWorker();
+  const off = makeFakeOffscreenGL();
+  await worker._onMessage({ data: { type: 'init', offscreen: off } });
+  // The worker must have built a GL presenter (primary path) and NOT taken a 2d context.
+  assert.ok(worker.offGL, 'worker built a GLPresenter on the transferred OffscreenCanvas');
+  assert.strictEqual(worker.offCtx, null, 'worker did NOT take a 2d context when WebGL is available');
+  // Drive several frames: GL objects are created ONCE; per-frame uploads via texSubImage2D.
+  for (let i = 0; i < 10; i++) await worker._onMessage({ data: { type: 'frameAdvance' } });
+  assert.strictEqual(off.__gpu.createTexture, 1, 'ONE texture created (not per frame)');
+  assert.strictEqual(off.__gpu.createProgram, 1, 'ONE program created (not per frame)');
+  assert.strictEqual(off.__gpu.texImage2D, 1, 'texture storage allocated ONCE for the geometry');
+  assert.ok(off.__gpu.texSubImage2D >= 9, `per-frame uploads via texSubImage2D (got ${off.__gpu.texSubImage2D})`);
+  assert.ok(off.__gpu.drawArrays >= 10, 'one draw per presented frame');
+  assert.strictEqual(lastPosted(scope, 'video'), null, 'NO video message crosses the boundary on the direct GL path');
+});
+
+await checkAsync('VIDEO PATH REPORT: OffscreenCanvas+WebGL reports videoPath=offscreen-webgl2', async () => {
+  scope.__posted.length = 0;
+  const { worker } = makeWorker();
+  const off = makeFakeOffscreenGL();
+  await worker._onMessage({ data: { type: 'init', offscreen: off } });
+  const vp = lastPosted(scope, 'videoPath');
+  assert.ok(vp, 'videoPath message posted');
+  assert.strictEqual(vp.msg.path, 'offscreen-webgl2', 'reports the active WebGL2 present path');
+  assert.strictEqual(worker.videoPath, 'offscreen-webgl2');
+});
+
+await checkAsync('VIDEO PATH REPORT: OffscreenCanvas without WebGL reports videoPath=offscreen-2d', async () => {
+  scope.__posted.length = 0;
+  const { worker } = makeWorker();
+  const off = makeFakeOffscreen(); // 2d only
+  await worker._onMessage({ data: { type: 'init', offscreen: off } });
+  const vp = lastPosted(scope, 'videoPath');
+  assert.ok(vp, 'videoPath message posted');
+  assert.strictEqual(vp.msg.path, 'offscreen-2d', 'reports the 2D last-resort present path');
+  assert.strictEqual(worker.videoPath, 'offscreen-2d');
+});
+
+await checkAsync('VIDEO PATH REPORT: no OffscreenCanvas reports videoPath=fallback (proxy refines it)', async () => {
+  scope.__posted.length = 0;
+  const { worker } = makeWorker();
+  await worker._onMessage({ data: { type: 'init' } }); // no offscreen
+  const vp = lastPosted(scope, 'videoPath');
+  assert.ok(vp, 'videoPath message posted');
+  assert.strictEqual(vp.msg.path, 'fallback', 'reports fallback so the main-thread renderer is authoritative');
+  assert.strictEqual(worker.videoPath, 'fallback');
 });
 
 await checkAsync('setOffscreen adopts a later-transferred canvas', async () => {
