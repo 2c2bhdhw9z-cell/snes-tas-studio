@@ -354,6 +354,22 @@ body {
 }
 #frame-controls input[type="range"] { width: 160px; }
 
+/* Live FPS readout — prominent, easy to read on-device (rolling 1s window of advanced
+   frames). Larger + accent-colored so performance is visible at a glance next to the
+   frame counter. READ-ONLY perf display; grants no emulation capability. */
+#frame-controls .fps-readout {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  min-width: 84px;
+  justify-content: center;
+}
+
 /* Core selection dropdown (emulator accuracy choice, not a ROM/level picker). */
 #frame-controls .core-group {
   display: flex;

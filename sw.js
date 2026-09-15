@@ -10,7 +10,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v15';
+const CACHE_VERSION = 'tas-studio-v16';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell — always precached. These are the files this feature ships. The emulator
@@ -23,6 +23,7 @@ const APP_SHELL = [
   'styles.css',
   'manifest.json',
   'app.js',
+  'fps-meter.js',
   'tas-engine.js',
   'emu-worker.js',
   'emu-core-runner.js',

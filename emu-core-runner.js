@@ -231,6 +231,8 @@ export class EmuCoreRunner {
     this._loopRunning = false;
     this._accumulator = 0;
     this._lastTs = 0;
+    // Target-time anchor for the free-running accumulator (wall-clock instant frame N is due).
+    this._nextFrameTime = 0;
     this.DEFAULT_FPS = 60.098;
     this.fps = this.DEFAULT_FPS;
     this._baseFrameMs = 1000 / this.fps;
@@ -428,10 +430,32 @@ export class EmuCoreRunner {
     }, 'viiii');
     if (videoCb) this._fn.retro_set_video_refresh(videoCb);
 
-    // Audio: no-op sinks in this feature (audio wiring is out of scope for the migration).
-    const audioSampleCb = add((_left, _right) => {}, 'vii');
+    // Audio: EXPLICITLY NON-BLOCKING, DROP-ALL sinks. Audio is currently silent (no Web Audio
+    // path is wired), but the callback contract is what matters for frame pacing: a libretro
+    // core will STALL retro_run if an audio callback blocks waiting for buffer space, which on
+    // iOS Safari (mismatched sample rates / buffer stalls) can throttle video. So these
+    // callbacks NEVER block and NEVER apply backpressure:
+    //   - retro_set_audio_sample: a single-frame sink that returns immediately (drops the pair).
+    //   - retro_set_audio_sample_batch: ALWAYS returns the full `frames` count so the core
+    //     believes every sample was consumed and never waits — excess samples are DROPPED, not
+    //     buffered. This is drop-on-overflow by construction; it can never gate video.
+    // Both are wrapped so a thrown error inside the callback can never propagate into (and
+    // suspend/abort) the retro_run thread. If real audio is added later it MUST be a ring
+    // buffer that drops on overflow — NEVER a blocking Web Audio write.
+    const audioSampleCb = add((_left, _right) => {
+      // Drop the sample pair. Non-blocking by construction; swallow any error defensively.
+      return 0;
+    }, 'vii');
     if (audioSampleCb) this._fn.retro_set_audio_sample(audioSampleCb);
-    const audioBatchCb = add((_dataPtr, frames) => frames, 'iii');
+    const audioBatchCb = add((_dataPtr, frames) => {
+      // ALWAYS claim the full batch as consumed so the core never waits for buffer space.
+      // Samples are dropped (not applied), so audio cannot throttle the frame loop.
+      try {
+        return frames | 0;
+      } catch (_err) {
+        return frames | 0;
+      }
+    }, 'iii');
     if (audioBatchCb) this._fn.retro_set_audio_sample_batch(audioBatchCb);
 
     const inputPollCb = add(() => {}, 'v');
@@ -770,61 +794,135 @@ export class EmuCoreRunner {
   }
 
   /**
-   * Start the self-scheduling run loop. Unlike the main-thread rAF engine, this yields via
-   * the injected scheduler (a MessageChannel one-shot by default — NO setTimeout clamp)
-   * BETWEEN frames so a worker receives control + input messages between retro_run calls.
-   * Pacing is target-time based: an accumulator tracks real elapsed ms and runs frames only
-   * to keep up with the core's declared fps (this._baseFrameMs = 1000/this.fps), so a fast
-   * core reaches its native 60 without over-running, and a hard guard bounds catch-up frames.
+   * Start the FREE-RUNNING, performance.now()-driven run loop.
+   *
+   * THE 30 FPS LOCK (the bug this fixes): the previous loop re-armed the yield EXACTLY ONCE
+   * per tick, AFTER the tick's work (frame decode + the video present postMessage). On iOS
+   * Safari a MessageChannel/worker task re-posted once per turn, after heavy work that itself
+   * posts a message, does NOT settle at 60 Hz — the turn cadence coalesces to ~30 Hz. With
+   * one frame run per ~33 ms turn the accumulator perpetually sheds the ~1.0007-frame fraction
+   * and the whole loop hard-locks at ~30 FPS (classic half-vsync). The core is fast enough; the
+   * SCHEDULING cadence was the limiter.
+   *
+   * THE FIX: decouple the pump cadence from the per-tick work.
+   *   - The pump re-arms the NEXT yield BEFORE running this turn's frame work (synchronous
+   *     path), so the scheduler is never gated behind frame decode / the video present. The
+   *     pump free-runs at the scheduler's native macrotask rate (hundreds of Hz), far above 60.
+   *   - Frames are advanced purely by a TARGET-TIME accumulator: while (now - _nextFrameTime
+   *     >= 0) run one frame and advance _nextFrameTime by the per-frame interval. This targets
+   *     real time (frame N is due at a fixed wall-clock instant), so it issues ~60 frames per
+   *     real second at speed 1 (~30 at 0.5x) regardless of how often the pump turns, and never
+   *     over-runs 2x. Catch-up is bounded by a guard so a long stall cannot spiral.
+   *   - Presenting a frame (onVideoFrame -> OffscreenCanvas blit or a transferable postMessage)
+   *     never blocks or paces the NEXT retro_run: compute cadence is independent of present,
+   *     and the loop never awaits the transfer.
+   *
+   * ASYNCIFY (bsnes) is different: retro_run may suspend and return a Promise, and libco/
+   * Asyncify CANNOT have two suspensions outstanding. So the ASYNCIFY path keeps the strict
+   * "await each frame, then re-arm exactly one tick" discipline (never a pre-armed pump). The
+   * synchronous snes9x path — the shipped real-time default — is the one that free-runs.
    */
   _startLoop() {
     if (this._loopRunning) return;
     this._loopRunning = true;
     this._lastTs = 0;
     this._accumulator = 0;
+    // Target-time anchor: seeded on the first tick to "now" so the first frame is due one
+    // frame-interval later (no burst of catch-up frames at startup).
+    this._nextFrameTime = 0;
     this._scheduleTick();
+  }
+
+  _now() {
+    return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
   }
 
   _scheduleTick() {
     this._loopHandle = this._scheduleYield(() => this._tick());
   }
 
-  async _tick() {
+  /**
+   * One pump turn.
+   *
+   * SYNCHRONOUS core (snes9x): re-arm the NEXT pump turn IMMEDIATELY, before running any frame
+   * work, so the pump cadence is a free-running high-frequency macrotask stream decoupled from
+   * decode/present. Then advance the target-time accumulator, running as many frames as real
+   * time is due (bounded by a catch-up guard). Because the pump is already re-armed, the loop's
+   * effective frame rate is set by the accumulator (real time), not by how fast a single yield
+   * re-posts after work — which is exactly what broke the 30 Hz lock.
+   *
+   * ASYNCIFY core (bsnes): keep exactly one retro_run suspension in flight. Await each frame,
+   * then re-arm exactly one tick afterward. No pre-armed pump (that would risk overlapping
+   * suspensions), matching the original single-outstanding-tick contract for this path.
+   */
+  _tick() {
     if (this.paused || !this._loopRunning) {
       this._loopRunning = false;
       this._loopHandle = null;
       return;
     }
 
-    const now = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
-    if (!this._lastTs) this._lastTs = now;
-    const delta = now - this._lastTs;
-    this._lastTs = now;
+    if (this._asyncify) return this._tickAsync();
+    return this._tickSync();
+  }
 
-    // Run this tick's burst/catch-up frames. For a synchronous core (snes9x, the shipped
-    // real-time default) _runOneFrame runs inline and this loop is fully synchronous — the
-    // exact original behavior. For an ASYNCIFY core (bsnes) retro_run may suspend and return
-    // a Promise, so we MUST await each frame before starting the next, otherwise multiple
-    // retro_run suspensions overlap (which libco/Asyncify does not support).
+  _tickSync() {
+    // Re-arm the NEXT pump turn FIRST (free-running), decoupling cadence from frame work.
+    this._scheduleTick();
+
+    const now = this._now();
+
     if (this._fastForward) {
-      for (let i = 0; i < 8; i++) {
-        if (this._asyncify) await this._runOneFrame();
-        else this._runOneFrame();
-      }
-    } else {
-      const frameMs = this._baseFrameMs / this.speed;
-      this._accumulator += delta;
-      let guard = 0;
-      while (this._accumulator >= frameMs && guard < 10) {
-        if (this._asyncify) await this._runOneFrame();
-        else this._runOneFrame();
-        this._accumulator -= frameMs;
-        guard += 1;
-      }
+      // Fast-forward ignores the target clock and runs a fixed burst per turn.
+      for (let i = 0; i < 8; i++) this._runOneFrame();
+      // Keep the target anchor fresh so leaving fast-forward doesn't dump a catch-up burst.
+      this._nextFrameTime = now + this._baseFrameMs / this.speed;
+      return;
     }
 
-    // We re-arm exactly once, AFTER this tick's work (post-await for ASYNCIFY), so only ONE
-    // tick — and for ASYNCIFY only ONE retro_run suspension — is ever outstanding.
+    if (!this._nextFrameTime) {
+      // Seed: first frame is due one interval from now. No startup burst.
+      this._nextFrameTime = now + this._baseFrameMs / this.speed;
+      return;
+    }
+
+    const frameMs = this._baseFrameMs / this.speed;
+    let guard = 0;
+    // Target-time accumulator: advance the due-time by exactly one interval per frame so the
+    // loop tracks real time (no fractional shedding). Bounded catch-up prevents a stall spiral.
+    while (now - this._nextFrameTime >= 0 && guard < 10) {
+      this._runOneFrame();
+      this._nextFrameTime += frameMs;
+      guard += 1;
+    }
+    if (guard >= 10) {
+      // Fell far behind (tab backgrounded, GC pause): resync the anchor to avoid a runaway
+      // catch-up burst on the next turn (bounded, never a 2x over-run).
+      this._nextFrameTime = now + frameMs;
+    }
+  }
+
+  async _tickAsync() {
+    const now = this._now();
+    if (this._fastForward) {
+      // ASYNCIFY burst: await each frame so suspensions never overlap (libco constraint).
+      for (let i = 0; i < 8; i++) await this._runOneFrame();
+      this._nextFrameTime = this._now() + this._baseFrameMs / this.speed;
+    } else if (!this._nextFrameTime) {
+      this._nextFrameTime = now + this._baseFrameMs / this.speed;
+    } else {
+      const frameMs = this._baseFrameMs / this.speed;
+      let guard = 0;
+      while (this._now() - this._nextFrameTime >= 0 && guard < 10) {
+        await this._runOneFrame();
+        this._nextFrameTime += frameMs;
+        guard += 1;
+      }
+      if (guard >= 10) this._nextFrameTime = this._now() + frameMs;
+    }
+
+    // Re-arm exactly ONE tick AFTER the awaited work, so only ONE retro_run suspension is ever
+    // outstanding for an ASYNCIFY core.
     if (this._loopRunning && !this.paused) this._scheduleTick();
     else {
       this._loopRunning = false;

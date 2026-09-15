@@ -385,6 +385,152 @@ await checkAsync('fps pacing: loop targets the core-declared frame time (_baseFr
   assert.ok(caughtUp >= 5, `paced catch-up advanced multiple frames for 10x elapsed (got ${caughtUp})`);
 });
 
+// ======================================================================================
+// THE 30 FPS-LOCK PROOF (the crux of this fix).
+//
+// The bug: the old loop re-armed its yield ONCE per tick, AFTER the tick's frame work + video
+// present. On iOS Safari that turn cadence coalesced to ~30 Hz, so with one frame per turn the
+// loop hard-locked at ~30 FPS regardless of how fast the core ran.
+//
+// The fix: a FREE-RUNNING pump (re-armed BEFORE frame work on the synchronous path) whose
+// frame output is gated purely by a performance.now() TARGET-TIME accumulator. To prove it
+// mechanically we model exactly the pathological condition: a pump that fires at a HIGH
+// macrotask rate (so cadence is not the limiter) against a clock advancing at REAL time, and
+// assert the loop issues ~60 frames per simulated second at speed 1 (NOT ~30), ~30 at 0.5x,
+// with bounded catch-up and NO 2x over-run.
+//
+// runFreeRunning drives the injected scheduler as a free-running pump: each turn advances the
+// fake clock by `pumpMs` (the macrotask granularity) and fires the pending tick, for a total
+// of `simMs` simulated milliseconds. This is real 60fps proven headlessly (device FPS is
+// on-device only, but the LOOP TARGET is proven here).
+function runFreeRunning(runner, state, simMs, pumpMs) {
+  const end = CLOCK + simMs;
+  let turns = 0;
+  // Fire the first pending tick that start() armed, then keep re-firing whatever the loop
+  // re-arms, advancing the clock by pumpMs each turn — exactly a free-running macrotask pump.
+  while (state.pending && CLOCK < end && turns < 1e6) {
+    const cb = state.pending;
+    state.pending = null;
+    CLOCK += pumpMs;
+    cb();
+    turns += 1;
+  }
+  return turns;
+}
+
+await checkAsync('30 FPS-LOCK BROKEN: free-running pump issues ~60 frames per simulated second at speed 1', () => {
+  // A pump firing every 4ms = 250 Hz (well above 60): if cadence still gated frames we would
+  // see ~250 or, in the old coupled loop, whatever the turn rate was. Instead the target-time
+  // accumulator must clamp output to the core's declared ~60.098 fps.
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 100000;
+    runner.setSpeed(1);
+    runner.start();
+    runFreeRunning(runner, state, 1000, 4); // 1 simulated second, 250 Hz pump
+    const frames = mock.__runs();
+    // ~60.098 expected. Tight band proves it is neither locked at ~30 nor free-running at 250.
+    assert.ok(frames >= 55 && frames <= 63, `expected ~60 frames/sec, got ${frames} (must NOT be ~30 or ~250)`);
+  });
+});
+
+await checkAsync('NOT 30: a slow ~30 Hz pump still reaches ~60 fps via bounded catch-up', () => {
+  // Model the OLD pathological turn cadence directly: the pump itself only fires ~30x/sec.
+  // The free-running loop must NOT be limited to one frame per turn — the accumulator releases
+  // the frames that real time is due (bounded catch-up), so it still reaches ~60 fps.
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 200000;
+    runner.setSpeed(1);
+    runner.start();
+    runFreeRunning(runner, state, 1000, 33); // 1 simulated second, ~30 Hz pump
+    const frames = mock.__runs();
+    assert.ok(frames >= 55 && frames <= 63, `even at a 30 Hz pump the loop reaches ~60 fps (got ${frames}), NOT locked at ~30`);
+  });
+});
+
+await checkAsync('speed 0.5x issues ~30 frames per simulated second (half of 60)', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 300000;
+    runner.setSpeed(0.5);
+    runner.start();
+    runFreeRunning(runner, state, 1000, 4);
+    const frames = mock.__runs();
+    assert.ok(frames >= 27 && frames <= 33, `expected ~30 frames/sec at 0.5x, got ${frames}`);
+  });
+});
+
+await checkAsync('speed 2x issues ~120 frames per simulated second (double 60), NO over-run beyond it', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 400000;
+    runner.setSpeed(2);
+    runner.start();
+    runFreeRunning(runner, state, 1000, 4);
+    const frames = mock.__runs();
+    assert.ok(frames >= 110 && frames <= 126, `expected ~120 frames/sec at 2x, got ${frames} (no runaway over-run)`);
+  });
+});
+
+await checkAsync('catch-up is bounded: a long stall does NOT trigger a runaway 2x-overrun burst', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 500000;
+    runner.setSpeed(1);
+    runner.start();
+    // Seed one turn at real cadence, then jump the clock a full simulated second in ONE turn
+    // (models a tab-backgrounded stall). The per-turn guard caps catch-up to <=10 frames.
+    runFreeRunning(runner, state, 20, 4);
+    const before = mock.__runs();
+    // One giant turn: advance the clock 1000ms but fire the tick once.
+    const cb = state.pending;
+    state.pending = null;
+    CLOCK += 1000;
+    cb();
+    const burst = mock.__runs() - before;
+    assert.ok(burst <= 10, `single-turn catch-up burst bounded by guard (got ${burst}, must be <=10)`);
+    // And after the resync, normal cadence resumes at ~60 (not a compounding backlog).
+    const afterBurst = mock.__runs();
+    runFreeRunning(runner, state, 500, 4);
+    const resumed = mock.__runs() - afterBurst;
+    assert.ok(resumed >= 26 && resumed <= 34, `~60 fps resumes after a bounded catch-up (got ${resumed} in 0.5s)`);
+  });
+});
+
+await checkAsync('cadence is decoupled from present: onVideoFrame throwing never stalls frame advance', () => {
+  // The present sink must never pace or block compute. Even if presenting throws every frame,
+  // the loop keeps advancing retro_run at ~60 fps (the runner swallows sink errors).
+  return (async () => {
+    const mock = makeMockModule({ asyncify: false });
+    const state = { pending: null };
+    // Make retro_run also emit a video refresh so onVideoFrame is exercised each frame.
+    const runner = new EmuCoreRunner({
+      loadCore: async () => ({ ok: true, Module: mock, corePath: 'cores/snes9x_libretro.js' }),
+      fetchRom: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3, 4]) }),
+      scheduleYield: (cb) => { state.pending = cb; return 1; },
+      getFrameInputMask: () => 0,
+      onVideoFrame: () => { throw new Error('present blew up'); },
+    });
+    await runner.boot();
+    CLOCK = 600000;
+    runner.setSpeed(1);
+    runner.start();
+    runFreeRunning(runner, state, 1000, 4);
+    const frames = mock.__runs();
+    assert.ok(frames >= 55 && frames <= 63, `compute advances ~60 fps despite present throwing (got ${frames})`);
+  })();
+});
+
+await checkAsync('frame-advance still runs EXACTLY one frame after the free-running loop redesign', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 700000;
+    const before = mock.__runs();
+    state.inputFrames.length = 0;
+    runner.frameAdvance();
+    assert.strictEqual(mock.__runs() - before, 1, 'exactly one retro_run on frame-advance');
+    assert.strictEqual(runner.currentFrame, 1, 'frame counter advanced by exactly one');
+    assert.deepStrictEqual(state.inputFrames, [0], 'input resolved for exactly frame 0');
+    assert.strictEqual(runner._loopRunning, false, 'frame-advance does not start the free-running loop');
+    assert.strictEqual(state.pending, null, 'frame-advance schedules no pump turn');
+  });
+});
+
 let failed = 0;
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : '  -> ' + r.err}`);

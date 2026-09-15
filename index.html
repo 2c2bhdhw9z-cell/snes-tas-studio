@@ -102,6 +102,10 @@
           <span id="speed-value">1.0x</span>
         </div>
         <span id="frame-counter" class="speed-group">Frame: 0</span>
+        <!-- Live FPS readout (rolling 1-second window of ACTUAL advanced frames). Prominent,
+             easy to read on-device; updated ~2x/sec by app.js. READ-ONLY perf display: it
+             observes frame messages and shows a rate, granting no emulation capability. -->
+        <span id="fps-readout" class="speed-group fps-readout" title="Measured FPS (rolling 1s window of advanced frames)">FPS: 0</span>
       </div>
 
       <!-- Live HUD + save-state tree. -->

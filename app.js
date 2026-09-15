@@ -24,6 +24,7 @@
 
 import engine from './tas-engine.js';
 import { CORE_CATALOG, coreById } from './core/core-loader.js';
+import { FpsMeter } from './fps-meter.js';
 
 // localStorage key for the persisted core choice (nice-to-have). DEFAULT is 'realtime'
 // (snes9x): with no stored preference the app boots the synchronous snes9x core for
@@ -60,9 +61,33 @@ const bannerState = {
   rom: 'Idle', // ROM fetch: Idle | Fetching | HTTP <code> | Loaded <N> bytes | Error <msg>
   engine: 'Init', // Engine lifecycle: Init | GameLoaded | RunLoop Active | Stopped
   frame: 0, // live frame number (advances one per retro_run)
+  fps: 0, // live measured FPS over a rolling 1-second window (see FpsMeter)
   errors: [], // captured uncaught errors (most-recent last, capped)
 };
 const MAX_BANNER_ERRORS = 5;
+
+// --------------------------------------------------------------------- live FPS meter
+//
+// The user asked for an easy-to-read, HONEST FPS readout. We measure the ACTUAL advanced
+// frames the user sees: the emulator worker posts one 'frame' message per emulated frame
+// (engine.onFrame fires per message), and we count those over a rolling 1-second window.
+// FPS = frames in the last second — no timestamp math on the user's part, no divide-by-zero,
+// reads 0 cleanly when paused (no frames arrive so the window empties). READ-ONLY display.
+const fpsMeter = new FpsMeter(1000);
+const nowMs = () =>
+  typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+
+// Render the FPS readout ~2x/sec (independent of frame arrival) so it updates smoothly and
+// decays to 0 shortly after playback pauses. The dedicated #fps-readout element sits in the
+// toolbar next to the frame counter; the banner also carries an "FPS: NN" field.
+const FPS_RENDER_INTERVAL_MS = 500;
+function renderFps() {
+  const n = fpsMeter.fps(nowMs());
+  bannerState.fps = n;
+  const el = typeof document !== 'undefined' ? document.getElementById('fps-readout') : null;
+  if (el) el.textContent = `FPS: ${n}`;
+  renderBanner();
+}
 
 function renderBanner() {
   const el = document.getElementById('debug-banner');
@@ -91,6 +116,8 @@ function renderBanner() {
   el.appendChild(mk('ROM', bannerState.rom));
   // Engine lifecycle + live frame counter, exactly as:  Engine: [state] | Frame: [N]
   el.appendChild(mk('Engine', `${bannerState.engine} | Frame: ${bannerState.frame}`));
+  // Live measured FPS (rolling 1-second window of actual advanced frames).
+  el.appendChild(mk('FPS', String(bannerState.fps)));
   el.appendChild(
     mk('Err', errLine, bannerState.errors.length > 0 ? 'debug-banner__item--err' : '')
   );
@@ -162,12 +189,27 @@ window.addEventListener('DOMContentLoaded', () => {
   // Frame counter readout. The full toolbar wiring (play/pause, frame advance, speed
   // slider, fast-forward, save/load) lives in piano-roll.js (TASStudio).
   const frameCounter = document.getElementById('frame-counter');
+  let lastFrameForFps = -1;
   engine.onFrame((frame) => {
     if (frameCounter) frameCounter.textContent = `Frame: ${frame}`;
     // Mirror the live frame number into the diagnostic banner's Engine line.
     bannerState.frame = frame;
+    // Count ACTUAL advanced frames for the live FPS readout. Only count genuine forward
+    // advances (one per emulated frame) — a save-state load or repeat tick that reports the
+    // same/earlier frame number must not inflate the rate.
+    if (typeof frame === 'number' && frame !== lastFrameForFps) {
+      if (frame > lastFrameForFps) fpsMeter.tick(nowMs());
+      lastFrameForFps = frame;
+    }
     renderBanner();
   });
+
+  // Drive the FPS readout on a steady ~2x/sec cadence so it updates smoothly and decays to 0
+  // shortly after the user pauses (when no frames arrive, the rolling window empties to 0).
+  renderFps();
+  if (typeof setInterval === 'function') {
+    setInterval(renderFps, FPS_RENDER_INTERVAL_MS);
+  }
 
   // Core selection dropdown. Populated from the core catalog; defaults to Real-Time (snes9x)
   // (or the persisted choice). Changing it dynamically swaps the WASM core via engine.setCore(),
@@ -191,6 +233,9 @@ window.addEventListener('DOMContentLoaded', () => {
       if (!entry) return;
       writeCorePref(entry.id);
       coreSelect.disabled = true;
+      // A core swap resets the frame stream; forget stale frame stamps so FPS starts clean.
+      fpsMeter.reset();
+      lastFrameForFps = -1;
       Promise.resolve(engine.setCore(entry.path))
         .catch((err) => {
           console.warn('[app] core switch error (handled):', err);

@@ -109,6 +109,21 @@ check('app.js listens for unhandledrejection', /addEventListener\(\s*['"]unhandl
 check('#debug-banner element exists', document.getElementById('debug-banner'));
 check('#debug-banner styled to respect the notch (safe-area-inset-top)', /#debug-banner\s*\{[^}]*safe-area-inset-top/s.test(css));
 
+// Live FPS readout (rolling 1s window of ACTUAL advanced frames) — prominent + easy to read
+// on-device, sitting in the toolbar next to the frame counter. app.js renders it ~2x/sec and
+// also carries an "FPS" field in the debug banner. READ-ONLY perf display, no emulation power.
+check('#fps-readout element exists (prominent live FPS)', document.getElementById('fps-readout'));
+check('#fps-readout lives inside #frame-controls (near the core controls)', (() => {
+  const fc = document.getElementById('frame-controls');
+  const el = document.getElementById('fps-readout');
+  return fc && el && fc.contains(el);
+})());
+check('#fps-readout styled prominent (bold, accent, tabular-nums)', /\.fps-readout\s*\{[^}]*font-weight:\s*700/s.test(css));
+check('app.js sources FPS from a rolling-window FpsMeter', /new\s+FpsMeter\(/.test(appSrc));
+check('app.js ticks the FPS meter on each advanced frame (fpsMeter.tick)', /fpsMeter\.tick\(/.test(appSrc));
+check('app.js renders the FPS readout element (#fps-readout text)', /getElementById\(\s*['"]fps-readout['"]\s*\)/.test(appSrc));
+check('debug banner carries an FPS field', /mk\(\s*['"]FPS['"]/.test(appSrc));
+
 // ROM fetch uses encodeURI so Safari does not 400/404 on spaces/parens. The fetch now lives
 // in the worker-side core runner (emu-core-runner.js), not the main-thread proxy.
 const runnerSrc = fs.readFileSync(path.join(ROOT, 'emu-core-runner.js'), 'utf8');

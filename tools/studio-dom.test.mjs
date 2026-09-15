@@ -125,6 +125,16 @@ check('speed slider min=0.1', speed && speed.min === '0.1');
 check('speed slider max=2', speed && speed.max === '2');
 check('save button exists', document.getElementById('btn-savestate'));
 check('load button exists', document.getElementById('btn-loadstate'));
+// Live FPS readout sits in the toolbar next to the frame counter (prominent, read-only perf
+// display; sourced from actual advanced frames over a rolling 1s window by app.js).
+check('frame counter exists', document.getElementById('frame-counter'));
+check('#fps-readout exists in the toolbar', document.getElementById('fps-readout'));
+check('#fps-readout is inside #frame-controls', (() => {
+  const fc = document.getElementById('frame-controls');
+  const fps = document.getElementById('fps-readout');
+  return fc && fps && fc.contains(fps);
+})());
+check('#fps-readout initial text is a plain FPS label', /FPS:\s*0/.test((document.getElementById('fps-readout') || {}).textContent || ''));
 
 // Speed slider drives engine.setSpeed (clamped) and posts a setSpeed message.
 worker.__clear();

@@ -157,6 +157,8 @@ function makeMockModule() {
     // test-only introspection
     __getState: () => coreState,
     __setState: (v) => { coreState = v; },
+    __cbs: () => cbs,
+    __call: (idx, ...args) => table[idx - 1](...args), // invoke an installed callback by index
   };
 }
 
@@ -273,6 +275,23 @@ await checkAsync('input source is consulted per frame (bit extraction)', async (
   await runner.boot();
   runner.frameAdvance();
   assert.ok(seen.length >= 1, 'getFrameInputMask consulted during retro_run');
+});
+
+await checkAsync('audio callbacks are NON-BLOCKING: batch ALWAYS returns the full frame count (drop-all, never stalls)', async () => {
+  const { deps, mock } = makeDeps();
+  const runner = new EmuCoreRunner(deps);
+  await runner.boot();
+  const cbs = mock.__cbs();
+  // The batch callback (retro_set_audio_sample_batch) MUST report every sample consumed so a
+  // real core never waits for buffer space — this is what keeps audio from throttling video.
+  assert.ok(cbs.audioBatch, 'audio batch callback installed');
+  for (const frames of [0, 1, 512, 4096, 65535]) {
+    const consumed = mock.__call(cbs.audioBatch, 0 /* dataPtr */, frames);
+    assert.strictEqual(consumed, frames, `batch claims ALL ${frames} frames consumed (no backpressure)`);
+  }
+  // The single-sample callback must not throw / block either.
+  assert.ok(cbs.audioSample, 'audio sample callback installed');
+  assert.doesNotThrow(() => mock.__call(cbs.audioSample, 100, -100), 'single-sample sink never throws');
 });
 
 await checkAsync('self-scheduling run loop advances frames and yields between them (fast-forward)', async () => {
