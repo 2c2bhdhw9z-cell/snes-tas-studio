@@ -562,6 +562,77 @@ await checkAsync('cadence is decoupled from present: onVideoFrame throwing never
   })();
 });
 
+// ======================================================================================
+// HARDWARE-VSYNC (rAF) PACING PROOF.
+//
+// On the OffscreenCanvas present path the worker drives the runner's loop from
+// self.requestAnimationFrame (~60Hz, display-refresh-paced). We model that here by injecting a
+// scheduleYield that fires at a FIXED 60Hz cadence (advance the clock by one refresh interval
+// per turn), and assert the target-time accumulator advances ~60 emulated frames per simulated
+// second at 1x (one emu frame per rAF), and ~30 at 0.5x — WITHOUT reintroducing the old
+// cadence lock. This is the "verify the accumulator still advances ~60 emu-frames/sec under a
+// 60Hz rAF" check: rAF is display-driven, and one emu frame is due per refresh at 1x.
+function makeRunnerRafPaced() {
+  const mock = makeMockModule({ asyncify: false });
+  const state = { pending: null, inputFrames: [] };
+  const runner = new EmuCoreRunner({
+    asyncify: false,
+    loadCore: async () => ({ ok: true, Module: mock, corePath: 'cores/snes9x_libretro.js' }),
+    fetchRom: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3, 4]) }),
+    scheduleYield: (cb) => { state.pending = cb; return { kind: 'raf' }; },
+    getFrameInputMask: (frame) => { state.inputFrames.push(frame); return 0; },
+  });
+  return { runner, mock, state };
+}
+
+// Fire the rAF-paced loop for `refreshes` display refreshes at ~60Hz (16.667ms each).
+function runAtRefreshRate(runner, state, refreshes) {
+  const REFRESH_MS = 1000 / 60;
+  for (let i = 0; i < refreshes && state.pending; i++) {
+    const cb = state.pending;
+    state.pending = null;
+    CLOCK += REFRESH_MS;
+    cb();
+  }
+}
+
+await checkAsync('rAF pacing 1x: ~60 emulated frames per simulated second under a 60Hz rAF (one per refresh)', async () => {
+  const { runner, mock, state } = makeRunnerRafPaced();
+  await runner.boot();
+  CLOCK = 1000000;
+  runner.setSpeed(1);
+  runner.start();
+  runAtRefreshRate(runner, state, 60); // one simulated second of 60Hz refreshes
+  const frames = mock.__runs();
+  assert.ok(frames >= 57 && frames <= 61, `~60 emu frames/sec at 1x under 60Hz rAF (got ${frames}); one emu frame per refresh, no cadence lock`);
+});
+
+await checkAsync('rAF pacing 0.5x: ~30 emulated frames per simulated second under a 60Hz rAF', async () => {
+  const { runner, mock, state } = makeRunnerRafPaced();
+  await runner.boot();
+  CLOCK = 2000000;
+  runner.setSpeed(0.5);
+  runner.start();
+  runAtRefreshRate(runner, state, 60);
+  const frames = mock.__runs();
+  assert.ok(frames >= 27 && frames <= 33, `~30 emu frames/sec at 0.5x under 60Hz rAF (got ${frames})`);
+});
+
+await checkAsync('rAF pacing: exactly one outstanding rAF-scheduled turn (single driver, no double-schedule)', async () => {
+  const { runner, state } = makeRunnerRafPaced();
+  await runner.boot();
+  CLOCK = 3000000;
+  runner.start();
+  // After each refresh, exactly one new turn is pending (the loop re-arms once per tick).
+  for (let i = 0; i < 20; i++) {
+    assert.ok(state.pending, `refresh ${i}: exactly one turn pending`);
+    const cb = state.pending;
+    state.pending = null;
+    CLOCK += 1000 / 60;
+    cb();
+  }
+});
+
 await checkAsync('frame-advance still runs EXACTLY one frame after the free-running loop redesign', () => {
   return makeRunner().then(({ runner, mock, state }) => {
     CLOCK = 700000;

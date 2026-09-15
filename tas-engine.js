@@ -378,6 +378,21 @@ class TASEngine {
       this._ackVideo(buffer);
       return;
     }
+    // FALLBACK BACKPRESSURE (main-thread present path): bind the present to the display refresh
+    // via requestAnimationFrame, then ACK from INSIDE that rAF. The worker holds the next frame
+    // (its _videoInFlight gate) until this ack arrives, so at most ONE frame is ever in flight
+    // and the present is vsync-paced — the same hardware backpressure the OffscreenCanvas path
+    // gets, so the main-thread WebGL command queue cannot flood either. When rAF is unavailable
+    // (jsdom/tests/headless), present + ack immediately (synchronous fallback).
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => this._presentAndAck(buffer, width, height));
+    } else {
+      this._presentAndAck(buffer, width, height);
+    }
+  }
+
+  /** Present one fallback frame (WebGL primary, 2D last-resort) then ack for the next frame. */
+  _presentAndAck(buffer, width, height) {
     // PRIMARY: upload the received RGBA into the single WebGL texture and draw it. We wrap the
     // transferred ArrayBuffer in a Uint8ClampedArray view (no copy) and hand it to the
     // presenter — no per-frame putImageData, which is the iOS-native-leak fix.

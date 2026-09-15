@@ -164,10 +164,32 @@ worker. Touch is never blocked again.
 - **Video (OffscreenCanvas, with an iOS-safe fallback).** `tas-engine.js` feature-detects
   `HTMLCanvasElement.prototype.transferControlToOffscreen` + a working `OffscreenCanvas` 2d
   context. **If supported**, it `transferControlToOffscreen()` and posts the canvas to the
-  worker (as a transferable), and the worker blits decoded RGBA **directly** — no per-frame
-  message crosses the boundary. **If not supported** (older Safari), the worker posts each
-  frame as `{type:'video'}` with a transferable `ArrayBuffer` of RGBA + dimensions and the
-  main thread blits it. Both paths use the same decoder in `emu-core-runner.js`.
+  worker (as a transferable), and the worker presents decoded RGBA **directly** via WebGL
+  (`gl-presenter.js`; one texture + per-frame `texSubImage2D`) — no per-frame message crosses
+  the boundary. **If not supported** (older Safari), the worker posts each frame as
+  `{type:'video'}` with a transferable `ArrayBuffer` of RGBA + dimensions and the main thread
+  presents it. Both paths use the same decoder in `emu-core-runner.js`.
+- **Present loop bound to hardware V-Sync (the GPU-command-queue-flood fix).** Presenting
+  cannot be **open-loop** or the iOS WebGL command queue grows unbounded and the FPS decays
+  smoothly (60 → 12). So there is **exactly one loop driver active at a time**, chosen by the
+  present path:
+  - **OffscreenCanvas path (worker presents):** the run/present loop is driven by
+    **`self.requestAnimationFrame` inside the worker** (available in a dedicated worker that
+    was transferred an OffscreenCanvas, and paced to the display refresh ~60Hz). Each rAF the
+    worker advances emulation with the target-time accumulator (bounded catch-up stays, so a
+    slow device **frame-skips** instead of bursting) and then presents **exactly one** frame —
+    the **latest** decoded that turn — so even a catch-up or fast-forward burst issues **one
+    `texSubImage2D`+draw per refresh**. rAF gives **implicit** WebGL backpressure: the browser
+    will not schedule the next rAF until the previous frame's GL commands are consumed, so the
+    command queue cannot flood. Frame-advance while paused is a **separate one-shot present**,
+    not the rAF loop.
+  - **Fallback path (main thread presents):** the worker gates the next posted frame on a
+    **main-thread `requestAnimationFrame` ACK** — the proxy presents inside its own rAF then
+    acks, so at most **one frame is in flight** and the present is vsync-paced there too.
+  - **Headless / non-presenting (Node, tests):** no rAF, so the loop uses the **MessageChannel
+    one-shot** yield (`defaultScheduleYield`); tests inject their own scheduler. The code
+    feature-detects `self.requestAnimationFrame` and cleanly uses the injected/MessageChannel
+    scheduler when it is absent (rAF **XOR** MessageChannel — never both).
 - **HUD (streamed, read-only).** The worker reads the verified SMB1 WRAM addresses
   **read-only** each frame and posts a small values object via `{type:'hud'}`. The proxy
   surfaces those through `getMemoryView()` (read accessors only, keyed by WRAM offset) so
@@ -196,7 +218,7 @@ worker. Touch is never blocked again.
 | `live-input.js` | Real-time controller input (`LiveInput`): HTML5 Gamepad API polling + on-screen touch controls; its mask is streamed to the worker and OR-ed into the frame the worker runs next. |
 | `memory-watch.js` | Read-only Live HUD: renders Mario X/Y sub-pixel, horizontal speed, and the frame counter from the **streamed** HUD values (observation only). |
 | `core/core-loader.js` | Fetches + instantiates the Emscripten libretro core **inside the worker**; degrades gracefully when absent. |
-| `sw.js` | Service worker (`tas-studio-v14`): cache-first offline app shell, now precaching `emu-worker.js` + `emu-core-runner.js` + `input-resolver.js`. **Never caches the ROM.** |
+| `sw.js` | Service worker (`tas-studio-v20`): cache-first offline app shell, precaching `emu-worker.js` + `emu-core-runner.js` + `input-resolver.js` + `gl-presenter.js`. **Never caches the ROM.** |
 | `manifest.json` | PWA manifest: standalone, landscape, dark theme, icons. |
 | `styles.css` | Studio UI + low-opacity on-screen touch controls. |
 | `icons/` | PWA icons (placeholder solids; regenerate with `tools/make-icons.js`). |
@@ -388,8 +410,14 @@ they must be checked on the actual hardware:
 - **Real touch responsiveness** — that the virtual controller and UI buttons respond
   immediately now that the main thread is never blocked by `retro_run`.
 - **OffscreenCanvas behavior on the user's exact Safari version** — whether
-  `transferControlToOffscreen` + worker 2d blit is taken, or the `{type:'video'}` fallback is
-  used, on that specific iOS build.
+  `transferControlToOffscreen` + the worker WebGL present is taken, or the `{type:'video'}`
+  fallback is used, on that specific iOS build.
+- **The sustained 60-FPS hold under the V-Sync-bound present loop** — the headless harnesses
+  prove the *mechanism* (present is now **one draw per rAF**, vsync-paced and backpressured,
+  instead of open-loop per emulated frame, with exactly one loop driver active). Whether that
+  actually stops the iOS **GPU-command-queue** decay (the 60 → 12 slide) can only be confirmed
+  on the physical device: reload and watch the FPS meter **hold** steady with the debug
+  banner's **Video** field reading `offscreen-webgl2`. **On-device FPS-hold is the final judge.**
 - **The FEAT-003 no-ASYNCIFY bsnes result on-device** — documented as a NEGATIVE result
   (libco cothread switch throws a Wasm exception out of `retro_run` even off the main thread;
   no core shipped). See `cores/README.md` / `cores/build.json`. snes9x-in-worker remains the

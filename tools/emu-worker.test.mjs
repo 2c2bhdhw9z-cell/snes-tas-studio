@@ -496,6 +496,228 @@ check('unknown / malformed messages are ignored (fail-closed, no throw)', () => 
   worker._onMessage({ data: { notype: true } });
 });
 
+// ======================================================================================
+// LOOP DRIVER: HARDWARE-VSYNC (requestAnimationFrame) BACKPRESSURE
+//
+// The crux of THIS fix. On the OffscreenCanvas present path the run/present loop must be
+// driven by self.requestAnimationFrame (display-refresh-paced, implicit WebGL backpressure)
+// and present EXACTLY ONE frame per rAF callback — never multiple draws per rAF, even under a
+// catch-up burst or fast-forward. Exactly ONE loop driver is active at a time (rAF XOR the
+// MessageChannel/injected scheduler). The fallback path gates the next present on a
+// main-thread rAF ack (in-flight <= 1). We prove these with a CONTROLLABLE fake rAF stub.
+
+// A worker scope with a CLOCK-DRIVEN fake requestAnimationFrame we fire manually.
+function makeRafScope() {
+  const listeners = { message: [] };
+  const posted = [];
+  const rafQueue = [];
+  let rafId = 1;
+  return {
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    postMessage(msg, transfer) { posted.push({ msg, transfer: transfer || null }); },
+    requestAnimationFrame(cb) { const id = rafId++; rafQueue.push({ id, cb }); return id; },
+    cancelAnimationFrame(id) { const i = rafQueue.findIndex((r) => r.id === id); if (i >= 0) rafQueue.splice(i, 1); },
+    __deliver(data) { for (const fn of listeners.message) fn({ data }); },
+    __posted: posted,
+    // Fire exactly ONE pending rAF callback (models one display refresh).
+    __tickRaf() { const next = rafQueue.shift(); if (next) next.cb(); return !!next; },
+    __rafPending() { return rafQueue.length; },
+  };
+}
+
+// A GL presenter stub that records draw calls, wired onto a fake OffscreenCanvas so the worker
+// builds it as the primary offscreen present path.
+function makeRafOffscreenGL(gpu) {
+  const gl = {
+    VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, ARRAY_BUFFER: 3, STATIC_DRAW: 4, TEXTURE_2D: 5,
+    TEXTURE0: 6, TEXTURE_MIN_FILTER: 7, TEXTURE_MAG_FILTER: 8, TEXTURE_WRAP_S: 9, TEXTURE_WRAP_T: 10,
+    NEAREST: 11, CLAMP_TO_EDGE: 12, RGBA: 13, UNSIGNED_BYTE: 14, UNPACK_ALIGNMENT: 15, FLOAT: 16,
+    TRIANGLES: 17, LINK_STATUS: 18, COMPILE_STATUS: 19,
+    createShader: () => ({}), shaderSource() {}, compileShader() {},
+    getShaderParameter: () => true, getShaderInfoLog: () => '', deleteShader() {},
+    createProgram: () => ({}), attachShader() {}, bindAttribLocation() {}, linkProgram() {},
+    getProgramParameter: () => true, getProgramInfoLog: () => '', useProgram() {},
+    getUniformLocation: () => ({}), uniform1i() {},
+    createBuffer: () => ({}), bindBuffer() {}, bufferData() {},
+    enableVertexAttribArray() {}, vertexAttribPointer() {},
+    createVertexArray: () => ({}), bindVertexArray() {}, deleteVertexArray() {},
+    createTexture: () => ({}), activeTexture() {}, bindTexture() {}, texParameteri() {}, pixelStorei() {},
+    texImage2D: () => { gpu.texImage2D++; }, texSubImage2D: () => { gpu.texSubImage2D++; },
+    viewport() {}, drawArrays: () => { gpu.drawArrays++; },
+    deleteTexture() {}, deleteBuffer() {}, deleteProgram() {},
+  };
+  return {
+    width: 256, height: 224,
+    getContext: (type) => (type === 'webgl2' ? gl : null),
+  };
+}
+
+// A fake runner whose run loop is driven THROUGH the injected scheduleYield (like the real
+// EmuCoreRunner), so we can prove the worker drives it via rAF and coalesces presents. Each
+// scheduled turn advances `perTurn` frames, each calling onVideoFrame (present) once.
+function makeSchedulerRunner(worker, opts = {}) {
+  const perTurn = opts.perTurn || 1;
+  let frame = 0;
+  const runner = {
+    status: 'ready',
+    paused: true,
+    _loopRunning: false,
+    _handle: null,
+    get currentFrame() { return frame; },
+    set currentFrame(v) { frame = v; },
+    _turn() {
+      if (this.paused || !this._loopRunning) { this._loopRunning = false; return; }
+      // Re-arm the NEXT turn FIRST (free-running discipline, like _tickSync).
+      this._handle = worker._scheduleLoopTurn(() => this._turn());
+      // Run perTurn frames this turn; each decodes + presents (coalesced by the worker).
+      for (let i = 0; i < perTurn; i++) {
+        worker._presentFrame(new Uint8ClampedArray(2 * 2 * 4).fill(frame & 0xff), 2, 2, 8, 2);
+        frame += 1;
+      }
+    },
+    start() {
+      this.paused = false; this.status = 'running'; this._loopRunning = true;
+      this._handle = worker._scheduleLoopTurn(() => this._turn());
+    },
+    pause() { this.paused = true; this.status = 'ready'; this._loopRunning = false; },
+    boot: async () => ({ ok: true, coreOk: true, romOk: true }),
+    setSpeed() {}, fastForward() {}, teardown() {},
+    frameAdvance() {
+      // Frame-advance: exactly one retro_run while paused, a SEPARATE one-shot present.
+      this.pause();
+      worker._presentFrame(new Uint8ClampedArray(2 * 2 * 4).fill(0xaa), 2, 2, 8, 2);
+      frame += 1;
+    },
+    saveState() { return new Uint8Array([1, 2, 3, 4]); },
+    loadState() { return true; },
+  };
+  return runner;
+}
+
+await checkAsync('rAF DRIVER: OffscreenCanvas + rAF -> loop driven by requestAnimationFrame (not MessageChannel)', async () => {
+  const scope = makeRafScope();
+  const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0 };
+  const worker = new EmuWorker(scope);
+  worker._makeRunner = () => makeSchedulerRunner(worker);
+  await worker._onMessage({ data: { type: 'init', offscreen: makeRafOffscreenGL(gpu) } });
+  assert.ok(worker.offGL, 'built a GL presenter on the transferred OffscreenCanvas');
+  assert.ok(worker._usingRafDriver(), 'worker selects the rAF loop driver on the offscreen+rAF path');
+  // Boot auto-plays -> the runner armed a loop turn. It must be a PENDING rAF, not a message.
+  assert.strictEqual(scope.__rafPending(), 1, 'exactly one rAF scheduled (the loop turn)');
+});
+
+await checkAsync('rAF DRIVER: EXACTLY ONE present (draw) per rAF callback at 1x', async () => {
+  const scope = makeRafScope();
+  const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0 };
+  const worker = new EmuWorker(scope);
+  worker._makeRunner = () => makeSchedulerRunner(worker, { perTurn: 1 });
+  await worker._onMessage({ data: { type: 'init', offscreen: makeRafOffscreenGL(gpu) } });
+  // Fire 10 display refreshes; each turn runs 1 frame -> exactly 1 draw per rAF.
+  for (let i = 0; i < 10; i++) assert.ok(scope.__tickRaf(), `rAF ${i} fired`);
+  assert.strictEqual(gpu.drawArrays, 10, 'exactly one draw per rAF callback (10 rAF -> 10 draws)');
+  assert.strictEqual(scope.__rafPending(), 1, 'always exactly one rAF outstanding (single driver)');
+});
+
+await checkAsync('rAF DRIVER: catch-up BURST still presents EXACTLY ONE frame per rAF (no multi-draw flood)', async () => {
+  const scope = makeRafScope();
+  const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0 };
+  const worker = new EmuWorker(scope);
+  // perTurn=5 models a catch-up/fast-forward burst: 5 retro_run this rAF, each calling present.
+  worker._makeRunner = () => makeSchedulerRunner(worker, { perTurn: 5 });
+  await worker._onMessage({ data: { type: 'init', offscreen: makeRafOffscreenGL(gpu) } });
+  for (let i = 0; i < 8; i++) scope.__tickRaf();
+  // 8 rAF * 5 emulated frames = 40 frames decoded, but ONLY 8 draws (one per rAF).
+  assert.strictEqual(gpu.drawArrays, 8, `one draw per rAF even with a 5-frame burst (got ${gpu.drawArrays}, must be 8 not 40)`);
+  // One upload per rAF, coalesced to the latest frame: the first present allocates storage
+  // (texImage2D), the rest are texSubImage2D — 1 alloc + 7 sub-uploads == 8 uploads total.
+  assert.strictEqual(gpu.texImage2D + gpu.texSubImage2D, 8, `one texture upload per rAF (got ${gpu.texImage2D}+${gpu.texSubImage2D}, must total 8 not 40)`);
+});
+
+await checkAsync('rAF DRIVER: SINGLE driver — no MessageChannel pump runs alongside rAF', async () => {
+  // Track MessageChannel construction during the loop: on the rAF path NONE should be made.
+  const savedMC = globalThis.MessageChannel;
+  let mcConstructed = 0;
+  globalThis.MessageChannel = class { constructor() { mcConstructed++; this.port1 = { postMessage() {}, set onmessage(_v) {} }; this.port2 = { postMessage() {} }; } };
+  try {
+    const scope = makeRafScope();
+    const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0 };
+    const worker = new EmuWorker(scope);
+    worker._makeRunner = () => makeSchedulerRunner(worker, { perTurn: 1 });
+    await worker._onMessage({ data: { type: 'init', offscreen: makeRafOffscreenGL(gpu) } });
+    for (let i = 0; i < 12; i++) scope.__tickRaf();
+    assert.strictEqual(mcConstructed, 0, 'no MessageChannel pump constructed while rAF drives the loop (rAF XOR MC)');
+    assert.strictEqual(gpu.drawArrays, 12, 'rAF alone advanced/presented the loop');
+  } finally {
+    globalThis.MessageChannel = savedMC;
+  }
+});
+
+await checkAsync('rAF DRIVER: frame-advance is a SEPARATE one-shot present (not the rAF loop)', async () => {
+  const scope = makeRafScope();
+  const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0 };
+  const worker = new EmuWorker(scope);
+  worker._makeRunner = () => makeSchedulerRunner(worker, { perTurn: 1 });
+  await worker._onMessage({ data: { type: 'init', offscreen: makeRafOffscreenGL(gpu) } });
+  // Pause first so the loop is not running, then frame-advance.
+  await worker._onMessage({ data: { type: 'pause' } });
+  const drawsBefore = gpu.drawArrays;
+  await worker._onMessage({ data: { type: 'frameAdvance' } });
+  assert.strictEqual(gpu.drawArrays, drawsBefore + 1, 'frame-advance presents exactly one frame immediately (one-shot, not deferred to rAF)');
+});
+
+await checkAsync('NO rAF: headless offscreen falls back to the MessageChannel/injected scheduler (single driver)', async () => {
+  // A scope WITHOUT requestAnimationFrame (like Node/jsdom in a worker). The worker must NOT
+  // claim the rAF driver and must use the MessageChannel one-shot instead.
+  const scope = makeFakeScope(); // no requestAnimationFrame
+  const worker = new EmuWorker(scope);
+  const off = makeFakeOffscreenGL();
+  await worker._onMessage({ data: { type: 'init', offscreen: off } });
+  assert.ok(worker.offGL, 'GL presenter still built on the offscreen path');
+  assert.strictEqual(worker._usingRafDriver(), false, 'no rAF available -> rAF driver NOT selected');
+  // A scheduled turn must be a messagechannel/timeout/microtask handle, never a rAF handle.
+  const handle = worker._scheduleLoopTurn(() => {});
+  assert.notStrictEqual(handle.kind, 'raf', 'headless offscreen uses a non-rAF driver');
+});
+
+await checkAsync('FALLBACK rAF-ACK: main-thread present is gated on rAF then acked (in-flight <= 1)', async () => {
+  // Prove the proxy side: it presents inside a main-thread requestAnimationFrame, then acks.
+  // We import the proxy with a controllable global requestAnimationFrame + a Worker stub.
+  const savedRaf = globalThis.requestAnimationFrame;
+  const savedWorker = globalThis.Worker;
+  const savedWin = globalThis.window;
+  const rafCbs = [];
+  globalThis.requestAnimationFrame = (cb) => { rafCbs.push(cb); return rafCbs.length; };
+  const workerPosts = [];
+  globalThis.Worker = class { constructor() {} addEventListener() {} postMessage(m, t) { workerPosts.push({ m, t: t || null }); } };
+  globalThis.window = globalThis;
+  try {
+    const mod = await import('../tas-engine.js?rafack=1');
+    const engine = mod.default;
+    engine._ensureWorker();
+    // Simulate the fallback present path with a GL presenter recording draws.
+    let draws = 0;
+    engine._usingOffscreen = false;
+    engine._gl = { present: () => { draws++; } };
+    engine._ctx = null;
+    const buf = new ArrayBuffer(2 * 2 * 4);
+    // Receive a video message: present must be DEFERRED to rAF (no draw/ack yet).
+    engine._blitVideoMessage({ buffer: buf, width: 2, height: 2 });
+    assert.strictEqual(draws, 0, 'present deferred to the next rAF (not drawn synchronously)');
+    const acksBefore = workerPosts.filter((p) => p.m && p.m.type === 'videoAck').length;
+    assert.strictEqual(acksBefore, 0, 'no ack until the rAF fires (worker gate stays set -> in-flight <= 1)');
+    assert.strictEqual(rafCbs.length, 1, 'exactly one rAF scheduled for the present');
+    // Fire the rAF: now it presents and acks exactly once.
+    rafCbs.shift()();
+    assert.strictEqual(draws, 1, 'presented on the rAF');
+    const acksAfter = workerPosts.filter((p) => p.m && p.m.type === 'videoAck').length;
+    assert.strictEqual(acksAfter, 1, 'acked from inside the rAF (releases the next frame; in-flight <= 1)');
+  } finally {
+    globalThis.requestAnimationFrame = savedRaf;
+    globalThis.Worker = savedWorker;
+    if (savedWin === undefined) delete globalThis.window; else globalThis.window = savedWin;
+  }
+});
+
 let failed = 0;
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : '  -> ' + r.err}`);

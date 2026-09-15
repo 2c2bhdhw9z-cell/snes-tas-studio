@@ -44,8 +44,13 @@ globalThis.document = {
   getElementById: () => null,
   head: { appendChild: () => {} },
 };
-globalThis.requestAnimationFrame = () => 0;
+// Controllable rAF: the fallback present path now defers the draw+ack to a main-thread
+// requestAnimationFrame (hardware-vsync backpressure). Capture pending callbacks so tests can
+// fire a "display refresh" deterministically via flushRaf().
+const __rafCbs = [];
+globalThis.requestAnimationFrame = (cb) => { __rafCbs.push(cb); return __rafCbs.length; };
 globalThis.cancelAnimationFrame = () => {};
+function flushRaf() { const cbs = __rafCbs.splice(0); for (const cb of cbs) cb(); return cbs.length; }
 
 // Install the mock Worker (no OffscreenCanvas support by default -> fallback video path).
 installMockWorkerEnv({ offscreen: false });
@@ -258,23 +263,30 @@ check('read-only view maps ALL FOUR X offsets + Y/H-Speed to the correct WRAM by
 // ======================================================================================
 // Video FALLBACK blit: no OffscreenCanvas -> proxy blits {type:'video'} frames itself.
 // ======================================================================================
-check('proxy blits {type:"video"} frames on the fallback (no-OffscreenCanvas) path', () => {
+check('proxy blits {type:"video"} frames on the fallback path — DEFERRED to a main-thread rAF (vsync backpressure)', () => {
   blits.length = 0;
   const w = 4, h = 2;
   const buf = new Uint8Array(w * h * 4).fill(255).buffer;
   worker.__emit({ type: 'video', buffer: buf, width: w, height: h, pitch: w * 2, pixelFormat: 2 });
-  assert.strictEqual(blits.length, 1, 'proxy drew the posted frame to the main-thread 2d context');
+  // The present is now bound to the display refresh: NOTHING is drawn until the rAF fires.
+  assert.strictEqual(blits.length, 0, 'present is deferred to requestAnimationFrame (not drawn synchronously)');
+  const drew = flushRaf(); // one simulated display refresh
+  assert.ok(drew >= 1, 'a rAF was scheduled for the present');
+  assert.strictEqual(blits.length, 1, 'proxy drew the posted frame to the main-thread 2d context on the rAF');
   assert.strictEqual(fakeCanvas.width, w);
   assert.strictEqual(fakeCanvas.height, h);
 });
 
-check('proxy ACKs the drawn video buffer back to the worker (backpressure release + pool reuse)', () => {
+check('proxy ACKs the drawn video buffer back to the worker FROM INSIDE the rAF (in-flight <= 1)', () => {
   worker.__clear();
   const w = 4, h = 2;
   const buf = new Uint8Array(w * h * 4).fill(128).buffer;
   worker.__emit({ type: 'video', buffer: buf, width: w, height: h, pitch: w * 2, pixelFormat: 2 });
+  // Gate: no ack until the rAF fires, so the worker holds the next frame (in-flight bounded to 1).
+  assert.strictEqual(worker.__last('videoAck'), null, 'no ack before the rAF fires (worker gate stays set)');
+  flushRaf();
   const ack = worker.__last('videoAck');
-  assert.ok(ack, 'a videoAck was posted after drawing');
+  assert.ok(ack, 'a videoAck was posted after drawing on the rAF');
   assert.ok(ack.transfer && ack.transfer[0] === ack.msg.buffer, 'the buffer is transferred BACK for reuse');
 });
 

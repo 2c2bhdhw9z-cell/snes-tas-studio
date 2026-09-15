@@ -45,6 +45,38 @@
 // so frame N is always run with exactly frame N's resolved input. A 'frameAdvance' message
 // triggers EXACTLY one retro_run with that frame's resolved input (EmuCoreRunner.frameAdvance).
 //
+// ==================== LOOP DRIVER: HARDWARE VSYNC (rAF) BACKPRESSURE ====================
+// The emulator run/present loop is bound to the DISPLAY REFRESH so the GPU command queue can
+// never flood (the iOS 60->12 decay). There is EXACTLY ONE loop driver active at a time
+// (rAF XOR the MessageChannel/injected scheduler), selected by whether the worker presents
+// onto a transferred OffscreenCanvas:
+//
+//   * OFFSCREEN present path (worker owns the canvas) + self.requestAnimationFrame available:
+//     the runner's self-scheduling loop is driven by `self.requestAnimationFrame`. In a
+//     dedicated worker that was transferred an OffscreenCanvas, rAF IS available and is
+//     display-refresh-driven (~60Hz). It gives IMPLICIT WebGL backpressure: the browser will
+//     not schedule the next rAF until the previous frame's GL commands are consumed/presented,
+//     so the command queue cannot grow unbounded. Each rAF: (1) run the target-time
+//     accumulator to advance emulation up to real time (bounded catch-up = MAX_CATCHUP_FRAMES,
+//     so a slow device FRAME-SKIPS instead of bursting); (2) present EXACTLY ONE frame — the
+//     LATEST decoded frame — via the GL presenter (never multiple draws per rAF, even under a
+//     catch-up burst or fast-forward); (3) rAF again. Emulation stays paced to real time (60
+//     at 1x, 30 at 0.5x); present is paced to vsync (one draw per refresh).
+//
+//   * FALLBACK present path (no OffscreenCanvas; MAIN thread presents) — see tas-engine.js:
+//     the worker posts frames and gates the next post on a MAIN-THREAD requestAnimationFrame
+//     ACK (the proxy presents inside its own rAF, then acks). in-flight is bounded to <= 1.
+//
+//   * HEADLESS / non-presenting (Node, tests): no rAF -> the MessageChannel one-shot yield
+//     (defaultScheduleYield) drives the loop. Tests inject their own scheduler. rAF is
+//     feature-detected; when absent the loop uses the injected/MessageChannel scheduler.
+//
+// IRONY/HISTORY: an earlier task deliberately decoupled the frame pump from any present ACK
+// (a free-running MessageChannel yield) to break a ~30fps ACK-starvation cadence lock. That
+// decoupling is what let the GPU command queue flood on iOS. rAF is the correct render-loop
+// pacing primitive: it is DISPLAY-driven (not work-driven), so it reintroduces present
+// backpressure WITHOUT the old work-coalesced cadence stall.
+//
 // ==================== OFFSCREENCANVAS TRANSFER ORDERING ====================
 // When the main thread transfers an OffscreenCanvas (feature-detected there), the worker
 // PRESENTS decoded RGBA directly onto it HERE — no 'video' message crosses the boundary. The
@@ -99,6 +131,19 @@ class EmuWorker {
     this._offImageData = null;
     this._offW = 0;
     this._offH = 0;
+
+    // ---- rAF loop driver (hardware-vsync present backpressure) ----
+    // When the worker presents onto a transferred OffscreenCanvas AND self.requestAnimationFrame
+    // is available, the runner's loop is driven by rAF (display-refresh-paced, implicit WebGL
+    // backpressure) instead of the free-running MessageChannel pump. Exactly ONE driver is
+    // active at a time (rAF XOR MessageChannel), decided by _usingRafDriver().
+    this._rafAvailable = typeof this.scope.requestAnimationFrame === 'function';
+    // When the rAF driver is active the runner must NOT present per emulated frame (that is the
+    // open-loop GPU flood). Instead each rAF tick decodes emulation frames into the runner's
+    // reused RGBA buffer, and we present EXACTLY the LATEST one ONCE after the tick. This holds
+    // the latest decoded frame between the runner's onVideoFrame and the post-tick present.
+    this._pendingPresent = null; // { rgba, width, height } | null (coalesced-to-latest frame)
+    this._rafHandle = 0;
 
     // The ACTIVE video path, surfaced to the main thread (and on to the debug banner) so the
     // device can report which renderer actually engaged. One of:
@@ -165,7 +210,96 @@ class EmuWorker {
       onStatus: (snapshot) => this.post({ type: 'status', snapshot }),
       onFrame: (frame, status) => this.post({ type: 'frame', frame, status }),
       onStateLoaded: (frame) => this.post({ type: 'stateLoaded', frame }),
+      // LOOP DRIVER: bind the run/present loop to the display refresh whenever the worker is
+      // presenting onto a transferred OffscreenCanvas and rAF is available. Decided per-tick so
+      // a later setOffscreen transfer switches drivers correctly. When the rAF driver is NOT
+      // active (headless / fallback present) this returns undefined so the runner uses its own
+      // defaultScheduleYield (MessageChannel one-shot) — exactly ONE driver is ever active.
+      scheduleYield: (cb) => this._scheduleLoopTurn(cb),
     });
+  }
+
+  /** Is the worker driving the run loop from hardware vsync (rAF on the offscreen path)? */
+  _usingRafDriver() {
+    return this._rafAvailable && (this.offGL != null || this.offCtx != null);
+  }
+
+  /**
+   * Schedule ONE run-loop turn (the runner's _tick). This is the single loop-driver seam:
+   *   * rAF driver (offscreen present + rAF available): schedule the tick on the NEXT display
+   *     refresh via self.requestAnimationFrame, then PRESENT exactly the latest decoded frame
+   *     ONCE after the tick runs. This is the hardware-vsync backpressure — the browser will
+   *     not fire the next rAF until the previous frame's GL commands are consumed, so the GPU
+   *     command queue can never flood, and we never issue more than one draw per refresh.
+   *   * otherwise (headless / fallback): defer to the runner's default MessageChannel/injected
+   *     scheduler by delegating to defaultScheduleYield semantics — but since scheduleYield is
+   *     injected, we replicate the default here (MessageChannel one-shot / setTimeout / micro).
+   * Returns an opaque handle the runner cancels via its _cancelYield (objects/ids tolerated).
+   */
+  _scheduleLoopTurn(cb) {
+    if (this._usingRafDriver()) {
+      const raf = this.scope.requestAnimationFrame.bind(this.scope);
+      const handle = raf(() => {
+        this._rafHandle = 0;
+        // Run the emulation tick (target-time accumulator; bounded catch-up; may run 0..N
+        // retro_run, each decoding into the runner's reused RGBA buffer and calling
+        // onVideoFrame -> _presentFrame, which under the rAF driver only STASHES the latest).
+        // For an ASYNCIFY core the tick is async (awaits each retro_run); flush AFTER it
+        // resolves so we still present exactly one frame per rAF. For the synchronous core the
+        // tick returns undefined and we flush immediately. Either way: ONE present per refresh.
+        const r = cb();
+        if (r && typeof r.then === 'function') {
+          r.then(() => this._flushPresent(), () => this._flushPresent());
+        } else {
+          this._flushPresent();
+        }
+      });
+      this._rafHandle = handle;
+      // Tag the handle so the runner's _cancelYield can cancel a pending rAF.
+      return { kind: 'raf', id: handle, scope: this.scope };
+    }
+    // Non-presenting / headless: use the same MessageChannel-first yield the runner defaults to
+    // (no rAF here). This keeps a single active driver: the MessageChannel one-shot.
+    if (typeof MessageChannel === 'function') {
+      const mc = new MessageChannel();
+      mc.port1.onmessage = () => {
+        mc.port1.onmessage = null;
+        cb();
+      };
+      mc.port2.postMessage(0);
+      return { kind: 'messagechannel', channel: mc };
+    }
+    if (typeof setTimeout === 'function') {
+      return { kind: 'timeout', id: setTimeout(cb, 0) };
+    }
+    Promise.resolve().then(cb);
+    return { kind: 'microtask' };
+  }
+
+  /**
+   * Present the single latest decoded frame stashed this rAF turn (coalesced present). Called
+   * once per display refresh, AFTER the emulation tick — so even a catch-up burst or a
+   * fast-forward burst (many retro_run this turn) yields EXACTLY ONE texSubImage2D+draw.
+   * No-op when nothing new was decoded this turn (keeps the queue empty rather than redrawing).
+   */
+  _flushPresent() {
+    const p = this._pendingPresent;
+    if (!p) return;
+    this._pendingPresent = null;
+    this._drawOffscreen(p.rgba, p.width, p.height);
+  }
+
+  /** Draw one decoded RGBA frame directly onto the transferred OffscreenCanvas (GL or 2D). */
+  _drawOffscreen(rgba, width, height) {
+    if (this.offGL) {
+      try {
+        this.offGL.present(rgba, width, height);
+      } catch (err) {
+        this.post({ type: 'error', message: `offscreen GL present failed: ${String(err)}` });
+      }
+      return;
+    }
+    if (this.offCtx) this._blitOffscreen(rgba, width, height);
   }
 
   // ------------------------------------------------------------------ video presentation
@@ -176,19 +310,24 @@ class EmuWorker {
    * transferable ArrayBuffer so it blits. Both receive the SAME decoded RGBA from the runner.
    */
   _presentFrame(rgba, width, height, pitch, pixelFormat) {
-    // PRIMARY offscreen path: upload the RGBA into the single WebGL texture and draw. No
-    // per-frame native ImageData/2D-canvas allocation (the iOS-native-leak fix).
-    if (this.offGL) {
-      try {
-        this.offGL.present(rgba, width, height);
-      } catch (err) {
-        this.post({ type: 'error', message: `offscreen GL present failed: ${String(err)}` });
+    // OFFSCREEN present path (worker owns the canvas: WebGL primary, 2D last-resort).
+    if (this.offGL || this.offCtx) {
+      // rAF DRIVER + the loop is actively running: COALESCE. Do NOT draw here — stash the
+      // LATEST decoded frame and let the per-rAF _flushPresent draw exactly ONE frame this
+      // display refresh. This is what stops the open-loop GPU-command-queue flood: even if the
+      // tick ran a catch-up/fast-forward burst of retro_run, only the last frame is drawn, once
+      // per vsync, with implicit backpressure (the next rAF waits for the display).
+      //
+      // The runner reuses ONE RGBA buffer (_rgba) across frames, so stashing the reference is
+      // safe: by the time _flushPresent runs after the tick, it holds the last decoded frame.
+      if (this._usingRafDriver() && this.runner && this.runner._loopRunning) {
+        this._pendingPresent = { rgba, width, height };
+        return;
       }
-      return;
-    }
-    // Last-resort offscreen path: 2D putImageData (only when WebGL was unavailable).
-    if (this.offCtx) {
-      this._blitOffscreen(rgba, width, height);
+      // Loop NOT running (frame-advance / paused one-shot) OR no rAF (headless offscreen):
+      // present immediately as a single one-shot draw. Frame-advance is deliberately a separate
+      // one-shot present, not the rAF loop.
+      this._drawOffscreen(rgba, width, height);
       return;
     }
     // Fallback path. BACKPRESSURE: if the previous posted frame has not been drawn+acked yet,

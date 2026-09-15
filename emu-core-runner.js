@@ -992,7 +992,15 @@ export class EmuCoreRunner {
   _cancelYield(handle) {
     if (handle == null) return;
     if (typeof handle === 'object') {
-      if (handle.kind === 'timeout' && typeof clearTimeout === 'function') {
+      if (handle.kind === 'raf' && handle.scope && typeof handle.scope.cancelAnimationFrame === 'function') {
+        // A vsync-driven loop turn: cancel the pending requestAnimationFrame. A stray tick is
+        // also harmless (the loop re-checks paused/stopped on entry).
+        try {
+          handle.scope.cancelAnimationFrame(handle.id);
+        } catch (_err) {
+          /* best-effort */
+        }
+      } else if (handle.kind === 'timeout' && typeof clearTimeout === 'function') {
         clearTimeout(handle.id);
       } else if (handle.kind === 'messagechannel' && handle.channel) {
         // Drop the listener so a still-queued tick is ignored (loop also re-checks state).
