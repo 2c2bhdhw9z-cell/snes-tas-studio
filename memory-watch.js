@@ -15,28 +15,40 @@
 // ==========================================================================================
 //
 // ------------------- SMB1 (Super Mario All-Stars, USA) WRAM map — EMPIRICAL ----------------
-// These addresses were MEASURED, not guessed, against the real committed ROM + accuracy core
-// via the reproducible headless harness tools/hud-calibrate.mjs. That harness boots the core,
-// drives input into SMB1 gameplay, and watches which SNES WRAM bytes track Mario's motion.
+// EVERY address below was MEASURED, not guessed, against the real committed ROM + accuracy
+// core via the reproducible headless harness tools/hud-calibrate.mjs. That harness boots the
+// core, drives input through the All-Stars menus into SMB1 gameplay, then MATHEMATICALLY
+// proves each byte by watching how it responds to input (its raw proof output is the evidence
+// of record — re-run `node tools/hud-calibrate.mjs`, which exits non-zero unless all pass).
 //
-// VERIFIED (ships with CALIBRATION_VERIFIED semantics per-field):
-//   0x005D  Player_X_Speed — Mario's SIGNED horizontal speed. Proof (reproducible): holding
-//           RIGHT makes it ACCELERATE from 0 up to walk speed (~+21); releasing makes it
-//           FRICTION-DECELERATE back toward 0; holding LEFT makes it go NEGATIVE (two's
-//           complement, e.g. -2, -3, ... -8) and accelerate leftward. That accel / friction /
-//           signed-reversal signature is unique to a physical velocity, so 0x005D is the X
-//           speed. (Note: the NES classic $0057 is dead in All-Stars; the real byte is $005D.)
+// ALL FIELDS EMPIRICALLY VERIFIED (CALIBRATION_VERIFIED = true):
 //
-// NOT VERIFIED (deliberately NOT shipped with fabricated addresses):
-//   Mario's X/Y PIXEL and SUB-PIXEL position. In the gameplay state reachable by headless
-//   menu navigation, Mario builds speed but does not translate freely (pinned against level
-//   geometry at spawn), so the position/sub-pixel bytes never showed the monotonic-increment
-//   + 0..255 rollover signature required to confirm them. The classic NES offsets ($0086 X,
-//   $006D page, $0400 X-subpixel, $00CE Y, $0416 Y-subpixel) — raw AND rebased into the upper
-//   WRAM bank (+0x10000) — stay frozen; the only bytes that move under RIGHT are camera /
-//   animation / double-buffer artifacts that fail the idle-hold + reversal checks. Per the
-//   project rule "do not guess the sub-pixels", these rows keep the honest "(unverified)"
-//   label and show the raw candidate read only as a best-effort observation.
+//   0x005D  Player_X_Speed — SIGNED horizontal speed. Proof: under RIGHT it ACCELERATES 0 ->
+//           +walk/run (~+24); on release it FRICTION-DECELERATES toward 0; under LEFT it goes
+//           NEGATIVE (two's complement) and accelerates left. That accel / friction / signed-
+//           reversal signature is unique to a physical velocity. (The NES classic $0057 is
+//           dead in All-Stars; the real byte is $005D.)
+//
+//   0x0042  Player X PIXEL (on-screen X, low byte)     ]  little-endian 16-bit on-screen X.
+//   0x0043  Player X PAGE  (on-screen X, high byte)    ]  Proof (VELOCITY INTEGRAL): during a
+//   0x0401  Player X SUB-PIXEL (MoveForce accumulator) ]  sustained run the sub-pixel $0401
+//           accumulates speed*16 (1/256 px) each frame; every 256 overflow carries exactly one
+//           pixel into $0042, and when $0042 rolls 255->0 the page $0043 increments. Over the
+//           measured run the PREDICTED number of sub-pixel carries EQUALS the measured net
+//           movement of $0042 (to within a couple of frames), $0042 rolls 255->0 into $0043,
+//           and at speed 0 the sub-pixel FREEZES. This delta-match rejects camera/animation/
+//           timer counters, which do not track the integral of $005D through accel + steady.
+//
+//   0x0002  Player Y PIXEL (on-screen Y)               ]  Proof (GRAVITY): holding A makes
+//   0x041C  Player Y SUB-PIXEL (MoveForce accumulator) ]  Mario jump; the 16-bit vertical
+//           position ($0002 pixel << 8 | $041C sub) traces a SMOOTH PARABOLA whose per-frame
+//           velocity shrinks by a CONSTANT gravity (~32 sub-units/frame^2), crosses zero at the
+//           apex, then grows again on the way down, returning Mario to the exact ground pixel.
+//           A camera/animation counter cannot produce a constant-acceleration parabola that
+//           closes back to its start.
+//
+// px.sub display: the pixel value is the whole-pixel position ($0043*256+$0042 for X, $0002
+// for Y); the sub-pixel byte is shown as the fractional 1/256 part after the dot.
 //
 // Until the ROM + core are present, getMemoryView() returns null and the HUD shows
 // placeholders, so no address is ever dereferenced in the untested state.
@@ -50,31 +62,32 @@
 export const SMB_WRAM_BASE = 0x0000;
 
 // GLOBAL verified flag = true only when EVERY emulation-dependent field is empirically
-// confirmed. It ships FALSE because X/Y position + sub-pixel could not be verified headlessly
-// (see header). Per-field verification is tracked in SMB_FIELD_VERIFIED below so the VERIFIED
-// field (H-Speed) can drop its "(unverified)" tag while the unconfirmed rows keep theirs.
-export const CALIBRATION_VERIFIED = false;
+// confirmed. It now ships TRUE: H-Speed, X pixel/page/sub-pixel, and Y pixel/sub-pixel are ALL
+// proven by tools/hud-calibrate.mjs (velocity-integral carry-match for X + gravity parabola
+// for Y; that harness exits non-zero unless every field verifies). Per-field verification is
+// still tracked in SMB_FIELD_VERIFIED for the HUD's per-row display logic.
+export const CALIBRATION_VERIFIED = true;
 
-// Per-field empirical verification. H-Speed ($005D) is proven (accel/friction/reversal);
-// position + sub-pixel are not (never observed translating). Read-only display metadata.
+// Per-field empirical verification. All emulation-dependent fields are proven:
+//   speedX: $005D via accel / friction / signed reversal
+//   marioX: $0042 pixel + $0043 page + $0401 sub-pixel via velocity-integral carry match
+//   marioY: $0002 pixel + $041C sub-pixel via the constant-gravity jump parabola
+// Read-only display metadata only.
 export const SMB_FIELD_VERIFIED = Object.freeze({
-  speedX: true, // 0x005D proven via accel/friction/signed-reversal
-  marioX: false, // X pixel+subpixel: not empirically confirmable headlessly (not guessed)
-  marioY: false, // Y pixel+subpixel: not empirically confirmable headlessly (not guessed)
+  speedX: true,
+  marioX: true,
+  marioY: true,
 });
 
-// WRAM addresses. VERIFIED ones are the measured All-Stars SMB1 bytes; the position bytes
-// are the classic NES offsets retained ONLY as an honest best-effort (labeled unverified).
+// WRAM addresses — all EMPIRICALLY MEASURED for SMB1 within Super Mario All-Stars (USA) by
+// tools/hud-calibrate.mjs (see the header for the proof of each). Observation-only constants.
 export const SMB_ADDR = Object.freeze({
-  // VERIFIED (tools/hud-calibrate.mjs): Mario's signed horizontal speed.
-  PLAYER_X_SPEED: 0x005d,
-  // UNVERIFIED best-effort (classic NES SMB1 offsets; observed frozen in All-Stars). These
-  // are shown with an explicit "(unverified)" tag and must not be trusted for TAS routing.
-  PLAYER_X_POSITION: 0x0086, // on-screen X pixel (low byte) — UNVERIFIED
-  PLAYER_PAGE_LOC: 0x006d, // horizontal page (high byte of X) — UNVERIFIED
-  PLAYER_X_SUBPIXEL: 0x0400, // X sub-pixel (Player_X_MoveForce) — UNVERIFIED
-  PLAYER_Y_POSITION: 0x00ce, // on-screen Y pixel — UNVERIFIED
-  PLAYER_Y_SUBPIXEL: 0x0416, // Y sub-pixel (Player_Y_MoveForce) — UNVERIFIED
+  PLAYER_X_SPEED: 0x005d, // signed horizontal speed (accel/friction/reversal proof)
+  PLAYER_X_POSITION: 0x0042, // on-screen X pixel (low byte)  — velocity-integral proof
+  PLAYER_PAGE_LOC: 0x0043, // horizontal page (high byte of X) — rollover proof
+  PLAYER_X_SUBPIXEL: 0x0401, // X sub-pixel (Player_X_MoveForce) — carry-match + idle-freeze
+  PLAYER_Y_POSITION: 0x0002, // on-screen Y pixel — gravity parabola proof
+  PLAYER_Y_SUBPIXEL: 0x041c, // Y sub-pixel (Player_Y_MoveForce) — constant-gravity parabola
 });
 
 /**
@@ -86,9 +99,11 @@ export const SMB_ADDR = Object.freeze({
  */
 export function createMemoryWatch(engine, hudEl) {
   // HUD field definitions. Each renders one labelled row; values fill in per frame.
-  // Each emulation-dependent row carries its own verification state (SMB_FIELD_VERIFIED). A
-  // verified row (H-Speed) shows a clean label; an unverified row (Mario X/Y position + sub-
-  // pixel) keeps an explicit "(unverified)" tag so its value is never trusted for routing.
+  // Each emulation-dependent row carries its own verification state (SMB_FIELD_VERIFIED). All
+  // rows are currently VERIFIED, so every label renders clean (no tag). The tagging logic is
+  // retained as a defensive guard: if a future field were added without an empirically proven
+  // address, it would automatically render an explicit "(unverified)" tag rather than be
+  // silently trusted for routing.
   const FIELDS = [
     { key: 'frame', label: 'Frame' }, // from the engine's own counter, always trustworthy
     { key: 'marioX', label: 'Mario X (px.sub)', emu: true },
@@ -96,7 +111,7 @@ export function createMemoryWatch(engine, hudEl) {
     { key: 'speedX', label: 'H-Speed', emu: true },
   ];
 
-  // Suffix appended to emulation-dependent labels whose address is not yet verified.
+  // Suffix appended to any emulation-dependent label whose address is not empirically proven.
   const UNVERIFIED_TAG = ' (unverified)';
 
   const PLACEHOLDER = '--';

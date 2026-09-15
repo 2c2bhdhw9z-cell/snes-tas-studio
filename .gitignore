@@ -25,3 +25,9 @@ assets/*.zip
 Thumbs.db
 *.swp
 node_modules/
+
+# Emulator save-state blobs written by tools/hud-calibrate.mjs as a local
+# reproducibility cache. These are the harness's OWN serialized emulator state
+# (RAM/registers), not the ROM, but they are large binary artifacts and MUST NOT
+# be committed. Regenerated on demand by running the harness.
+*.state
