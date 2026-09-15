@@ -63,11 +63,13 @@ function makeFakeOffscreen() {
     createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
     putImageData: (img) => blits.push({ w: img.width, h: img.height }),
   };
+  const ctxOpts = [];
   return {
     width: 256,
     height: 224,
-    getContext: () => ctx,
+    getContext: (type, opts) => { ctxOpts.push({ type, opts }); return ctx; },
     __blits: blits,
+    __ctxOpts: ctxOpts,
   };
 }
 
@@ -287,6 +289,11 @@ await checkAsync('VIDEO direct path: OffscreenCanvas transferred -> worker blits
   await worker._onMessage({ data: { type: 'frameAdvance' } });
   assert.ok(off.__blits.length >= 1, 'worker blitted directly onto the OffscreenCanvas 2d context');
   assert.strictEqual(lastPosted(scope, 'video'), null, 'NO video message crosses the boundary in the direct path');
+  // The 2d context must be requested with the low-latency present options.
+  const got = off.__ctxOpts.find((c) => c.type === '2d');
+  assert.ok(got, 'a 2d context was requested');
+  assert.strictEqual(got.opts && got.opts.alpha, false, "getContext('2d') requested with alpha:false");
+  assert.strictEqual(got.opts && got.opts.desynchronized, true, "getContext('2d') requested with desynchronized:true (low-latency present)");
 });
 
 await checkAsync('setOffscreen adopts a later-transferred canvas', async () => {

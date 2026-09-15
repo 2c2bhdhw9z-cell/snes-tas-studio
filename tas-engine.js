@@ -174,7 +174,7 @@ class TASEngine {
 
   _takeMainThreadContext(canvas) {
     try {
-      this._ctx = canvas.getContext('2d', { alpha: false });
+      this._ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     } catch (err) {
       this._ctx = null;
       console.warn('[TASEngine] 2d context unavailable:', err);

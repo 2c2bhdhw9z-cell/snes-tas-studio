@@ -292,6 +292,99 @@ await checkAsync('SYNCHRONOUS fast-forward burst is unchanged: 8 inline frames, 
   assert.ok(state.pending, 'loop re-armed exactly one tick after the synchronous burst');
 });
 
+// ======================================================================================
+// SCHEDULER: the default per-frame yield must use a MessageChannel (NO setTimeout clamp) when
+// available, falling back to setTimeout(0) only when MessageChannel is absent. Mobile Safari
+// clamps setTimeout to ~4ms, which alone capped the synchronous core near ~26 FPS; a
+// MessageChannel one-shot has no clamp, so the loop can pace up to the core's native fps.
+
+await checkAsync('default scheduler uses MessageChannel (no setTimeout clamp) when available', async () => {
+  // A minimal MessageChannel/MessagePort stub whose port2.postMessage schedules port1.onmessage
+  // on a microtask — modelling the browser/worker MessageChannel that has NO timer clamp.
+  let mcConstructed = 0;
+  let posted = 0;
+  const savedMC = globalThis.MessageChannel;
+  const savedST = globalThis.setTimeout;
+  let setTimeoutUsed = 0;
+  class FakePort {
+    constructor() { this.onmessage = null; this._peer = null; }
+    postMessage() { posted += 1; const peer = this._peer; Promise.resolve().then(() => { if (peer && peer.onmessage) peer.onmessage({ data: 0 }); }); }
+  }
+  globalThis.MessageChannel = class {
+    constructor() { mcConstructed += 1; this.port1 = new FakePort(); this.port2 = new FakePort(); this.port1._peer = this.port2; this.port2._peer = this.port1; }
+  };
+  // Wrap setTimeout so we can prove the default scheduler did NOT use it while MC is present.
+  globalThis.setTimeout = (...args) => { setTimeoutUsed += 1; return savedST(...args); };
+  try {
+    const mock = makeMockModule({ asyncify: false });
+    // NOTE: no scheduleYield injected — exercise the DEFAULT scheduler (defaultScheduleYield).
+    const runner = new EmuCoreRunner({
+      loadCore: async () => ({ ok: true, Module: mock, corePath: 'cores/snes9x_libretro.js' }),
+      fetchRom: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3, 4]) }),
+      getFrameInputMask: () => 0,
+    });
+    await runner.boot();
+    CLOCK = 1000;
+    runner.start();
+    // Let the MessageChannel-driven tick fire a couple of times via microtasks.
+    for (let i = 0; i < 5; i++) { CLOCK += 17; await Promise.resolve(); await Promise.resolve(); }
+    runner.pause();
+    assert.ok(mcConstructed >= 1, 'default scheduler constructed a MessageChannel');
+    assert.ok(posted >= 1, 'default scheduler posted through the MessageChannel port');
+    assert.strictEqual(setTimeoutUsed, 0, 'default scheduler did NOT fall back to the clamped setTimeout');
+    assert.ok(mock.__runs() >= 1, 'the MessageChannel-paced loop advanced frames');
+  } finally {
+    globalThis.MessageChannel = savedMC;
+    globalThis.setTimeout = savedST;
+  }
+});
+
+await checkAsync('default scheduler falls back to setTimeout(0) when MessageChannel is unavailable', async () => {
+  const savedMC = globalThis.MessageChannel;
+  let setTimeoutZero = 0;
+  const savedST = globalThis.setTimeout;
+  globalThis.setTimeout = (cb, ms, ...rest) => { if (ms === 0) setTimeoutZero += 1; return savedST(cb, ms, ...rest); };
+  // eslint-disable-next-line no-undef
+  delete globalThis.MessageChannel;
+  try {
+    const mock = makeMockModule({ asyncify: false });
+    const runner = new EmuCoreRunner({
+      loadCore: async () => ({ ok: true, Module: mock, corePath: 'cores/snes9x_libretro.js' }),
+      fetchRom: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3, 4]) }),
+      getFrameInputMask: () => 0,
+    });
+    await runner.boot();
+    CLOCK = 1000;
+    runner.start();
+    await new Promise((r) => savedST(r, 5));
+    runner.pause();
+    assert.ok(setTimeoutZero >= 1, 'fallback used setTimeout(cb, 0) when MessageChannel absent');
+  } finally {
+    globalThis.MessageChannel = savedMC;
+    globalThis.setTimeout = savedST;
+  }
+});
+
+await checkAsync('fps pacing: loop targets the core-declared frame time (_baseFrameMs from av_info fps)', async () => {
+  const { runner, mock, state } = await makeRunner();
+  CLOCK = 1000;
+  // av_info fps mocked to 60.098 -> _baseFrameMs ~= 16.639 ms.
+  assert.ok(Math.abs(runner._baseFrameMs - 1000 / 60.098) < 1e-6, '_baseFrameMs derived from declared fps');
+  runner.start();
+  pump(runner, state, 1, 0); // seed _lastTs, no elapsed time -> no frame yet
+  assert.strictEqual(mock.__runs(), 0, 'no frame runs before a frame-time of wall clock elapses (paced, not free-running)');
+  const seeded = mock.__runs();
+  // Advance just over one frame-time of wall clock: the accumulator should release exactly 1.
+  pump(runner, state, 1, runner._baseFrameMs + 0.5);
+  assert.strictEqual(mock.__runs() - seeded, 1, 'exactly one frame per one frame-time of elapsed wall clock');
+  // Advance ten frame-times at once: paced loop catches up (bounded by the guard) — proving
+  // it targets real time rather than running one frame per tick regardless of elapsed time.
+  const before = mock.__runs();
+  pump(runner, state, 1, runner._baseFrameMs * 10);
+  const caughtUp = mock.__runs() - before;
+  assert.ok(caughtUp >= 5, `paced catch-up advanced multiple frames for 10x elapsed (got ${caughtUp})`);
+});
+
 let failed = 0;
 for (const r of results) {
   console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : '  -> ' + r.err}`);

@@ -131,13 +131,36 @@ async function defaultFetchRom() {
 
 /**
  * Default per-frame yield used by the synchronous run loop so control + input messages are
- * received BETWEEN retro_run calls. setTimeout(0) yields the macrotask queue (drains posted
- * messages); a browser worker can also override with a MessageChannel for a tighter loop.
+ * received BETWEEN retro_run calls.
+ *
+ * WHY NOT setTimeout(0): mobile Safari (and other browsers) CLAMP setTimeout to a ~4 ms
+ * minimum — worse under load — which alone caps a synchronous core near ~26 FPS regardless
+ * of how fast retro_run is. A MessageChannel postMessage has NO such clamp, so when it is
+ * available (workers and the main thread both have it) we yield via a MessageChannel port:
+ * the callback runs on the very next macrotask with no artificial delay, still draining
+ * posted control/input messages between frames. setTimeout(0) is the fallback ONLY where
+ * MessageChannel is unavailable (e.g. bare Node without the global), and queueMicrotask/
+ * Promise last of all.
+ *
+ * The returned handle is an opaque object; cancellation is best-effort (a one-shot
+ * MessageChannel tick cannot be un-posted, but the loop re-checks paused/stopped on entry,
+ * so a stray tick is a no-op). setTimeout handles are cleared in _stopLoop.
  */
 function defaultScheduleYield(cb) {
-  if (typeof setTimeout === 'function') return setTimeout(cb, 0);
+  if (typeof MessageChannel === 'function') {
+    const mc = new MessageChannel();
+    mc.port1.onmessage = () => {
+      mc.port1.onmessage = null;
+      cb();
+    };
+    mc.port2.postMessage(0);
+    return { kind: 'messagechannel', channel: mc };
+  }
+  if (typeof setTimeout === 'function') {
+    return { kind: 'timeout', id: setTimeout(cb, 0) };
+  }
   Promise.resolve().then(cb);
-  return 0;
+  return { kind: 'microtask' };
 }
 
 /**
@@ -748,8 +771,11 @@ export class EmuCoreRunner {
 
   /**
    * Start the self-scheduling run loop. Unlike the main-thread rAF engine, this yields via
-   * the injected scheduler (setTimeout(0) by default) BETWEEN frames so a worker receives
-   * control + input messages between retro_run calls. A hard guard bounds catch-up frames.
+   * the injected scheduler (a MessageChannel one-shot by default — NO setTimeout clamp)
+   * BETWEEN frames so a worker receives control + input messages between retro_run calls.
+   * Pacing is target-time based: an accumulator tracks real elapsed ms and runs frames only
+   * to keep up with the core's declared fps (this._baseFrameMs = 1000/this.fps), so a fast
+   * core reaches its native 60 without over-running, and a hard guard bounds catch-up frames.
    */
   _startLoop() {
     if (this._loopRunning) return;
@@ -808,10 +834,32 @@ export class EmuCoreRunner {
 
   _stopLoop() {
     this._loopRunning = false;
-    if (this._loopHandle != null && typeof clearTimeout === 'function') {
-      clearTimeout(this._loopHandle);
-    }
+    this._cancelYield(this._loopHandle);
     this._loopHandle = null;
+  }
+
+  /**
+   * Best-effort cancel of a scheduled yield handle. The default scheduler returns a tagged
+   * handle: a 'timeout' carries a clearable timer id; a 'messagechannel' one-shot cannot be
+   * un-posted but its tick re-checks paused/stopped and no-ops. A custom (test-injected)
+   * scheduler may return a bare timer id/number, which we still clear via clearTimeout.
+   */
+  _cancelYield(handle) {
+    if (handle == null) return;
+    if (typeof handle === 'object') {
+      if (handle.kind === 'timeout' && typeof clearTimeout === 'function') {
+        clearTimeout(handle.id);
+      } else if (handle.kind === 'messagechannel' && handle.channel) {
+        // Drop the listener so a still-queued tick is ignored (loop also re-checks state).
+        try {
+          handle.channel.port1.onmessage = null;
+        } catch (_err) {
+          /* best-effort */
+        }
+      }
+      return;
+    }
+    if (typeof clearTimeout === 'function') clearTimeout(handle);
   }
 
   // ------------------------------------------------------------------ save states

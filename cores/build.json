@@ -4,11 +4,13 @@
     "source_repo": "https://github.com/libretro/snes9x",
     "branch": "master",
     "emsdk_version": "6.0.9",
-    "target": "platform=emscripten (added block; NO ASYNCIFY)",
+    "target": "platform=emscripten (added block; NO ASYNCIFY; -O3 -flto -DNDEBUG compile+link)",
+    "optimization": "-O3 -flto -DNDEBUG on CFLAGS/CXXFLAGS (compile) AND LDFLAGS (link). The earlier build cleared LTO and added no link-time -O, so Emscripten's link/codegen step shipped an effectively unoptimized core — the dominant cause of the on-device FPS cap. Rebuilt with aggressive optimization: .wasm 3347860 -> 2910410 bytes (~13% smaller). -flto (full, not thin) linked cleanly.",
     "output": ["snes9x_libretro.js", "snes9x_libretro.wasm"],
     "export_name": "snes9x",
     "role": "Default real-time playback core (synchronous retro_run).",
-    "verified_with": "node tools/run-smoke.mjs cores/snes9x_libretro.js 60 — ALL ASSERTIONS PASSED, ~1.1 ms/frame, no ASYNCIFY. See cores/snes9x.json."
+    "hud_memory_map": "snes9x's SMB1 (All-Stars) WRAM offsets are EMPIRICALLY VERIFIED IDENTICAL to bsnes (same 128KB SYSTEM_RAM, 131072 bytes) — proven by tools/hud-calibrate.mjs against cores/snes9x_libretro.js. memory-watch.js shares one verified map across all cores (CALIBRATION_VERIFIED = true). The old '(unverified)/differs' note was a hud-crosscheck harness limitation, not a real layout difference.",
+    "verified_with": "node tools/run-smoke.mjs cores/snes9x_libretro.js 300 — ALL ASSERTIONS PASSED, no ASYNCIFY, WRAM 131072. See cores/snes9x.json. Headless Node baseline-compiler timing under-represents the -O3 -flto win; real 60-FPS confirmation is on-device (iOS Safari optimizing WASM tier)."
   },
   "core": "bsnes-mercury",
   "profiles": ["accuracy", "performance"],

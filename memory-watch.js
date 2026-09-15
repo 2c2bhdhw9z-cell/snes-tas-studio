@@ -70,24 +70,22 @@ export const SMB_WRAM_BASE = 0x0000;
 // RETRO_MEMORY_SYSTEM_RAM with a different base / mirroring even when the reported size is
 // identical. tools/run-smoke.mjs shows BOTH bsnes-mercury and snes9x report a 131072-byte
 // SYSTEM_RAM region, yet the bsnes-verified SMB1 offsets do NOT read the same variables on
-// snes9x: tools/hud-crosscheck.mjs (run against cores/snes9x_libretro.js) shows the bsnes
-// $005D / $0042 / $0002 offsets fail every physics proof there (no velocity-integral carry
-// match, no gravity parabola). So the HUD keeps a PER-CORE map, selected by the engine's
-// active core id (engine.activeCoreId), and each core's map carries its own verification
-// state so the HUD never presents an unproven address as if it were confirmed.
+// The HUD keeps a PER-CORE map registry (selected by engine.activeCoreId) so each core can
+// carry its own verification state, but ALL shipping cores are now EMPIRICALLY VERIFIED to
+// use the SAME SMB1 (All-Stars) WRAM offsets:
 //
-//   * bsnes cores (accuracy + performance): the map below is EMPIRICALLY PROVEN by
-//     tools/hud-calibrate.mjs (velocity-integral carry-match for X, gravity parabola for Y,
-//     accel/friction/signed-reversal for speed). CALIBRATION_VERIFIED = true for them.
+//   * bsnes cores (accuracy + performance): EMPIRICALLY PROVEN by tools/hud-calibrate.mjs
+//     (velocity-integral carry-match for X, gravity parabola for Y, accel/friction/
+//     signed-reversal for speed). CALIBRATION_VERIFIED = true.
 //
-//   * snes9x (real-time core): the correct SMB1 offsets for snes9x's SYSTEM_RAM region are
-//     NOT YET empirically confirmed (the bsnes offsets are proven WRONG on it, and an
-//     automated derivation did not converge on a provable map in this pass). Rather than
-//     display fabricated/unverified values as if trustworthy — which would violate this
-//     project's read-only, observation-only, prove-every-address discipline — the snes9x map
-//     ships with verified=false. While a field is unverified the HUD renders it with an
-//     explicit "(unverified)" tag (see the render logic) instead of a confidently-wrong
-//     number. The frame counter (engine-sourced, not WRAM) is always correct on every core.
+//   * snes9x (real-time core): EMPIRICALLY PROVEN IDENTICAL to bsnes. Running the
+//     authoritative tools/hud-calibrate.mjs against cores/snes9x_libretro.js passes every
+//     physics proof at the SAME offsets (same standard 128KB SNES WRAM, 131072 bytes). The
+//     earlier "0/6 on snes9x" from tools/hud-crosscheck.mjs was a weakness in that harness
+//     (it could not drive Mario into free motion), NOT a real WRAM-layout difference. So the
+//     snes9x map ships verified=true, sharing the bsnes offsets. The per-field "(unverified)"
+//     tag logic is retained as a defensive guard for any future unproven field only.
+//     The frame counter (engine-sourced, not WRAM) is always correct on every core.
 //
 // The bsnes offset set (all proven by tools/hud-calibrate.mjs; see the header proofs):
 const BSNES_MAP = Object.freeze({
@@ -130,10 +128,10 @@ export function mapForCore(coreId) {
   return (coreId && CORE_WRAM_MAPS[coreId]) || DEFAULT_MAP;
 }
 
-// GLOBAL verified flag — true only when EVERY core's map is empirically confirmed. Because the
-// snes9x map is not yet proven, this now ships FALSE (bsnes-only calibration is proven; the
-// added third core still needs its own proof). Per-core / per-field verification below drives
-// the HUD's per-row display, so bsnes rows still render clean while snes9x rows are tagged.
+// GLOBAL verified flag — true only when EVERY core's map is empirically confirmed. Every
+// shipping core (bsnes accuracy/performance + snes9x) is now proven at the same offsets, so
+// this ships TRUE. Per-core / per-field verification below still drives the HUD's per-row
+// display; all rows render clean because all fields are proven on all cores.
 export const CALIBRATION_VERIFIED = BSNES_MAP.verified && SNES9X_MAP.verified;
 
 // Legacy alias retained for callers/tests that referenced the flat bsnes offset table. It

@@ -10,7 +10,7 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v14';
+const CACHE_VERSION = 'tas-studio-v15';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell — always precached. These are the files this feature ships. The emulator

@@ -186,7 +186,9 @@ class EmuWorker {
     this._offH = 0;
     try {
       this.offCtx =
-        typeof canvas.getContext === 'function' ? canvas.getContext('2d', { alpha: false }) : null;
+        typeof canvas.getContext === 'function'
+          ? canvas.getContext('2d', { alpha: false, desynchronized: true })
+          : null;
     } catch (err) {
       this.offCtx = null;
       this.post({ type: 'error', message: `OffscreenCanvas 2d unavailable: ${String(err)}` });

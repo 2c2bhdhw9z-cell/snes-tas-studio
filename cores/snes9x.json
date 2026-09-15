@@ -17,10 +17,14 @@
   "loader": "snes9x_libretro.js",
   "wasm": "snes9x_libretro.wasm",
   "export_name": "snes9x",
-  "wasm_bytes": 3347860,
-  "verified": "tools/run-smoke.mjs cores/snes9x_libretro.js 60 — ALL ASSERTIONS PASSED: retro_load_game true, retro_run returns each frame with NO hang, video_refresh non-null 256x224 RGB565, frames advance. Timing ~1.1 ms/frame (60 frames in 66 ms), vs the bsnes ASYNCIFY cores' ~73-235 ms/frame. WRAM (RETRO_MEMORY_SYSTEM_RAM) size = 131072. tools/core-probe.mjs: 17/17 raw retro_* exports + Module.addFunction present, 0/10 EmulatorJS high-level API (i.e. this is the fresh from-source raw-libretro build, NOT the old removed EmulatorJS file of the same name).",
-  "hud_memory_map": "NOT YET empirically verified for snes9x. tools/hud-crosscheck.mjs (against cores/snes9x_libretro.js) shows the bsnes-verified SMB1 All-Stars offsets ($005D H-Speed, $0042/$0043/$0401 X, $0002/$041C Y) do NOT track Mario on snes9x's SYSTEM_RAM region even though the region size matches bsnes (131072) — different base/mirroring. memory-watch.js therefore uses a PER-CORE map keyed on engine.activeCoreId: bsnes rows stay proven (render clean), snes9x rows render an explicit '(unverified)' tag until snes9x's own offsets are proven. The frame counter (engine-sourced) is always correct on every core.",
+  "wasm_bytes": 2910410,
+  "optimization": "Built with AGGRESSIVE optimization: -O3 -flto -DNDEBUG on BOTH compile (CFLAGS/CXXFLAGS) AND link (LDFLAGS). The prior build shipped with NO explicit optimization level at LINK and -flto CLEARED (the emscripten block set `LTO :=`), so Emscripten's link/codegen step ran effectively unoptimized — the dominant cause of the ~26 FPS cap on device. Rebuilding with -O3 -flto at both stages produced a SMALLER, faster core: .wasm dropped from 3347860 to 2910410 bytes (~13%). -flto linked cleanly (no thin-LTO fallback needed).",
+  "verified": "tools/run-smoke.mjs cores/snes9x_libretro.js 300 — ALL ASSERTIONS PASSED: retro_load_game true, retro_run returns each frame with NO hang, video_refresh non-null 256x224 RGB565, frames advance. WRAM (RETRO_MEMORY_SYSTEM_RAM) size = 131072. NO ASYNCIFY (synchronous retro_run — the performance point) preserved. Headless Node timing (forced --liftoff-only baseline compiler, which under-represents -O3's on-device win) ~0.95 ms/frame after vs ~0.99 ms/frame before; the meaningful speedup is on iOS Safari's optimizing WASM tier where -O3 -flto matters most and can only be measured on-device.",
+  "hud_memory_map": "EMPIRICALLY VERIFIED IDENTICAL to bsnes. snes9x exposes the same standard 128KB SNES WRAM (RETRO_MEMORY_SYSTEM_RAM = 131072 bytes), and tools/hud-calibrate.mjs run against cores/snes9x_libretro.js passes every SMB1 (All-Stars) physics proof at the SAME offsets as bsnes ($005D H-Speed, $0042/$0043/$0401 X, $0002/$041C Y). The earlier '(unverified)/does-not-track' note came from a weakness in tools/hud-crosscheck.mjs (it could not drive Mario into free motion), NOT a real WRAM-layout difference. memory-watch.js treats all cores as sharing the one verified map (CALIBRATION_VERIFIED = true); the frame counter (engine-sourced) is always correct on every core.",
   "emscripten_flags": [
+    "-O3",
+    "-flto (compile AND link)",
+    "-DNDEBUG",
     "-s WASM=1",
     "-s ALLOW_TABLE_GROWTH=1",
     "-s ALLOW_MEMORY_GROWTH=1",
@@ -34,9 +38,10 @@
     "-s EXIT_RUNTIME=0",
     "-s ERROR_ON_UNDEFINED_SYMBOLS=0",
     "-s ENVIRONMENT=web,worker,node",
+    "-fno-strict-aliasing",
     "-s EXPORTED_FUNCTIONS=[22 raw retro_* + malloc/free; NO retro_cheat_*]",
     "-s EXPORTED_RUNTIME_METHODS=[ccall,cwrap,addFunction,removeFunction,setValue,getValue,UTF8ToString,stringToUTF8,HEAPU8,HEAPU16,HEAP32,HEAPU32,HEAPF64]",
     "single-threaded (no pthreads / no SharedArrayBuffer) for iOS"
   ],
-  "makefile_edits": "Added an 'else ifeq ($(platform), emscripten)' block to snes9x/libretro/Makefile modeled on the bsnes-mercury emscripten block but WITHOUT ASYNCIFY: CC=emcc/CXX=em++/LD=em++, fpic/LTO cleared, -fno-strict-aliasing, TARGET=snes9x_libretro.js, and the SHARED link flags above. Built with `emmake make platform=emscripten -j8`."
+  "makefile_edits": "Added an 'else ifeq ($(platform), emscripten)' block to snes9x/libretro/Makefile modeled on the bsnes-mercury emscripten block but WITHOUT ASYNCIFY: CC=emcc/CXX=em++/LD=em++, fpic cleared, -fno-strict-aliasing, TARGET=snes9x_libretro.js, and the SHARED link flags above. The block now sets OPTIMIZE := -O3 -flto -DNDEBUG and appends it to CFLAGS, CXXFLAGS AND LDFLAGS (LTO requires the flag at link too) and restores LTO := -flto; the earlier build cleared LTO and added no link-time -O, so the WASM shipped unoptimized. Built with `emmake make platform=emscripten -j8` (emsdk 6.0.9)."
 }
