@@ -58,6 +58,39 @@ and returns on **both** profiles (proven headlessly — see below).
 > **Size note:** ASYNCIFY instrumentation inflates the binaries. Each `.wasm` is ~3.7 MB
 > (vs ~1.5 MB pre-ASYNCIFY). This is the accepted cost of a core that actually runs.
 
+## No-ASYNCIFY bsnes-accuracy experiment (FEAT-003) — attempted, fell back
+
+As part of the Web Worker migration we tested whether bsnes-accuracy could ship **without
+ASYNCIFY** (a smaller, faster core) now that `retro_run` runs inside a Worker, where blocking
+the worker thread would not freeze the UI. The user specifically asked to try
+`-s SUPPORT_LONGJMP=wasm` and native fiber switching for libco's cothreads.
+
+**Attempted.** Built bsnes-accuracy with **no `-s ASYNCIFY`**, adding
+`-s SUPPORT_LONGJMP=wasm` + `-fwasm-exceptions`, a distinct output name
+(`bsnes_mercury_accuracy_libretro_noasyncify.{js,wasm}`, `EXPORT_NAME=bsnes_accuracy_noasyncify`),
+keeping `-s ENVIRONMENT=web,worker,node`, MODULARIZE + EXPORT_ES6, ALLOW_TABLE_GROWTH, the
+same 22 `retro_*` exports, single-threaded. The Emscripten Fibers libco backend is built **on
+top of Asyncify** (`emscripten_fiber_*` need `-s ASYNCIFY`), so it cannot be used here; libco
+was pointed at the **sjlj** backend under `LIBCO_NO_ASYNCIFY`, relying on
+`-s SUPPORT_LONGJMP=wasm` for longjmp. (Both edits are additive + gated in the
+`/projects/bsnes-mercury` source, so the shipping ASYNCIFY build is unchanged.)
+
+**Result: FELL BACK.** The build **compiled + linked** (`.wasm` ~1.6 MB vs ~3.7 MB for the
+ASYNCIFY build) and **loaded** (`retro_load_game()==true`, av_info 256x224@60), but the very
+**first `retro_run()` threw a `WebAssembly.Exception`** (0 frames advanced) under
+`node tools/run-smoke.mjs …_noasyncify.js 12`. Root cause: libco's sjlj backend swaps cothreads
+via `sigaltstack`/`raise(SIGUSR1)`/`sigsetjmp`/`siglongjmp`, which do **not** perform a real
+stack switch under WASM; `SUPPORT_LONGJMP=wasm` only turns C `longjmp` into a Wasm-EH throw, so
+the cothread "switch" unwinds as an exception out of `retro_run` instead of transferring control
+to the CPU/PPU cothread. This is the same class of failure that originally forced ASYNCIFY +
+Emscripten Fibers.
+
+**Decision:** no new core shipped, no build detritus committed. **snes9x-in-a-worker**
+(synchronous, no ASYNCIFY) remains the real-time default and already resolves the user's iOS
+main-thread issue; the two ASYNCIFY bsnes cores remain for paused frame-perfect work. All three
+shipping cores still pass `run-smoke` after the experiment. Full record: `cores/build.json`
+(`noasyncify_experiment`).
+
 ## Distinct filenames + export names
 
 Each profile is emitted with a **distinct filename** and a **distinct MODULARIZE

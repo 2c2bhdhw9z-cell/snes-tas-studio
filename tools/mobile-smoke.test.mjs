@@ -1,17 +1,26 @@
 // tools/mobile-smoke.test.mjs
-// Headless DOM smoke test for the FEAT-003 mobile & speedrun layer using jsdom.
 //
-// Asserts:
-//   - #touch-controls renders at low opacity with D-Pad + A/B/X/Y/L/R/Start/Select
-//   - touch/pointer press on a control sets a live bit; release clears it
-//   - LiveInput.poll() maps a fake standard-mapping gamepad to SNES bits
-//   - the engine input provider OR-s the live mask into the piano-roll log mask
-//   - gesture-suppression handlers exist and no <input type=file> is present
+// Headless DOM test for the mobile & speedrun layer (worker-proxy architecture) using jsdom
+// + a MOCK Worker.
+//
+// FEAT-004 rewrite: live input (gamepad + on-screen touch) is polled on the MAIN THREAD and
+// STREAMED to the worker via engine.sendLiveMask({type:'liveMask'}); the worker OR-s the
+// latest live mask into the frame it runs next. So this test asserts that pressing a touch
+// control / a gamepad button produces the right live mask AND that it is streamed to the
+// worker, and it proves the OR-merge determinism directly against the real InputResolver
+// (the same resolver the worker uses) — frame N = (log.getMask(N) | liveMask) >>> 0.
+//
+// It also keeps all preserved-feature + safety assertions: #touch-controls low opacity,
+// gesture suppression in app.js, standalone display-mode CSS, viewport meta, no <input
+// type=file>, encodeURI ROM fetch (now in emu-core-runner.js), pointerdown+click primary
+// controls, gamepad mapping.
+//
 // Run from tools/: node mobile-smoke.test.mjs   (requires jsdom installed here)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { installMockWorkerEnv, mockWorkerRegistry } from './mock-worker.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -37,9 +46,8 @@ const { document } = window;
 
 globalThis.window = window;
 globalThis.document = document;
-// Node's global `navigator` is read-only, so we cannot reassign it. Instead we install a
-// getGamepads accessor on the object the modules actually see. The modules read the global
-// `navigator` (Node provides one); point our fake pads through a shared holder.
+globalThis.HTMLCanvasElement = window.HTMLCanvasElement;
+// Node's global `navigator` is read-only, so we install a getGamepads accessor on it.
 const gamepadHolder = { pads: null };
 if (!('getGamepads' in navigator)) {
   try {
@@ -56,7 +64,6 @@ globalThis.cancelAnimationFrame = () => {};
 globalThis.fetch = async () => ({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) });
 
 // jsdom lacks PointerEvent; force the touch/mouse fallback path in bindTouchControls.
-// (Deleting the constructor makes `'PointerEvent' in window` false.)
 try {
   delete window.PointerEvent;
 } catch (_e) {
@@ -75,15 +82,14 @@ for (const b of ['UP', 'DOWN', 'LEFT', 'RIGHT', 'A', 'B', 'X', 'Y', 'L', 'R', 'S
 check('touch-controls styled low opacity (0.22)', /#touch-controls\s*\{[^}]*opacity:\s*0\.22/s.test(css));
 check('no <input type=file> anywhere', document.querySelectorAll('input[type="file"]').length === 0);
 
-// Viewport meta from FEAT-001 confirmed.
+// Viewport meta.
 const viewport = document.querySelector('meta[name="viewport"]');
 const vp = viewport ? viewport.getAttribute('content') : '';
 check('viewport maximum-scale=1', /maximum-scale=1/.test(vp));
 check('viewport user-scalable=no', /user-scalable=no/.test(vp));
 check('viewport viewport-fit=cover', /viewport-fit=cover/.test(vp));
 
-// Gesture-suppression + bootstrap code now live in app.js (moved out of index.html's inline
-// script). Assert they exist there and that index.html loads app.js as a module.
+// Gesture-suppression + bootstrap code live in app.js.
 const appSrc = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
 check('index.html loads app.js as a module', /<script\s+type="module"\s+src="app\.js"><\/script>/.test(html));
 check('gesturestart handler present (app.js)', /addEventListener\(\s*['"]gesturestart['"]/.test(appSrc));
@@ -91,8 +97,7 @@ check('gesturechange handler present (app.js)', /addEventListener\(\s*['"]gestur
 check('gestureend handler present (app.js)', /addEventListener\(\s*['"]gestureend['"]/.test(appSrc));
 check('multi-touch pinch guard present (app.js)', /e\.touches\.length\s*>\s*1/.test(appSrc));
 
-// app.js wires the equivalent of the old inline bootstrap: SW registration, engine
-// attach/init, and the debug banner + window.onerror.
+// app.js wires SW registration, engine attach/init, and the debug banner + window.onerror.
 check('app.js registers the service worker', /serviceWorker\.register\(\s*['"]sw\.js['"]\)/.test(appSrc));
 check('app.js attaches the engine', /engine\.attach\(/.test(appSrc));
 check('app.js calls engine.init()', /engine\.init\(/.test(appSrc));
@@ -104,22 +109,22 @@ check('app.js listens for unhandledrejection', /addEventListener\(\s*['"]unhandl
 check('#debug-banner element exists', document.getElementById('debug-banner'));
 check('#debug-banner styled to respect the notch (safe-area-inset-top)', /#debug-banner\s*\{[^}]*safe-area-inset-top/s.test(css));
 
-// ROM fetch uses encodeURI (item 2) so Safari does not 400/404 on spaces/parens.
-const engineSrc = fs.readFileSync(path.join(ROOT, 'tas-engine.js'), 'utf8');
-check('ROM fetch uses encodeURI', /encodeURI\(\s*ROM_PATH\s*\)/.test(engineSrc));
-check('ROM fetch + arrayBuffer wrapped in try/catch', /await res\.arrayBuffer\(\)/.test(engineSrc) && /catch/.test(engineSrc));
+// ROM fetch uses encodeURI so Safari does not 400/404 on spaces/parens. The fetch now lives
+// in the worker-side core runner (emu-core-runner.js), not the main-thread proxy.
+const runnerSrc = fs.readFileSync(path.join(ROOT, 'emu-core-runner.js'), 'utf8');
+check('ROM fetch uses encodeURI (worker-side runner)', /encodeURI\(\s*ROM_PATH\s*\)/.test(runnerSrc));
+check('ROM fetch + arrayBuffer present in the runner', /await res\.arrayBuffer\(\)/.test(runnerSrc));
 
 // #frame-controls stays touch-operable (not part of the touch-controls overlay).
 check('#frame-controls buttons use touch-action:manipulation', /#frame-controls button\s*\{[^}]*touch-action:\s*manipulation/s.test(css));
 check('#frame-controls speed slider uses touch-action:pan-x', /#frame-controls input\[type="range"\]\s*\{[^}]*touch-action:\s*pan-x/s.test(css));
 
-// Orientation-based layout (item 4).
+// Orientation-based layout.
 check('CSS has orientation:portrait rules', /@media\s*\(orientation:\s*portrait\)/.test(css));
 check('CSS has orientation:landscape rules', /@media\s*\(orientation:\s*landscape\)/.test(css));
 
-// --- Installed PWA (iOS standalone) touch fixes ---
+// Installed PWA (iOS standalone) touch fixes.
 check('CSS has an @media (display-mode: standalone) block', /@media\s*\(display-mode:\s*standalone\)/.test(css));
-// Grab just the standalone block for targeted assertions.
 const standaloneMatch = css.match(/@media\s*\(display-mode:\s*standalone\)\s*\{([\s\S]*?)\n\}\s*$/);
 const standaloneBlock = standaloneMatch ? standaloneMatch[1] : '';
 check('standalone: #touch-controls overlay stays pointer-events:none', /#touch-controls\s*\{[^}]*pointer-events:\s*none/s.test(standaloneBlock));
@@ -129,8 +134,7 @@ check('standalone: #frame-controls buttons/save-state nodes get pointer-events:a
 check('standalone: #speed slider gets pointer-events:auto + pan-x', /#speed[\s\S]*?pointer-events:\s*auto/s.test(standaloneBlock) && /#speed[\s\S]*?touch-action:\s*pan-x/s.test(standaloneBlock));
 check('standalone: #frame-controls raised above the stage (z-index)', /#frame-controls\s*\{[^}]*z-index:/s.test(standaloneBlock));
 
-// Primary controls in piano-roll.js listen for BOTH pointerdown AND click (item: iOS
-// standalone can delay/suppress the synthetic click). bindPrimary binds both.
+// Primary controls in piano-roll.js listen for BOTH pointerdown AND click.
 const pianoSrc = fs.readFileSync(path.join(ROOT, 'piano-roll.js'), 'utf8');
 check('piano-roll binds pointerdown on primary controls', /addEventListener\(\s*['"]pointerdown['"]/.test(pianoSrc));
 check('piano-roll still binds click on primary controls', /addEventListener\(\s*['"]click['"]/.test(pianoSrc));
@@ -146,10 +150,15 @@ check('overscroll-behavior:none present', /overscroll-behavior:\s*none/.test(css
 check('touch-action:none on root', /touch-action:\s*none/.test(css));
 check('piano-roll re-enables touch panning', /#piano-roll\s*\{[^}]*touch-action:\s*pan/s.test(css));
 
-// --- Live behavior: modules ---
+// --- Live behavior: modules + proxy + mock worker ---
+installMockWorkerEnv({ offscreen: false });
 const engineMod = await import('../tas-engine.js');
 const engine = engineMod.default;
 window.TASEngine = engine;
+engine.attach({ canvas: document.getElementById('screen'), noticeEl: document.getElementById('notice') });
+const worker = mockWorkerRegistry.last;
+check('proxy created a module worker', worker && worker.opts.type === 'module');
+
 const { TASStudio } = await import('../piano-roll.js');
 const { LiveInput, GAMEPAD_STANDARD_MAP } = await import('../live-input.js');
 
@@ -171,16 +180,31 @@ check('touch press adds held class', heldClass);
 aBtn.dispatchEvent(new window.MouseEvent('mouseup', { bubbles: true }));
 check('touch release clears live mask', studio.live.getMask() === 0);
 
-// Provider merges live touch input into the current frame's mask.
+// Live input is STREAMED to the worker: pressing B then polling streams a liveMask message
+// whose mask has B (bit 0) set. We drive the studio's stream tick directly (deterministic,
+// no rAF) and assert the exact protocol message the worker receives.
 studio.live.setTouch('B', true);
-const providerMask = engine._inputProvider ? engine._inputProvider(0, 0, 1, 0, 0) : 0;
-// B is bit 0 => mask should have bit 0 set from the live source even though log[0] is empty.
-check('provider OR-s live mask into frame input', (providerMask & 1) === 1);
+worker.__clear();
+studio.live.poll();
+engine.sendLiveMask(studio.live.getMask() >>> 0);
+const lm = worker.__last('liveMask');
+check('live touch mask is streamed to the worker via {type:liveMask}', lm && (lm.msg.mask & 1) === 1);
 studio.live.clearTouch();
+
+// --- OR-merge determinism proven against the REAL InputResolver (the worker's resolver) ---
+// frame N runs with exactly (scripted log mask for N | liveMask) >>> 0.
+const { InputResolver } = await import('../input-resolver.js');
+const resolver = new InputResolver();
+// Scripted: A (bit 8) on frame 4. Live: B (bit 0) held via the streamed mask.
+resolver.applyEdit({ op: 'setFrameButton', frame: 4, button: 'A', on: true });
+const A = 1 << 8, B = 1 << 0;
+check('resolver OR-merges scripted A + live B on frame 4', resolver.getFrameInputMask(4, B) === ((A | B) >>> 0));
+check('resolver: frame 3 (no script) = live only', resolver.getFrameInputMask(3, B) === (B >>> 0));
+check('resolver: frame 4 without live = scripted only', resolver.getFrameInputMask(4, 0) === (A >>> 0));
+check('resolver: frame 3 never reflects frame 4 scripted input', resolver.getFrameInputMask(3, 0) === 0);
 
 // Gamepad standard-mapping -> SNES bits.
 const li = new LiveInput();
-// Fake a standard-mapping pad: button 0 (A face) + button 5 (RB) pressed; d-pad right (15).
 const buttons = Array.from({ length: 16 }, () => ({ pressed: false, value: 0 }));
 buttons[0].pressed = true; // -> SNES B (bit 0)
 buttons[5].pressed = true; // -> SNES R (bit 11)
@@ -201,18 +225,14 @@ li2.poll();
 check('left stick left -> SNES LEFT', (li2.getMask() & (1 << 6)) !== 0);
 
 // --- Behavioral: a pointerdown on Play toggles the engine (standalone tap path) ---
-// jsdom has no PointerEvent, but the listener is bound by string type, so dispatching a
-// generic Event of type 'pointerdown' exercises the same handler a real tap would.
 let toggled = 0;
 engine.togglePause = () => { toggled += 1; };
 const playBtn = document.getElementById('btn-playpause');
 check('#btn-playpause exists', playBtn);
 const pd = new window.Event('pointerdown', { bubbles: true });
-// Emulate a primary-button pointer (button 0).
 Object.defineProperty(pd, 'button', { value: 0 });
 playBtn.dispatchEvent(pd);
 check('pointerdown on Play toggles the engine once', toggled === 1);
-// The synthetic click that follows the same tap must NOT double-fire the action.
 playBtn.dispatchEvent(new window.Event('click', { bubbles: true }));
 check('synthetic click after pointerdown does not double-toggle', toggled === 1);
 

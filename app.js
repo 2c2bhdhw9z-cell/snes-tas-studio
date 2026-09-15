@@ -3,9 +3,11 @@
 // This module owns everything that used to live in index.html's inline <script type=module>
 // bootstrap, plus the new on-screen diagnostic banner:
 //   1) Service worker registration (offline shell).
-//   2) Engine wiring: attach the canvas + notice element, mirror the frame counter, and
-//      auto-boot the engine (engine.init() never throws; missing ROM/core degrade to a
-//      notice + disabled state, never a file picker).
+//   2) Engine wiring: attach the canvas + notice element (attach() creates the emulator Web
+//      Worker and, when supported, transfers the canvas to it as an OffscreenCanvas), mirror
+//      the frame counter, and auto-boot the engine (engine.init() never throws; missing
+//      ROM/core degrade to a notice + disabled state, never a file picker). All WASM work runs
+//      in the worker so the main thread stays free for DOM/touch.
 //   3) iOS Safari bounce/pinch gesture suppression (gesturestart/change/end + multi-touch
 //      pinch touchmove preventDefault, while leaving #piano-roll scrolling intact).
 //   4) The always-visible on-screen debug banner (#debug-banner): live WASM core status,
@@ -151,6 +153,10 @@ window.addEventListener('DOMContentLoaded', () => {
 
   const canvas = document.getElementById('screen');
   const noticeEl = document.getElementById('notice');
+  // attach() creates the emulator worker and decides the video path. If OffscreenCanvas is
+  // supported it transfers control of #screen to the worker (which then blits directly); this
+  // MUST happen before anything takes a 2d context on #screen (a transferred canvas cannot
+  // getContext('2d') on the main thread), so attach() is the FIRST thing to touch the canvas.
   engine.attach({ canvas, noticeEl });
 
   // Frame counter readout. The full toolbar wiring (play/pause, frame advance, speed

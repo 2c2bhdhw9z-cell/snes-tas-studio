@@ -5,9 +5,12 @@
 // and a frame counter. It refreshes once per emulated frame.
 //
 // ============================ HARD RULE: READ-ONLY OBSERVATION ============================
-// This module observes memory ONLY. It obtains a read-only view from the engine via
-// TASEngine.getMemoryView(), which exposes read accessors only (readU8/readU16/readS16/
-// snapshot) and has NO write API. This file:
+// This module observes memory ONLY. Since the emulator now runs in a Web Worker, the WORKER
+// reads the verified SMB1 WRAM addresses READ-ONLY each frame and STREAMS a small values
+// object to the main thread ({type:'hud'} messages). The main-thread proxy surfaces those
+// streamed values through TASEngine.getMemoryView(), which exposes read accessors only
+// (readU8/readS8/readU16/readS16, keyed by WRAM offset) and has NO write API — no memory
+// write path crosses the worker boundary at all. This file:
 //   * NEVER writes, pokes, or injects memory.
 //   * Exposes NO write/poke/inject/cheat function of any kind.
 //   * Provides NO level/stage selection.

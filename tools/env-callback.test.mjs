@@ -28,13 +28,18 @@ globalThis.requestAnimationFrame = () => 0;
 globalThis.cancelAnimationFrame = () => {};
 globalThis.fetch = async () => ({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) });
 
+// FEAT-002: the libretro env-callback + pixel-format ABI logic now lives in EmuCoreRunner
+// (which runs inside the emulator Web Worker), not on the main-thread TASEngine proxy. The
+// logic is byte-identical to what tas-engine.js used to host; we point this ABI unit test at
+// EmuCoreRunner (re-exported from tas-engine.js) so the per-command coverage stays green
+// against the class that actually owns _handleEnvironment / _ensureDirString / _pixelFormat.
 const mod = await import('../tas-engine.js');
-const { TASEngine } = mod;
+const { EmuCoreRunner } = mod;
 
 // A tiny fake WASM heap so _handleEnvironment can read/write through the same views the
 // real Emscripten Module exposes.
 function makeEngineWithHeap() {
-  const engine = new TASEngine();
+  const engine = new EmuCoreRunner();
   const buf = new ArrayBuffer(256);
   // A tiny bump allocator so _ensureDirString (which calls Module._malloc) can allocate the
   // kept-alive directory C string. Hands out offsets above the low scratch region the tests

@@ -126,17 +126,77 @@ This is a **static, client-side vanilla-JS PWA** (no framework, no build step to
 uses a **thin custom libretro JS frontend** (not the full EmulatorJS UI) so we control
 frame-advance, state serialize/deserialize, and raw read-only memory peek directly.
 
+### The emulator runs in a Web Worker (why, and how the boundary works)
+
+**The problem this solves:** on real iOS Safari a synchronous WASM libretro core running on
+the **main thread** starves the UI — the emulator crawls (~15 FPS) and, because it never
+yields, the browser swallows touch/DOM events, so the on-screen controller stops responding.
+No amount of tuning fixes a synchronous Wasm emulator sharing the main thread with a DOM UI
+on iOS.
+
+**The fix:** the entire emulator was moved **off the main thread into a dedicated module Web
+Worker**. The main thread now does **only** DOM events + presentation; every heavy thing
+(WASM instantiation, `retro_run`, save/load, WRAM reads, framebuffer decode) happens in the
+worker. Touch is never blocked again.
+
+```
+ main thread (DOM only)                          worker thread (all WASM)
+ ┌───────────────────────────┐   postMessage    ┌───────────────────────────────┐
+ │ app.js  (bootstrap)        │  ───────────────▶│ emu-worker.js (message router)│
+ │ piano-roll.js (UI + input) │   init/play/     │   └ emu-core-runner.js (ABI +  │
+ │ memory-watch.js (HUD)      │     pause/edit/   │        run loop + decode)      │
+ │ tas-engine.js  (PROXY)     │◀───────────────  │   └ input-resolver.js (log)    │
+ └───────────────────────────┘   frame/hud/      └───────────────────────────────┘
+        ▲ OffscreenCanvas          video/saved/
+        └ (transferred to worker)  stateLoaded
+```
+
+**How each concern crosses the boundary:**
+
+- **Input (deterministic).** The **authoritative scripted `InputLog` lives in the worker**
+  (wrapped by `input-resolver.js`). The UI sends `{type:'inputEdit'}` edits
+  (`setFrameButton` / `truncateAfter` / `restoreSnapshot`) when you toggle a piano-roll cell,
+  and it streams the **live** controller/touch mask each animation frame via
+  `{type:'liveMask'}`. The worker resolves **exactly `(log.getMask(frame) | latestLiveMask)
+  >>> 0`** at the instant `retro_run` pulls input for the frame it is about to run — so frame
+  N always runs with frame N's input and never N+1's. Frame-advance runs **exactly one**
+  `retro_run` with that frame's resolved input.
+- **Video (OffscreenCanvas, with an iOS-safe fallback).** `tas-engine.js` feature-detects
+  `HTMLCanvasElement.prototype.transferControlToOffscreen` + a working `OffscreenCanvas` 2d
+  context. **If supported**, it `transferControlToOffscreen()` and posts the canvas to the
+  worker (as a transferable), and the worker blits decoded RGBA **directly** — no per-frame
+  message crosses the boundary. **If not supported** (older Safari), the worker posts each
+  frame as `{type:'video'}` with a transferable `ArrayBuffer` of RGBA + dimensions and the
+  main thread blits it. Both paths use the same decoder in `emu-core-runner.js`.
+- **HUD (streamed, read-only).** The worker reads the verified SMB1 WRAM addresses
+  **read-only** each frame and posts a small values object via `{type:'hud'}`. The proxy
+  surfaces those through `getMemoryView()` (read accessors only, keyed by WRAM offset) so
+  `memory-watch.js` renders with **no synchronous WRAM read** and **no write path** anywhere
+  across the boundary.
+- **Save / load (transferable bytes).** `saveState()` messages the worker, which
+  `retro_serialize`s and returns the bytes as a transferable `ArrayBuffer` (`{type:'saved'}`);
+  `loadState(bytes)` sends the bytes (transferable) to the worker's `retro_unserialize`, and
+  the worker's `{type:'stateLoaded'}` ack fires the proxy's `onStateLoaded` so re-record
+  truncation still runs.
+- **Core switch.** The **Core** dropdown calls `setCore(path)`, which posts `{type:'setCore'}`;
+  the worker tears the current core down and boots the selected one (snes9x is driven as a
+  **synchronous** self-scheduling loop; the ASYNCIFY bsnes cores are **awaited**). snes9x
+  remains the default.
+
 | File | Role |
 | --- | --- |
 | `index.html` | App shell: iOS/standalone/no-bounce meta tags, canvas, HUD, piano-roll, frame controls, save-state tree, touch controls, notice banner, on-screen debug banner. Loads `app.js` as the bootstrap module. |
-| `app.js` | App-level bootstrap/orchestration: service-worker registration, engine attach/init wiring, iOS bounce/pinch gesture suppression, and the always-visible on-screen debug banner (WASM core status, ROM fetch status, and a `window.onerror`/`unhandledrejection` listener that prints uncaught JS/WASM errors on screen). Status/errors only — adds no emulation, memory-write, cheat, or level-select capability. |
-| `tas-engine.js` | libretro frontend + core glue: loads the WASM core, loads the ROM (via `encodeURI` at fetch time, with explicit try/catch surfacing precise status), run loop (pause/speed 0.1x-2x/fast-forward), frame advance, save/load state with re-record hook, per-frame input feed, framebuffer blit, read-only memory view. Exposes a diagnostic `onStatus`/`statusSnapshot` surface for the debug banner. Exposed as `window.TASEngine`. |
-| `piano-roll.js` | The TAS Studio UI (`TASStudio`): piano-roll input editor, frame-control toolbar, save-state tree with re-record truncation. Owns the shared `InputLog` and the `LiveInput`. |
-| `input-log.js` | Pure, DOM-free per-frame input log (`InputLog`): a libretro joypad bitmask per frame, plus the `truncateAfter` re-record primitive. Unit-testable in Node. |
-| `live-input.js` | Real-time controller input (`LiveInput`): HTML5 Gamepad API polling + on-screen touch controls, merged (OR-ed) into the current frame's input. |
-| `memory-watch.js` | Read-only Live HUD: reads Mario X/Y sub-pixel, horizontal speed, and the frame counter from WRAM (observation only). |
-| `core/core-loader.js` | Fetches + instantiates the Emscripten libretro core; degrades gracefully when absent. |
-| `sw.js` | Service worker: cache-first offline app shell. **Never caches the ROM.** |
+| `app.js` | App-level bootstrap/orchestration: service-worker registration, engine attach/init wiring (attach() creates the worker and, when supported, transfers the canvas to it as an OffscreenCanvas **before** any main-thread `getContext`), iOS bounce/pinch gesture suppression, and the always-visible on-screen debug banner (WASM core status, ROM fetch status, and a `window.onerror`/`unhandledrejection` listener that prints uncaught JS/WASM errors on screen). Status/errors only — adds no emulation, memory-write, cheat, or level-select capability. |
+| `tas-engine.js` | The **thin main-thread PROXY** (`window.TASEngine`). Creates the emulator module worker (`new Worker(url, {type:'module'})`), forwards commands as `postMessage`, and mirrors `currentFrame`/`status`/`coreStatus`/`romStatus`/`engineStatus`/`activeCoreId` from worker messages so the banner + piano-roll + HUD read them without blocking. Does the OffscreenCanvas feature-detect + transfer (or the fallback `{type:'video'}` blit). Contains **no** `retro_*`/`cwrap`/`addFunction`/`retro_run` — no synchronous WASM work on the main thread. |
+| `emu-worker.js` | The **module Web Worker entry**: routes the IN/OUT message protocol, owns the authoritative `InputResolver` (scripted `InputLog`) + the latest live mask, hosts one `EmuCoreRunner`, and either blits to a transferred OffscreenCanvas or posts `{type:'video'}` frames. Enforces the determinism contract by construction. |
+| `emu-core-runner.js` | The **DOM-free libretro core runner** (runs inside the worker): dynamic-imports the core, fetches the ROM (`encodeURI`), `cwrap`s the `retro_*` ABI, installs env/video/audio/input callbacks, drives the self-scheduling run loop (synchronous core yields between frames; ASYNCIFY core awaits `retro_run`), decodes the framebuffer to RGBA, save/load, and read-only WRAM/HUD reads. Unit-testable in Node with a mock core. |
+| `input-resolver.js` | The **deterministic input resolver** (in the worker): wraps the authoritative `InputLog` and resolves `(log.getMask(frame) \| liveMask) >>> 0`; applies the scripted-edit op protocol. Pure, DOM-free, unit-testable. |
+| `piano-roll.js` | The TAS Studio UI (`TASStudio`): piano-roll input editor (cell toggle → local mirror log **+** `{type:'inputEdit'}` to the worker), frame-control toolbar, save-state tree with re-record truncation, and the per-animation-frame live-mask stream to the worker. Owns a local **mirror** `InputLog` (for grid rendering) and the `LiveInput`. |
+| `input-log.js` | Pure, DOM-free per-frame input log (`InputLog`): a libretro joypad bitmask per frame, plus the `truncateAfter` re-record primitive. Used as the worker's authoritative log **and** the UI's render mirror. Unit-testable in Node. |
+| `live-input.js` | Real-time controller input (`LiveInput`): HTML5 Gamepad API polling + on-screen touch controls; its mask is streamed to the worker and OR-ed into the frame the worker runs next. |
+| `memory-watch.js` | Read-only Live HUD: renders Mario X/Y sub-pixel, horizontal speed, and the frame counter from the **streamed** HUD values (observation only). |
+| `core/core-loader.js` | Fetches + instantiates the Emscripten libretro core **inside the worker**; degrades gracefully when absent. |
+| `sw.js` | Service worker (`tas-studio-v14`): cache-first offline app shell, now precaching `emu-worker.js` + `emu-core-runner.js` + `input-resolver.js`. **Never caches the ROM.** |
 | `manifest.json` | PWA manifest: standalone, landscape, dark theme, icons. |
 | `styles.css` | Studio UI + low-opacity on-screen touch controls. |
 | `icons/` | PWA icons (placeholder solids; regenerate with `tools/make-icons.js`). |
@@ -245,9 +305,12 @@ These are hard product rules, enforced by construction, not just by policy:
   D-Pad and A/B/X/Y/L/R/Start/Select at ~0.22 opacity. Buttons use pointer/touch events and
   set/clear live bits.
 - **How live input merges with the timeline.** Both the gamepad and touch controls feed a
-  single **live mask** (`LiveInput.getMask()`), which the engine's per-frame input provider
-  **OR-s into the piano-roll `InputLog` mask** for the current frame. Live play/record and
-  the scripted timeline coexist without one clobbering the other.
+  single **live mask** (`LiveInput.getMask()`), polled on the main thread and **streamed to
+  the worker** (`{type:'liveMask'}`) each animation frame. The worker OR-s the latest live
+  mask into the **scripted `InputLog`** mask for the frame it runs next — i.e. exactly
+  `(log.getMask(frame) | liveMask) >>> 0`. Live play/record and the scripted timeline coexist
+  without one clobbering the other, and the determinism contract holds without a synchronous
+  per-frame pull across the boundary.
 
 ## Running locally
 
@@ -292,13 +355,45 @@ piano-roll container re-enables touch panning so the timeline still scrolls.
   libretro ABI our frontend needs: `node tools/core-probe.mjs` reports **17/17** `retro_*`
   exports present and **`addFunction: yes`**, so `tas-engine.js` can drive it.
 
+**Verified now (worker-proxy boundary, headless with mocks):**
+
+- The proxy (`tas-engine.js`) creates a **module worker** and does **no** synchronous WASM
+  work (`tools/engine-smoke.mjs`).
+- **Determinism across the boundary:** frame N runs with exactly
+  `(log.getMask(N) | latestLiveMask) >>> 0`, never N+1's input; frame-advance = one frame;
+  re-record truncation holds after a load (`tools/worker-boundary.test.mjs`,
+  `tools/emu-worker.test.mjs`).
+- **Both video paths:** OffscreenCanvas-transferred (worker blits, no `{type:'video'}`) and
+  the fallback (`{type:'video'}` + main-thread blit) (`tools/worker-boundary.test.mjs`).
+- **Streamed read-only HUD** carries the verified SMB1 addresses; **save/load round-trips**
+  over transferable bytes; no memory-write/cheat path crosses the boundary.
+- The worker's **self-scheduling run loop** (speed 0.1×–2×, fast-forward burst, one-frame
+  step, ASYNCIFY awaiting) via `tools/runloop.test.mjs`.
+
 **Requires the ROM (the core is present; gameplay still needs a legally-owned ROM):**
 
 - Actual gameplay / video output.
 - Real save-state bytes via `retro_serialize` / `retro_unserialize`.
-- Real HUD values (the SMB / All-Stars WRAM address map may need a ROM-revision-specific
-  base offset to be calibrated against the real ROM).
+- Real HUD values against the real ROM.
 - End-to-end gamepad-driven play latency.
+
+### Device-only (CANNOT be confirmed headless — only on the physical device)
+
+These depend on the real iOS Safari runtime and cannot be proven by the Node/jsdom harnesses;
+they must be checked on the actual hardware:
+
+- **Actual iPhone FPS** with the emulator in the worker (the whole point of the migration —
+  headless timing does not represent the device GPU/CPU or Safari's scheduler). *Target: the
+  ~15 FPS main-thread slideshow is replaced by real-time snes9x playback.*
+- **Real touch responsiveness** — that the virtual controller and UI buttons respond
+  immediately now that the main thread is never blocked by `retro_run`.
+- **OffscreenCanvas behavior on the user's exact Safari version** — whether
+  `transferControlToOffscreen` + worker 2d blit is taken, or the `{type:'video'}` fallback is
+  used, on that specific iOS build.
+- **The FEAT-003 no-ASYNCIFY bsnes result on-device** — documented as a NEGATIVE result
+  (libco cothread switch throws a Wasm exception out of `retro_run` even off the main thread;
+  no core shipped). See `cores/README.md` / `cores/build.json`. snes9x-in-worker remains the
+  real-time default; confirming this on the device is the final check.
 
 ## Dev tooling / tests
 
@@ -309,14 +404,19 @@ for f in *.js core/*.js; do node --check "$f"; done
 # Validate manifest
 node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))"
 
-# Optional headless smoke tests (installs jsdom locally under tools/)
-cd tools && npm install
-node dom-smoke.test.js         # FEAT-001 shell smoke
-node engine-smoke.mjs          # engine graceful-degradation + API surface
-node studio-dom.test.mjs       # FEAT-002 studio UI (piano roll / toolbar / HUD)
+# Full headless suite (installs jsdom locally under tools/)
+cd tools && npm install && npm test
+# individual suites:
+node engine-smoke.mjs          # the main-thread PROXY vs a mock Worker (protocol + mirroring)
+node studio-dom.test.mjs       # studio UI over the proxy + mock worker (piano roll / toolbar / HUD)
+node mobile-smoke.test.mjs     # gamepad + touch (streamed liveMask) + gesture suppression
+node runloop.test.mjs          # the WORKER's self-scheduling run loop (speed / FF / step / asyncify)
+node worker-boundary.test.mjs  # authoritative determinism + OffscreenCanvas + save/load boundary
+node emu-worker.test.mjs       # worker message-protocol plumbing (fake runner)
+node emu-core-runner.test.mjs  # DOM-free runner with a mock core (decode / save-load / HUD)
+node input-resolver.test.mjs   # deterministic (log | live) resolution + op protocol
 node inputlog-truncate.test.mjs # re-record truncation
-node mobile-smoke.test.mjs     # FEAT-003 gamepad + touch + gesture suppression
-node precache-check.mjs        # sw.js precaches the shell and excludes the ROM
+node precache-check.mjs        # sw.js precaches the shell (v14) and excludes the ROM
 
 # From the repo root: verify the bundled WASM core exposes the raw libretro ABI
 node tools/core-probe.mjs      # expect 17/17 retro_* exports + addFunction: yes

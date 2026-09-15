@@ -2,6 +2,7 @@
   "name": "tas-studio-tools",
   "private": true,
   "description": "Dev-only tooling for the SNES TAS Studio: icon generation and headless smoke tests. Not shipped with the app.",
+  "_feat004_note": "FEAT-004 rewrote the DOM harnesses (studio-dom/mobile-smoke/engine-smoke/runloop) for the worker-proxy architecture: they now exercise the REAL main-thread proxy (tas-engine.js) + REAL piano-roll/memory-watch logic against a MOCK Worker (tools/mock-worker.mjs), and runloop tests the WORKER's self-scheduling run loop via emu-core-runner.js with a mock core. They are folded back into `test` (the temporary test:pending-feat004 split is gone). tools/worker-boundary.test.mjs is the authoritative determinism + OffscreenCanvas + save/load boundary test (real runner + real resolver + mock core). The full `test` chain is green: pure-logic + ABI + runner/resolver + worker-boundary + proxy DOM harnesses + precache v14.",
   "scripts": {
     "icons": "node make-icons.js",
     "test:dom": "node dom-smoke.test.js",
@@ -13,6 +14,10 @@
     "test:inputlog": "node inputlog-truncate.test.mjs",
     "test:precache": "node precache-check.mjs",
     "test:coreurl": "node core-url-resolve.test.mjs",
+    "test:runner": "node emu-core-runner.test.mjs",
+    "test:inputresolver": "node input-resolver.test.mjs",
+    "test:worker": "node emu-worker.test.mjs",
+    "test:workerboundary": "node worker-boundary.test.mjs",
     "coreprobe": "node core-probe.mjs",
     "hud:calibrate": "node hud-calibrate.mjs",
     "hud:crosscheck:snes9x": "CORE=cores/snes9x_libretro.js node hud-crosscheck.mjs",
@@ -20,7 +25,7 @@
     "test:runsmoke:accuracy": "node run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12",
     "test:runsmoke:performance": "node run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12",
     "test:runsmoke:snes9x": "node run-smoke.mjs cores/snes9x_libretro.js 60",
-    "test": "node inputlog-truncate.test.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node engine-smoke.mjs && node runloop.test.mjs && node env-callback.test.mjs && node core-url-resolve.test.mjs && node precache-check.mjs"
+    "test": "node inputlog-truncate.test.mjs && node env-callback.test.mjs && node core-url-resolve.test.mjs && node input-resolver.test.mjs && node emu-core-runner.test.mjs && node emu-worker.test.mjs && node worker-boundary.test.mjs && node runloop.test.mjs && node engine-smoke.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node precache-check.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.1.3"

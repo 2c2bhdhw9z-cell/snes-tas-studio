@@ -10,10 +10,13 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v13';
+const CACHE_VERSION = 'tas-studio-v14';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
-// Core app shell — always precached. These are the files this feature ships.
+// Core app shell — always precached. These are the files this feature ships. The emulator
+// now runs OFF the main thread: emu-worker.js is the MODULE worker entry (loaded via
+// `new Worker(url, {type:'module'})`) and it statically imports emu-core-runner.js +
+// input-resolver.js, so all three MUST be precached for the studio to boot fully offline.
 const APP_SHELL = [
   './',
   'index.html',
@@ -21,6 +24,9 @@ const APP_SHELL = [
   'manifest.json',
   'app.js',
   'tas-engine.js',
+  'emu-worker.js',
+  'emu-core-runner.js',
+  'input-resolver.js',
   'piano-roll.js',
   'input-log.js',
   'live-input.js',

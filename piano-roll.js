@@ -1,19 +1,25 @@
 // piano-roll.js
 //
-// The TAS Studio interface layer built on top of the FEAT-001 engine API. It wires up:
+// The TAS Studio interface layer built on top of the worker-proxy engine API. It wires up:
 //   1. The Piano Roll input editor: a scrollable per-frame timeline whose columns are the
 //      SNES buttons (A/B/X/Y/L/R + D-Pad + Start/Select). Clicking a cell toggles that
-//      button on that frame in the shared InputLog. The engine's input provider reads the
-//      current frame's bitmask straight out of the log.
-//   2. The Frame Control toolbar: Frame Advance, Play/Pause, a 0.1x-2x speed slider, and
-//      Fast-Forward, each wired to the corresponding engine method with visual state.
-//   3. The Save-State Tree: Save captures engine.saveState() + current frame + an input-log
-//      snapshot as a tree node; Load restores the state and TRUNCATES the input log after
-//      the loaded frame (re-recording). The engine's onStateLoaded hook guarantees the
-//      truncation fires on every load, from the tree UI or elsewhere.
+//      button on that frame. Because the AUTHORITATIVE InputLog now lives in the WORKER, a
+//      cell toggle both updates a LOCAL MIRROR log (for grid rendering) and sends an
+//      {type:'inputEdit', op:'setFrameButton'} message so the worker's log stays in lockstep.
+//   2. Live input: LiveInput (gamepad + touch) is polled on the MAIN THREAD each animation
+//      frame and its mask is streamed to the worker via {type:'liveMask'}. The worker OR-s
+//      the latest live mask into the frame it runs next — preserving the determinism contract
+//      (log.getMask(frame) | liveMask) >>> 0 without a synchronous per-frame pull.
+//   3. The Frame Control toolbar: Frame Advance (sends exactly one frameAdvance), Play/Pause,
+//      a 0.1x-2x speed slider, and Fast-Forward, each wired to the proxy with visual state.
+//   4. The Save-State Tree: Save captures engine.saveState() (async over the worker) + the
+//      current frame + a local input-log snapshot; Load restores the state, restores the
+//      local mirror snapshot, sends restoreSnapshot + truncateAfter to the worker, and the
+//      proxy's onStateLoaded hook (fired by the worker's stateLoaded message) truncates the
+//      mirror so re-recording holds on every load.
 //
 // The whole UI stays functional with no core/ROM present: cells toggle, controls exist,
-// and save/load simply operate on the input log (engine save/load no-ops gracefully).
+// and save/load simply operate on the local mirror log (worker commands no-op gracefully).
 //
 // HARD RULE: nothing here writes emulator memory, applies cheats, or selects levels.
 
@@ -50,13 +56,17 @@ export class TASStudio {
    */
   constructor(engine, els = {}) {
     this.engine = engine;
+    // LOCAL MIRROR of the scripted input log. The authoritative log lives in the worker; this
+    // mirror is what the grid renders from and stays in lockstep via the same edits we send to
+    // the worker (setFrameButton / truncateAfter / restore).
     this.log = new InputLog();
 
-    // Live real-time input (gamepad + on-screen touch controls). Its mask is OR-ed into
-    // the piano-roll log's mask by the engine input provider, so a paired Bluetooth pad or
-    // the touch overlay can play/record the current frame alongside the timeline.
+    // Live real-time input (gamepad + on-screen touch controls). Polled on the MAIN THREAD
+    // each animation frame; its mask is streamed to the worker via {type:'liveMask'} so a
+    // paired Bluetooth pad or the touch overlay merges into the frame the worker runs next.
     this.live = new LiveInput();
-    this._lastPolledFrame = -1;
+    this._liveRafId = null;
+    this._lastStreamedMask = -1;
 
     this.pianoRollEl = els.pianoRoll || null;
     this.frameControlsEl = els.frameControls || null;
@@ -76,9 +86,9 @@ export class TASStudio {
 
   /** Wire everything up. Safe to call once the DOM is ready. */
   init() {
-    this._registerInputProvider();
     this._registerStateLoadHook();
     this._wireLiveInput();
+    this._startLiveMaskStream();
     this.renderPianoRoll();
     this.wireFrameControls();
     this.renderStateTree();
@@ -90,25 +100,38 @@ export class TASStudio {
     return this;
   }
 
-  // ----------------------------------------------------------------- input provider
+  // ----------------------------------------------------------------- live mask stream
 
-  _registerInputProvider() {
-    if (typeof this.engine.setInputProvider !== 'function') return;
-    // The engine's input-provider contract is a single shape: return a WHOLE-JOYPAD
-    // BITMASK (libretro joypad-bit layout) for the requested frame. We return the piano-
-    // roll log's mask for that frame OR-ed with the live gamepad/touch mask so real-time
-    // input merges into the frame that retro_set_input_state reads.
-    //
-    // Latency: poll the gamepad exactly once per frame, the first time the engine reads
-    // input for that frame (this happens inside retro_run, i.e. the same rAF tick), so the
-    // live mask reflects the freshest pad state with no extra frame of delay.
-    this.engine.setInputProvider((frame /*, port, device, index, id */) => {
-      if (frame !== this._lastPolledFrame) {
+  /**
+   * Poll LiveInput (gamepad + touch) each animation frame on the MAIN THREAD and stream the
+   * latest mask to the worker via engine.sendLiveMask(). The worker holds the most-recent
+   * live mask and OR-s it into the frame retro_run runs next, so the determinism contract
+   * (log.getMask(frame) | liveMask) >>> 0 is preserved without a synchronous per-frame pull
+   * across the boundary. We only send when the mask CHANGES to avoid flooding the boundary,
+   * but always re-send the first non-repeat so the worker never misses a transition.
+   */
+  _startLiveMaskStream() {
+    if (typeof this.engine.sendLiveMask !== 'function') return;
+    const tick = () => {
+      try {
         this.live.poll();
-        this._lastPolledFrame = frame;
+        const mask = this.live.getMask() >>> 0;
+        if (mask !== this._lastStreamedMask) {
+          this.engine.sendLiveMask(mask);
+          this._lastStreamedMask = mask;
+        }
+      } catch (_err) {
+        /* never let the live stream crash the UI */
       }
-      return (this.log.getMask(frame) | this.live.getMask()) >>> 0;
-    });
+      this._liveRafId = this._raf(tick);
+    };
+    this._liveRafId = this._raf(tick);
+  }
+
+  _raf(cb) {
+    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(cb);
+    if (typeof setTimeout === 'function') return setTimeout(() => cb(Date.now()), 16);
+    return null;
   }
 
   // ----------------------------------------------------------------- live input wiring
@@ -137,7 +160,12 @@ export class TASStudio {
     // frame in the input log is discarded so new input forms a fresh branch. This fires
     // for EVERY load, whether triggered from the tree UI or elsewhere.
     this.engine.onStateLoaded((frame) => {
+      // Truncate the LOCAL MIRROR and tell the WORKER's authoritative log to truncate too, so
+      // both stay in lockstep after a load.
       this.log.truncateAfter(frame);
+      if (typeof this.engine.sendInputEdit === 'function') {
+        this.engine.sendInputEdit({ op: 'truncateAfter', frame });
+      }
       this.renderPianoRoll();
     });
   }
@@ -225,7 +253,13 @@ export class TASStudio {
     const frame = parseInt(cell.dataset.frame, 10);
     const col = cell.dataset.col;
     if (Number.isNaN(frame) || !col) return;
+    // Update the LOCAL MIRROR for immediate grid feedback...
     const on = this.log.toggle(frame, col);
+    // ...and send the same edit to the WORKER's authoritative InputLog so frame N runs with
+    // exactly this scripted bit set. Controller input only — never a memory write.
+    if (typeof this.engine.sendInputEdit === 'function') {
+      this.engine.sendInputEdit({ op: 'setFrameButton', frame, button: col, on });
+    }
     cell.classList.toggle('pr-cell--on', on);
     cell.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
@@ -390,20 +424,12 @@ export class TASStudio {
    */
   saveStateNode() {
     const frame = this._currentFrame();
-    let bytes = null;
-    if (typeof this.engine.saveState === 'function') {
-      try {
-        bytes = this.engine.saveState();
-      } catch (_err) {
-        bytes = null;
-      }
-    }
     const id = `s${++this._stateSeq}`;
     const node = {
       id,
       parent: this._activeNodeId,
       frame,
-      bytes, // Uint8Array | null (null when no core is loaded)
+      bytes: null, // Uint8Array | null; filled asynchronously by the worker (see below)
       inputSnapshot: this.log.snapshot(),
       label: `Frame ${frame}`,
       createdAt: Date.now(),
@@ -412,6 +438,25 @@ export class TASStudio {
     this._stateOrder.push(id);
     this._activeNodeId = id;
     this.renderStateTree();
+
+    // engine.saveState() is now ASYNC (it round-trips to the worker over postMessage and
+    // resolves with the serialized bytes). Fill the node's bytes when they arrive and
+    // re-render the tree so the node's "has state" marker (● vs ○) updates. On no core the
+    // Promise resolves to null and the node stays input-log-only (○).
+    if (typeof this.engine.saveState === 'function') {
+      try {
+        Promise.resolve(this.engine.saveState())
+          .then((bytes) => {
+            node.bytes = bytes || null;
+            this.renderStateTree();
+          })
+          .catch(() => {
+            node.bytes = null;
+          });
+      } catch (_err) {
+        node.bytes = null;
+      }
+    }
     return id;
   }
 
@@ -427,10 +472,16 @@ export class TASStudio {
     const node = this._stateNodes.get(id);
     if (!node) return false;
 
-    // Restore the input log exactly as it was when the state was saved, then apply the
+    // Restore the LOCAL MIRROR exactly as it was when the state was saved, then apply the
     // re-record truncation so nothing beyond the saved frame survives.
     this.log.restore(node.inputSnapshot);
     this.log.truncateAfter(node.frame);
+
+    // Restore the WORKER's authoritative log from the same snapshot so scripted input matches
+    // the loaded state (then onStateLoaded->truncateAfter trims after the loaded frame).
+    if (typeof this.engine.sendInputEdit === 'function') {
+      this.engine.sendInputEdit({ op: 'restoreSnapshot', masks: node.inputSnapshot });
+    }
 
     // Ask the engine to restore emulator state; it fires onStateLoaded(frame) which will
     // truncate again (idempotent) and re-render.
