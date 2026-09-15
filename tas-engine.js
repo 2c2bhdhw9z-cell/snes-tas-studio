@@ -18,16 +18,21 @@
 //   onFrame(cb) onStatus(cb) onStateLoaded(cb) getMemoryView() (streamed HUD view)
 //   plus synced fields: currentFrame status coreStatus romStatus engineStatus activeCoreId.
 //
-// VIDEO (OffscreenCanvas): attach() FEATURE-DETECTS transferControlToOffscreen + an
-// OffscreenCanvas 2d context. If supported, it transfers control of #screen to the worker
-// (postMessage as a transferable) so the WORKER presents directly — the main thread never
-// takes a context on that canvas (a transferred canvas cannot getContext on the main thread).
-// If NOT supported, the proxy presents {type:'video'} frames the worker posts. On BOTH paths
-// the actual renderer is WebGL (gl-presenter.js: ONE texture + per-frame texSubImage2D
-// upload, NO per-frame putImageData) whenever WebGL is available, with a 2D putImageData
-// context kept only as a last resort. Repeated getContext('2d')/putImageData blits leak
-// native memory on iOS Safari even when JS pools its buffers; WebGL is the fix. The active
-// present path is surfaced in the status snapshot (videoPath) for the debug banner.
+// VIDEO (MAIN-THREAD present — OffscreenCanvas DISABLED): OffscreenCanvas is turned OFF by a
+// deliberate, device-confirmed decision (see USE_OFFSCREEN below). iOS/WebKit leaks NATIVE
+// memory when a Web Worker updates an OffscreenCanvas WebGL context (banner read
+// `offscreen-webgl2`; FPS decayed 60 -> 16 in ~30s on an iPhone 17 Pro Max) — a native WebKit
+// bug no JS fix reaches, even with in-worker rAF pacing. So attach() NEVER calls
+// transferControlToOffscreen and NEVER posts an OffscreenCanvas to the worker. Instead the
+// worker COMPUTES frames off the main thread and posts decoded RGBA ({type:'video'}, a
+// transferable ArrayBuffer from a bounded pool); the MAIN thread PRESENTS via WebGL
+// (gl-presenter.js: ONE texture + per-frame texSubImage2D upload + drawArrays, NO per-frame
+// putImageData) whenever WebGL is available, with a 2D putImageData context kept only as a
+// last resort. A single cheap draw per rAF on the main thread does not re-block touch, and
+// compute stays in the worker so touch remains responsive. The active present path
+// (fallback-webgl2 / -webgl1 / -2d — never offscreen-*) is surfaced in the status snapshot
+// (videoPath) for the debug banner. The dormant offscreen code remains behind USE_OFFSCREEN
+// for a future re-enable if/when WebKit fixes the leak.
 //
 // INPUT DETERMINISM: the authoritative scripted InputLog lives in the WORKER. The UI sends
 // {type:'inputEdit'} edits and streams {type:'liveMask'} each animation frame; the worker
@@ -67,12 +72,38 @@ export const JOYPAD = Object.freeze({
 });
 
 /**
- * Feature-detect OffscreenCanvas support: both transferControlToOffscreen on the canvas
- * prototype AND an OffscreenCanvas that can hand out a 2d context. Returns false in any
- * environment (older Safari, jsdom) where either is missing, so the proxy falls back to
- * main-thread blitting of posted {type:'video'} frames.
+ * DELIBERATE, DEVICE-CONFIRMED DECISION — OffscreenCanvas is DISABLED.
+ *
+ * iOS/WebKit leaks NATIVE memory when a Web Worker updates an OffscreenCanvas WebGL context.
+ * On an iPhone 17 Pro Max the debug banner read `offscreen-webgl2` and FPS decayed 60 -> 16
+ * in under 30s. Across prior rounds we proved flat: worker JS heap, WASM heap (64MB,
+ * malloc==free), native transferable memory (external/arrayBuffers flat via bridge-profile),
+ * and we bound present to vsync via self.requestAnimationFrame INSIDE the worker — the decay
+ * was unchanged. This is a native WebKit bug in the worker-OffscreenCanvas-WebGL path; no JS
+ * fix addresses it. THE FIX: never use OffscreenCanvas. Present WebGL on the MAIN thread
+ * instead (a single texSubImage2D + drawArrays per rAF is cheap and does not re-block touch),
+ * while compute (retro_run) stays in the worker so touch remains responsive.
+ *
+ * The offscreen present code in emu-worker.js is kept DORMANT behind this constant for a
+ * possible future re-enable if/when WebKit fixes the leak, but it is OFF and its path is never
+ * taken: transferControlToOffscreen() is never called and no OffscreenCanvas is ever posted to
+ * the worker, so the worker ALWAYS takes the fallback compute-in-worker + post-RGBA path and
+ * the main thread always presents via gl-presenter.js (fallback-webgl2/1, 2D last resort).
+ */
+export const USE_OFFSCREEN = false;
+
+/**
+ * Whether the app may transfer the canvas to the worker and present in-worker.
+ *
+ * Hard-gated OFF by USE_OFFSCREEN (see above): this ALWAYS returns false so the proxy forces
+ * the main-thread WebGL present path. The real feature-detect is kept below the gate, dead, so
+ * the intent is documented and re-enabling is a one-line flip of USE_OFFSCREEN once the native
+ * WebKit leak is fixed — but until then it must never report support.
  */
 export function supportsOffscreenCanvas() {
+  // DISABLED: iOS/WebKit leaks native memory updating a worker OffscreenCanvas WebGL context
+  // (device-confirmed; offscreen-webgl2 decayed 60->16 in ~30s). Present on the main thread.
+  if (!USE_OFFSCREEN) return false;
   try {
     if (typeof HTMLCanvasElement === 'undefined') return false;
     if (typeof HTMLCanvasElement.prototype.transferControlToOffscreen !== 'function') return false;
@@ -165,21 +196,26 @@ class TASEngine {
     this._ensureWorker();
 
     if (els.canvas) {
+      // OffscreenCanvas is DISABLED (USE_OFFSCREEN=false; supportsOffscreenCanvas() always
+      // returns false) because iOS/WebKit leaks native memory updating a worker OffscreenCanvas
+      // WebGL context (device-confirmed). So the branch below ALWAYS takes the main-thread
+      // present path: transferControlToOffscreen() is NEVER called and no OffscreenCanvas is
+      // ever posted to the worker. The offscreen branch is retained, dead, behind the gate for
+      // a future re-enable once WebKit fixes the leak.
       if (this.worker && supportsOffscreenCanvas()) {
-        // Direct-blit path: transfer control of the canvas to the worker. Do NOT take a 2d
-        // context on the main thread first — that would make transferControlToOffscreen throw.
+        // (DORMANT) Direct-present path — currently unreachable (USE_OFFSCREEN=false).
         try {
           const offscreen = els.canvas.transferControlToOffscreen();
           this._usingOffscreen = true;
           this._postToWorker({ type: 'setOffscreen', canvas: offscreen }, [offscreen]);
         } catch (err) {
-          // Transfer failed (e.g. a context was somehow already taken): fall back to main-thread blit.
           console.warn('[TASEngine] OffscreenCanvas transfer failed; using main-thread blit:', err);
           this._usingOffscreen = false;
           this._takeMainThreadContext(els.canvas);
         }
       } else {
-        // Fallback path: keep the 2d context on the main thread and blit posted frames.
+        // PRIMARY (forced) path: present WebGL on the main thread. Build the GL presenter on
+        // the DOM canvas and blit posted {type:'video'} frames via texSubImage2D + drawArrays.
         this._usingOffscreen = false;
         this._takeMainThreadContext(els.canvas);
       }

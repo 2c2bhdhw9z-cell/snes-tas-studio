@@ -5,9 +5,10 @@
 // FEAT-004 rewrite: the emulator no longer runs on the main thread. tas-engine.js is a
 // proxy that (a) creates a MODULE Web Worker, (b) forwards commands as postMessage, and
 // (c) mirrors state from worker->main messages. This test installs a mock Worker (recording
-// every postMessage + letting us push worker messages back) + a fake OffscreenCanvas, then
-// asserts the proxy sends the correct protocol messages and mirrors currentFrame/status/
-// banner fields from simulated worker messages.
+// every postMessage + letting us push worker messages back), then asserts the proxy sends the
+// correct protocol messages and mirrors currentFrame/status/banner fields from simulated
+// worker messages. OffscreenCanvas is DISABLED (device-confirmed WebKit leak): the proxy is
+// always on the main-thread present path and never transfers the canvas to the worker.
 //
 // It ALSO preserves the original safety assertions: no memory-write/poke/inject/cheat method
 // on the proxy, the exact ROM_PATH constant, a graceful disabled state, and no file picker.
@@ -96,6 +97,14 @@ const worker = mockWorkerRegistry.last;
 check('attach() created a module Worker', () => {
   assert.ok(worker, 'a worker was created by attach()');
   assert.strictEqual(worker.opts.type, 'module', 'worker created with {type:"module"}');
+});
+check('OffscreenCanvas is DISABLED (USE_OFFSCREEN gate off; device-confirmed WebKit leak)', () => {
+  assert.strictEqual(mod.USE_OFFSCREEN, false, 'USE_OFFSCREEN gate is OFF');
+  assert.strictEqual(mod.supportsOffscreenCanvas(), false, 'supportsOffscreenCanvas() forced false');
+  assert.strictEqual(engine._usingOffscreen, false, 'proxy is on the main-thread present path');
+});
+check('attach() sent NO setOffscreen message (worker never receives an OffscreenCanvas)', () => {
+  assert.strictEqual(worker.__all('setOffscreen').length, 0, 'no OffscreenCanvas transferred to the worker');
 });
 check('no memory-write / poke / inject / cheat method on the proxy', () => {
   for (const k of ['writeMemory', 'poke', 'pokeU8', 'writeU8', 'setMemory', 'injectMemory', 'cheatSet', 'setCheat', 'retro_cheat_set', 'selectLevel']) {

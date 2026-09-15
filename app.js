@@ -4,10 +4,13 @@
 // bootstrap, plus the new on-screen diagnostic banner:
 //   1) Service worker registration (offline shell).
 //   2) Engine wiring: attach the canvas + notice element (attach() creates the emulator Web
-//      Worker and, when supported, transfers the canvas to it as an OffscreenCanvas), mirror
+//      Worker and keeps the DOM canvas on the MAIN thread — OffscreenCanvas is DISABLED
+//      because iOS/WebKit leaks native memory updating a worker OffscreenCanvas WebGL context;
+//      see tas-engine.js USE_OFFSCREEN. The worker computes frames and posts RGBA; the main
+//      thread presents via a WebGL presenter, so the Video banner reads fallback-webgl2), mirror
 //      the frame counter, and auto-boot the engine (engine.init() never throws; missing
-//      ROM/core degrade to a notice + disabled state, never a file picker). All WASM work runs
-//      in the worker so the main thread stays free for DOM/touch.
+//      ROM/core degrade to a notice + disabled state, never a file picker). All WASM compute
+//      runs in the worker so the main thread stays free for DOM/touch.
 //   3) iOS Safari bounce/pinch gesture suppression (gesturestart/change/end + multi-touch
 //      pinch touchmove preventDefault, while leaving #piano-roll scrolling intact).
 //   4) The always-visible on-screen debug banner (#debug-banner): live WASM core status,
@@ -62,7 +65,7 @@ const bannerState = {
   engine: 'Init', // Engine lifecycle: Init | GameLoaded | RunLoop Active | Stopped
   frame: 0, // live frame number (advances one per retro_run)
   fps: 0, // live measured FPS over a rolling 1-second window (see FpsMeter)
-  video: 'none', // ACTIVE present path: offscreen-webgl2|offscreen-2d|fallback-webgl2|fallback-2d|...
+  video: 'none', // ACTIVE present path: fallback-webgl2|fallback-webgl1|fallback-2d (offscreen-* DISABLED)
   errors: [], // captured uncaught errors (most-recent last, capped)
 };
 const MAX_BANNER_ERRORS = 5;

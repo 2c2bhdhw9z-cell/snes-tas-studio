@@ -45,11 +45,24 @@
 // so frame N is always run with exactly frame N's resolved input. A 'frameAdvance' message
 // triggers EXACTLY one retro_run with that frame's resolved input (EmuCoreRunner.frameAdvance).
 //
-// ==================== LOOP DRIVER: HARDWARE VSYNC (rAF) BACKPRESSURE ====================
-// The emulator run/present loop is bound to the DISPLAY REFRESH so the GPU command queue can
-// never flood (the iOS 60->12 decay). There is EXACTLY ONE loop driver active at a time
-// (rAF XOR the MessageChannel/injected scheduler), selected by whether the worker presents
-// onto a transferred OffscreenCanvas:
+// ==================== PRESENT PATH: MAIN-THREAD WebGL (OffscreenCanvas DISABLED) ==========
+// IMPORTANT (device-confirmed decision): OffscreenCanvas is DISABLED in production. iOS/WebKit
+// leaks NATIVE memory when a worker updates an OffscreenCanvas WebGL context (banner read
+// `offscreen-webgl2`; FPS decayed 60 -> 16 in ~30s), and in-worker self.requestAnimationFrame
+// pacing did NOT fix it — it is a native WebKit bug. The main-thread proxy therefore NEVER
+// transfers a canvas to this worker (tas-engine.js USE_OFFSCREEN=false), so this worker ALWAYS
+// takes the FALLBACK present path: it COMPUTES frames here and posts decoded RGBA to the main
+// thread, which presents via WebGL. The OFFSCREEN present code below (_adoptOffscreen /
+// _drawOffscreen / the rAF loop driver) is retained DORMANT behind that gate for a future
+// re-enable; it is unreachable in production because no OffscreenCanvas is ever transferred.
+//
+// ==================== LOOP DRIVER: rAF (DORMANT) vs MessageChannel (LIVE) ====================
+// There is EXACTLY ONE loop driver active at a time (rAF XOR the MessageChannel/injected
+// scheduler), selected by whether the worker presents onto a transferred OffscreenCanvas. In
+// production the OffscreenCanvas path is off, so the LIVE driver is the MessageChannel/injected
+// scheduler (compute pacing), and PRESENT backpressure comes from the MAIN thread's rAF ack
+// (see the FALLBACK bullet). The rAF-in-worker driver below is only reachable on the dormant
+// offscreen path:
 //
 //   * OFFSCREEN present path (worker owns the canvas) + self.requestAnimationFrame available:
 //     the runner's self-scheduling loop is driven by `self.requestAnimationFrame`. In a

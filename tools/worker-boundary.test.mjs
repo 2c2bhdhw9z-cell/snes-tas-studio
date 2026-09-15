@@ -257,39 +257,123 @@ await checkAsync('(3) truncateAfter re-record holds after a loadState', async ()
 });
 
 // ======================================================================================
-// (4) OffscreenCanvas available -> worker blits directly, NO {type:'video'} message.
+// (4) OffscreenCanvas is DISABLED (device-confirmed native WebKit leak). The proxy must NEVER
+// transfer the canvas and the worker must NEVER be sent an OffscreenCanvas — even when the
+// browser advertises transferControlToOffscreen + OffscreenCanvas. Present is FORCED onto the
+// main thread. (The worker's dormant offscreen code still exists and is unit-tested directly
+// in emu-worker.test.mjs, but that path is unreachable in production because nothing transfers
+// a canvas to it.)
 // ======================================================================================
-await checkAsync('(4) OffscreenCanvas transferred -> worker blits directly, no video message', async () => {
-  scope.__clear();
-  const { worker } = makeWorker();
-  const off = new FakeOffscreenCanvas(256, 224);
-  await worker._onMessage({ data: { type: 'init', offscreen: off } });
-  await worker._onMessage({ data: { type: 'pause' } });
-  scope.__clear();
-  await worker._onMessage({ data: { type: 'frameAdvance' } });
-  assert.ok(off.__blits.length >= 1, 'worker blitted directly onto the OffscreenCanvas 2d context');
-  assert.strictEqual(scope.__last('video'), null, 'NO video message crosses the boundary in the direct path');
+await checkAsync('(4) OffscreenCanvas DISABLED: supportsOffscreenCanvas()===false even when the API exists', async () => {
+  installMockWorkerEnv({ offscreen: true }); // install a WORKING transferControlToOffscreen + OffscreenCanvas
+  const mod = await import('../tas-engine.js');
+  assert.strictEqual(mod.USE_OFFSCREEN, false, 'USE_OFFSCREEN gate is OFF (documented decision)');
+  assert.strictEqual(mod.supportsOffscreenCanvas(), false, 'gate forces false despite the API being present');
 });
 
-// The proxy SIDE of (4): with transferControlToOffscreen available, attach() transfers the
-// canvas to the worker (setOffscreen) instead of taking a main-thread context.
-await checkAsync('(4b) proxy transfers the canvas when transferControlToOffscreen is available', async () => {
-  installMockWorkerEnv({ offscreen: true });
-  // Fresh proxy instance (the singleton import is cached; use the class).
+// The proxy SIDE of (4): even with transferControlToOffscreen available, attach() must NOT
+// call it, must NOT post a setOffscreen message, and must build a MAIN-THREAD presenter.
+await checkAsync('(4b) proxy NEVER transfers the canvas; forces the main-thread present path', async () => {
+  installMockWorkerEnv({ offscreen: true }); // API present -> would be transferred if not gated OFF
   const { TASEngine } = await import('../tas-engine.js');
   const proxy = new TASEngine();
-  let transferred = false;
+  let transferCalls = 0;
+  let mainThreadGetContext = 0;
   const canvas = {
     width: 256, height: 224,
-    transferControlToOffscreen() { transferred = true; return new FakeOffscreenCanvas(256, 224); },
-    getContext() { throw new Error('main-thread getContext must NOT be called on the transfer path'); },
+    transferControlToOffscreen() { transferCalls += 1; return new FakeOffscreenCanvas(256, 224); },
+    getContext(type) {
+      mainThreadGetContext += 1;
+      // Return null for WebGL so the proxy records the WebGL feature-detect attempt; give a
+      // 2d ctx so the last-resort path is available if WebGL is missing.
+      if (type === '2d') {
+        return {
+          createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+          putImageData: () => {},
+        };
+      }
+      return null;
+    },
   };
   proxy.attach({ canvas, noticeEl: null });
   const w = mockWorkerRegistry.last;
-  assert.strictEqual(transferred, true, 'transferControlToOffscreen was called');
-  const so = w.__last('setOffscreen');
-  assert.ok(so, 'proxy posted setOffscreen with the transferred canvas');
-  assert.ok(so.transfer && so.transfer.length === 1, 'the OffscreenCanvas is in the transfer list');
+  assert.strictEqual(transferCalls, 0, 'transferControlToOffscreen was NEVER called (OffscreenCanvas disabled)');
+  assert.strictEqual(w.__last('setOffscreen'), null, 'proxy posted NO setOffscreen message (worker never sent an OffscreenCanvas)');
+  assert.strictEqual(proxy._usingOffscreen, false, 'proxy is on the main-thread present path');
+  assert.ok(mainThreadGetContext >= 1, 'proxy took a main-thread context on the DOM canvas');
+  assert.ok(/^fallback-/.test(proxy.videoPath), `Video banner reports a fallback-* path (got ${proxy.videoPath})`);
+});
+
+// (4c) MAIN-THREAD WebGL is the PRIMARY present path: the proxy builds a GLPresenter on the
+// DOM canvas, reports videoPath 'fallback-webgl2', and presents received frames via
+// texSubImage2D + drawArrays (GL objects created ONCE, per-frame sub-uploads) — NOT 2D.
+function makeMainThreadGLCanvas(gpu) {
+  let id = 1;
+  const gl = {
+    VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, ARRAY_BUFFER: 3, STATIC_DRAW: 4, TEXTURE_2D: 5,
+    TEXTURE0: 6, TEXTURE_MIN_FILTER: 7, TEXTURE_MAG_FILTER: 8, TEXTURE_WRAP_S: 9, TEXTURE_WRAP_T: 10,
+    NEAREST: 11, CLAMP_TO_EDGE: 12, RGBA: 13, UNSIGNED_BYTE: 14, UNPACK_ALIGNMENT: 15, FLOAT: 16,
+    TRIANGLES: 17, LINK_STATUS: 18, COMPILE_STATUS: 19,
+    createShader: () => ({ id: id++ }), shaderSource() {}, compileShader() {},
+    getShaderParameter: () => true, getShaderInfoLog: () => '', deleteShader() {},
+    createProgram: () => { gpu.createProgram++; return { id: id++ }; }, attachShader() {},
+    bindAttribLocation() {}, linkProgram() {}, getProgramParameter: () => true,
+    getProgramInfoLog: () => '', useProgram() {}, getUniformLocation: () => ({ id: id++ }), uniform1i() {},
+    createBuffer: () => ({ id: id++ }), bindBuffer() {}, bufferData() {},
+    enableVertexAttribArray() {}, vertexAttribPointer() {},
+    createVertexArray: () => ({ id: id++ }), bindVertexArray() {}, deleteVertexArray() {},
+    createTexture: () => { gpu.createTexture++; return { id: id++ }; }, activeTexture() {},
+    bindTexture() {}, texParameteri() {}, pixelStorei() {},
+    texImage2D: () => { gpu.texImage2D++; }, texSubImage2D: () => { gpu.texSubImage2D++; },
+    viewport() {}, drawArrays: () => { gpu.drawArrays++; },
+    deleteTexture() {}, deleteBuffer() {}, deleteProgram() {},
+  };
+  return {
+    width: 0, height: 0,
+    getContext: (type) => {
+      if (type === 'webgl2') return gl;
+      if (type === '2d') return { createImageData: () => { throw new Error('2D must not be used when WebGL2 is available'); }, putImageData() {} };
+      return null;
+    },
+  };
+}
+
+await checkAsync('(4c) main-thread WebGL is PRIMARY: proxy reports fallback-webgl2 and presents via texSubImage2D+drawArrays', async () => {
+  // Controllable main-thread rAF so we can fire the present deterministically.
+  const savedRaf = globalThis.requestAnimationFrame;
+  const rafCbs = [];
+  globalThis.requestAnimationFrame = (cb) => { rafCbs.push(cb); return rafCbs.length; };
+  try {
+    installMockWorkerEnv({ offscreen: false }); // API absent too -> definitely main-thread
+    const { TASEngine } = await import('../tas-engine.js');
+    const proxy = new TASEngine();
+    const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+    const canvas = makeMainThreadGLCanvas(gpu);
+    proxy.attach({ canvas, noticeEl: null });
+    assert.ok(proxy._gl, 'proxy built a GLPresenter on the DOM canvas (main-thread WebGL primary)');
+    assert.strictEqual(proxy._ctx, null, 'no 2D context taken when WebGL2 is available');
+    assert.strictEqual(proxy.videoPath, 'fallback-webgl2', 'Video banner reads fallback-webgl2 (never offscreen-*)');
+    // Feed several worker video frames; each present is deferred to rAF then drawn once.
+    const w = mockWorkerRegistry.last;
+    for (let i = 0; i < 6; i++) {
+      const buf = new Uint8Array(FB_W * FB_H * 4).fill(i + 1).buffer;
+      w.__emit({ type: 'video', buffer: buf, width: FB_W, height: FB_H, pitch: FB_W * 2, pixelFormat: 2 });
+    }
+    // With strict single-in-flight backpressure the proxy schedules ONE rAF at a time; drain.
+    let guard = 0;
+    while (rafCbs.length && guard++ < 100) rafCbs.shift()();
+    assert.strictEqual(gpu.createTexture, 1, 'ONE texture created (not per frame)');
+    assert.strictEqual(gpu.createProgram, 1, 'ONE program created (not per frame)');
+    assert.strictEqual(gpu.texImage2D, 1, 'texture storage allocated ONCE for the geometry');
+    assert.ok(gpu.texSubImage2D >= 1, `per-frame uploads via texSubImage2D (got ${gpu.texSubImage2D})`);
+    assert.ok(gpu.drawArrays >= 1, `one draw per presented frame (got ${gpu.drawArrays})`);
+    // Each present acked back to the worker with the buffer transferred for reuse.
+    const acks = w.__all('videoAck');
+    assert.ok(acks.length >= 1, 'proxy acked drawn frames back to the worker');
+    assert.ok(acks[0].transfer && acks[0].transfer[0] === acks[0].msg.buffer, 'ack transfers the buffer BACK zero-copy for pool reuse');
+  } finally {
+    globalThis.requestAnimationFrame = savedRaf;
+  }
 });
 
 // ======================================================================================
