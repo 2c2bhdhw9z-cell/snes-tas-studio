@@ -255,6 +255,28 @@ export class EmuCoreRunner {
     // Memory (WRAM) read-only region.
     this._wramPtr = 0;
     this._wramSize = 0;
+
+    // Cached READ-ONLY memory view (built ONCE per core-load; see getMemoryView). The
+    // per-frame HUD read path (_emitHud -> readHudValues) MUST NOT allocate a fresh frozen
+    // view + closure set every frame — at 60fps that per-frame allocation storm is exactly
+    // the GC-thrash that ratchets the framerate down. The view is rebuilt only when the WRAM
+    // ptr/size changes (core swap / (re)load), tracked by _memViewPtr/_memViewSize below.
+    this._memView = null;
+    this._memViewPtr = 0;
+    this._memViewSize = 0;
+
+    // Single preallocated HUD values object, MUTATED (not re-created) each frame so the onHud
+    // payload + JS churn are constant across the whole session. See readHudValues.
+    this._hudValues = {
+      hSpeed: 0,
+      xHi: 0,
+      xSub: 0,
+      xPage: 0,
+      yHi: 0,
+      ySub: 0,
+      x: 0,
+      y: 0,
+    };
   }
 
   // ------------------------------------------------------------------ status surface
@@ -390,6 +412,10 @@ export class EmuCoreRunner {
     this._romData = null;
     this._wramPtr = 0;
     this._wramSize = 0;
+    // Drop the cached memory view so a fresh boot rebuilds it against the new core's WRAM.
+    this._memView = null;
+    this._memViewPtr = 0;
+    this._memViewSize = 0;
     this.currentFrame = 0;
     this._rgba = null;
     this._fbWidth = 0;
@@ -1042,13 +1068,27 @@ export class EmuCoreRunner {
    */
   getMemoryView() {
     if (!this.Module || !this._wramPtr || !this._wramSize) return null;
+
+    // Return the CACHED view when the WRAM region is unchanged. Building the frozen object +
+    // its closure set is a ONE-TIME cost per core-load, NOT a per-frame allocation: the
+    // per-frame HUD path calls this every frame, and rebuilding here every frame is exactly
+    // the GC-thrash that decays the framerate. The cache is invalidated (rebuilt) only when
+    // the WRAM ptr/size actually changes (core swap / reload), tracked below.
+    if (this._memView && this._memViewPtr === this._wramPtr && this._memViewSize === this._wramSize) {
+      return this._memView;
+    }
+
     const M = this.Module;
     const base = this._wramPtr;
     const size = this._wramSize;
     const inRange = (offset, width) =>
       Number.isInteger(offset) && offset >= 0 && offset + width <= size;
 
-    return Object.freeze({
+    // The closures read M.HEAPU8 FRESH on every call (never a captured typed-array reference),
+    // so the cached view stays correct even if the WASM heap grows and detaches HEAPU8 under
+    // ALLOW_MEMORY_GROWTH. `base`/`size` are stable for the core's lifetime. STILL read-only:
+    // there is intentionally no writer, and snapshot() copies OUT only.
+    const view = Object.freeze({
       size,
       readU8(offset) {
         if (!inRange(offset, 1)) return 0;
@@ -1073,26 +1113,33 @@ export class EmuCoreRunner {
         return new Uint8Array(M.HEAPU8.subarray(base, base + size));
       },
     });
+
+    this._memView = view;
+    this._memViewPtr = base;
+    this._memViewSize = size;
+    return view;
   }
 
   /**
-   * Read the verified SMB1 HUD addresses READ-ONLY into a small values object for the HUD
-   * sink. Returns null if no WRAM is available. STRICTLY READ-ONLY: this only observes.
+   * Read the verified SMB1 HUD addresses READ-ONLY into the single preallocated values object
+   * for the HUD sink (the SAME object is returned/mutated every frame — NO fresh literal, NO
+   * per-frame allocation). Returns null if no WRAM is available. STRICTLY READ-ONLY: this only
+   * observes; snapshot() is NEVER called on this path.
    */
   readHudValues() {
     const mem = this.getMemoryView();
     if (!mem) return null;
-    return {
-      hSpeed: mem.readS8(SMB1_HUD_ADDR.H_SPEED),
-      xHi: mem.readU8(SMB1_HUD_ADDR.X_HI),
-      xSub: mem.readU8(SMB1_HUD_ADDR.X_SUB),
-      xPage: mem.readU8(SMB1_HUD_ADDR.X_PAGE),
-      yHi: mem.readU8(SMB1_HUD_ADDR.Y_HI),
-      ySub: mem.readU8(SMB1_HUD_ADDR.Y_SUB),
-      // Composite positions for convenience (page*256 + hi, then sub for fractional part).
-      x: (mem.readU8(SMB1_HUD_ADDR.X_PAGE) << 8) | mem.readU8(SMB1_HUD_ADDR.X_HI),
-      y: mem.readU8(SMB1_HUD_ADDR.Y_HI),
-    };
+    const out = this._hudValues;
+    out.hSpeed = mem.readS8(SMB1_HUD_ADDR.H_SPEED);
+    out.xHi = mem.readU8(SMB1_HUD_ADDR.X_HI);
+    out.xSub = mem.readU8(SMB1_HUD_ADDR.X_SUB);
+    out.xPage = mem.readU8(SMB1_HUD_ADDR.X_PAGE);
+    out.yHi = mem.readU8(SMB1_HUD_ADDR.Y_HI);
+    out.ySub = mem.readU8(SMB1_HUD_ADDR.Y_SUB);
+    // Composite positions for convenience (page*256 + hi, then sub for fractional part).
+    out.x = (out.xPage << 8) | out.xHi;
+    out.y = out.yHi;
+    return out;
   }
 
   _emitHud() {

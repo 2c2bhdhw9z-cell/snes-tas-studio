@@ -26,6 +26,7 @@
     "test:runsmoke:accuracy": "node run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12",
     "test:runsmoke:performance": "node run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12",
     "test:runsmoke:snes9x": "node run-smoke.mjs cores/snes9x_libretro.js 60",
+    "leak:profile": "node --expose-gc leak-profile.mjs cores/snes9x_libretro.js 6000 500",
     "test": "node inputlog-truncate.test.mjs && node env-callback.test.mjs && node core-url-resolve.test.mjs && node input-resolver.test.mjs && node emu-core-runner.test.mjs && node emu-worker.test.mjs && node worker-boundary.test.mjs && node runloop.test.mjs && node fps-meter.test.mjs && node engine-smoke.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node precache-check.mjs"
   },
   "devDependencies": {

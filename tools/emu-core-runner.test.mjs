@@ -354,6 +354,48 @@ await checkAsync('getMemoryView is READ-ONLY and exposes no writer', async () =>
   }
 });
 
+await checkAsync('getMemoryView is CACHED — the per-frame HUD path builds NO new view object', async () => {
+  // The FPS-decay root cause was getMemoryView() constructing a fresh frozen object + closure
+  // set EVERY frame (60/s), structured-cloned across postMessage -> GC thrash. The view must
+  // be built ONCE per core-load and reused; the per-frame read path must allocate zero views.
+  const { deps } = makeDeps();
+  const runner = new EmuCoreRunner(deps);
+  await runner.boot();
+
+  const first = runner.getMemoryView();
+  assert.ok(first, 'memory view available after boot');
+  // Repeated calls return the SAME cached object (identity), not a fresh one each time.
+  assert.strictEqual(runner.getMemoryView(), first, 'getMemoryView returns the cached instance');
+
+  // Drive the actual per-frame path many times; count how many DISTINCT views are built.
+  let builds = 0;
+  let last = null;
+  const realGet = runner.getMemoryView.bind(runner);
+  runner.getMemoryView = () => {
+    const v = realGet();
+    if (v !== last) { builds += 1; last = v; }
+    return v;
+  };
+  for (let i = 0; i < 100; i++) runner._afterFrame();
+  assert.strictEqual(builds, 1, `per-frame path built exactly one view across 100 frames (got ${builds})`);
+});
+
+await checkAsync('readHudValues MUTATES a single reused values object (no per-frame literal)', async () => {
+  // The onHud payload is a single preallocated object mutated each frame — not a fresh literal
+  // — so the per-frame JS churn (and the postMessage payload shape) is constant.
+  const { deps } = makeDeps();
+  const runner = new EmuCoreRunner(deps);
+  await runner.boot();
+  const a = runner.readHudValues();
+  const b = runner.readHudValues();
+  assert.ok(a, 'values object returned');
+  assert.strictEqual(a, b, 'readHudValues returns the SAME (reused) object each call');
+  // Values are still the verified SMB1 reads (identity reuse must not break correctness).
+  assert.strictEqual(a.hSpeed, -16, 'H-Speed signed decode still correct');
+  assert.strictEqual(a.xHi, HUD_SEED[SMB1_HUD_ADDR.X_HI]);
+  assert.strictEqual(a.yHi, HUD_SEED[SMB1_HUD_ADDR.Y_HI]);
+});
+
 check('runner exposes NO memory-write / cheat / level-select method', () => {
   const runner = new EmuCoreRunner({});
   for (const k of ['writeMemory', 'poke', 'pokeU8', 'writeU8', 'setMemory', 'injectMemory', 'cheatSet', 'setCheat', 'retro_cheat_set', 'selectLevel', 'setLevel']) {
