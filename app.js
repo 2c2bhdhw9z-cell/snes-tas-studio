@@ -3,14 +3,14 @@
 // This module owns everything that used to live in index.html's inline <script type=module>
 // bootstrap, plus the new on-screen diagnostic banner:
 //   1) Service worker registration (offline shell).
-//   2) Engine wiring: attach the canvas + notice element (attach() creates the emulator Web
-//      Worker and keeps the DOM canvas on the MAIN thread — OffscreenCanvas is DISABLED
-//      because iOS/WebKit leaks native memory updating a worker OffscreenCanvas WebGL context;
-//      see tas-engine.js USE_OFFSCREEN. The worker computes frames and posts RGBA; the main
-//      thread presents via a WebGL presenter, so the Video banner reads fallback-webgl2), mirror
-//      the frame counter, and auto-boot the engine (engine.init() never throws; missing
-//      ROM/core degrade to a notice + disabled state, never a file picker). All WASM compute
-//      runs in the worker so the main thread stays free for DOM/touch.
+//   2) Engine wiring: attach the canvas + notice element (attach() builds a WebGL presenter on
+//      the DOM canvas on the MAIN thread; the emulator now runs SINGLE-THREADED in the
+//      engine's own requestAnimationFrame loop, so there is NO Web Worker and the canvas is
+//      never transferred anywhere; the main thread presents via a WebGL presenter, so the
+//      Video banner reads main-webgl2), mirror the frame counter, and auto-boot the engine
+//      (engine.init() never throws; missing ROM/core degrade to a notice + disabled state,
+//      never a file picker). snes9x's ~1.2ms retro_run fits the 16.6ms frame budget, so the
+//      single main-thread rAF loop never blocks DOM/touch.
 //   3) iOS Safari bounce/pinch gesture suppression (gesturestart/change/end + multi-touch
 //      pinch touchmove preventDefault, while leaving #piano-roll scrolling intact).
 //   4) The always-visible on-screen debug banner (#debug-banner): live WASM core status,
@@ -65,7 +65,7 @@ const bannerState = {
   engine: 'Init', // Engine lifecycle: Init | GameLoaded | RunLoop Active | Stopped
   frame: 0, // live frame number (advances one per retro_run)
   fps: 0, // live measured FPS over a rolling 1-second window (see FpsMeter)
-  video: 'none', // ACTIVE present path: fallback-webgl2|fallback-webgl1|fallback-2d (offscreen-* DISABLED)
+  video: 'none', // ACTIVE present path: main-webgl2|main-webgl1|main-2d (single main-thread present)
   errors: [], // captured uncaught errors (most-recent last, capped)
 };
 const MAX_BANNER_ERRORS = 5;
@@ -73,8 +73,8 @@ const MAX_BANNER_ERRORS = 5;
 // --------------------------------------------------------------------- live FPS meter
 //
 // The user asked for an easy-to-read, HONEST FPS readout. We measure the ACTUAL advanced
-// frames the user sees: the emulator worker posts one 'frame' message per emulated frame
-// (engine.onFrame fires per message), and we count those over a rolling 1-second window.
+// frames the user sees: the engine fires engine.onFrame once per emulated frame (advanced by
+// the main-thread rAF loop), and we count those over a rolling 1-second window.
 // FPS = frames in the last second — no timestamp math on the user's part, no divide-by-zero,
 // reads 0 cleanly when paused (no frames arrive so the window empties). READ-ONLY display.
 const fpsMeter = new FpsMeter(1000);
@@ -166,7 +166,7 @@ function renderBanner() {
   // Live measured FPS (rolling 1-second window of actual advanced frames).
   setBannerText('fps', String(bannerState.fps));
   // ACTIVE video present path (so the device can report which renderer engaged). This is the
-  // diagnostic that tells us whether OffscreenCanvas + WebGL actually initialized on-device.
+  // diagnostic that tells us which main-thread renderer (main-webgl2/main-webgl1/main-2d) engaged.
   setBannerText('video', bannerState.video);
   setBannerText('err', errLine);
 
@@ -236,10 +236,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
   const canvas = document.getElementById('screen');
   const noticeEl = document.getElementById('notice');
-  // attach() creates the emulator worker and decides the video path. If OffscreenCanvas is
-  // supported it transfers control of #screen to the worker (which then blits directly); this
-  // MUST happen before anything takes a 2d context on #screen (a transferred canvas cannot
-  // getContext('2d') on the main thread), so attach() is the FIRST thing to touch the canvas.
+  // attach() builds the MAIN-THREAD presenter on #screen (a WebGL presenter, or a 2D context
+  // as last resort) and records the video path. No worker is created and the canvas is never
+  // transferred anywhere; the emulator runs on the main thread in the engine's rAF loop.
   engine.attach({ canvas, noticeEl });
 
   // Frame counter readout. The full toolbar wiring (play/pause, frame advance, speed

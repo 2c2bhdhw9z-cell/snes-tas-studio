@@ -1,26 +1,27 @@
 // tools/mobile-smoke.test.mjs
 //
-// Headless DOM test for the mobile & speedrun layer (worker-proxy architecture) using jsdom
-// + a MOCK Worker.
+// Headless DOM test for the mobile & speedrun layer (SINGLE-THREAD architecture) using jsdom
+// + a fake requestAnimationFrame + a MOCK libretro core.
 //
-// FEAT-004 rewrite: live input (gamepad + on-screen touch) is polled on the MAIN THREAD and
-// STREAMED to the worker via engine.sendLiveMask({type:'liveMask'}); the worker OR-s the
-// latest live mask into the frame it runs next. So this test asserts that pressing a touch
-// control / a gamepad button produces the right live mask AND that it is streamed to the
-// worker, and it proves the OR-merge determinism directly against the real InputResolver
-// (the same resolver the worker uses) — frame N = (log.getMask(N) | liveMask) >>> 0.
+// THE GREAT REVERSAL (FEAT-002/003): the emulator runs SINGLE-THREADED on the main thread in
+// tas-engine.js's own rAF loop -- there is NO Web Worker. Live input (gamepad + on-screen
+// touch) is polled on the MAIN THREAD and fed to the engine via engine.sendLiveMask(mask); the
+// engine stores it (_liveMask) and the in-process runner OR-s it into the frame it runs next.
+// So this test asserts pressing a touch control / a gamepad button produces the right live
+// mask AND that it reaches the engine, and it proves the OR-merge determinism directly against
+// the real InputResolver (the same resolver the engine uses) -- frame N = (log(N)|live)>>>0.
 //
 // It also keeps all preserved-feature + safety assertions: #touch-controls low opacity,
 // gesture suppression in app.js, standalone display-mode CSS, viewport meta, no <input
-// type=file>, encodeURI ROM fetch (now in emu-core-runner.js), pointerdown+click primary
-// controls, gamepad mapping.
+// type=file>, encodeURI ROM fetch (in emu-core-runner.js), pointerdown+click primary controls,
+// gamepad mapping.
 //
 // Run from tools/: node mobile-smoke.test.mjs   (requires jsdom installed here)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
-import { installMockWorkerEnv, mockWorkerRegistry } from './mock-worker.mjs';
+import { installFakeRaf, installEngineMockRunner, makeGLCanvas } from './single-thread-harness.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -59,9 +60,10 @@ if (!('getGamepads' in navigator)) {
     /* ignore */
   }
 }
-globalThis.requestAnimationFrame = () => 0;
-globalThis.cancelAnimationFrame = () => {};
 globalThis.fetch = async () => ({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) });
+// Controllable fake rAF (installed on globalThis AND window) so the single-thread engine loop
+// can be driven deterministically.
+const fake = installFakeRaf();
 
 // jsdom lacks PointerEvent; force the touch/mouse fallback path in bindTouchControls.
 try {
@@ -171,14 +173,20 @@ check('overscroll-behavior:none present', /overscroll-behavior:\s*none/.test(css
 check('touch-action:none on root', /touch-action:\s*none/.test(css));
 check('piano-roll re-enables touch panning', /#piano-roll\s*\{[^}]*touch-action:\s*pan/s.test(css));
 
-// --- Live behavior: modules + proxy + mock worker ---
-installMockWorkerEnv({ offscreen: false });
+// --- Live behavior: modules + REAL single-thread engine + mock core ---
 const engineMod = await import('../tas-engine.js');
 const engine = engineMod.default;
 window.TASEngine = engine;
-engine.attach({ canvas: document.getElementById('screen'), noticeEl: document.getElementById('notice') });
-const worker = mockWorkerRegistry.last;
-check('proxy created a module worker', worker && worker.opts.type === 'module');
+const shared = installEngineMockRunner(engine);
+engine.attach({ canvas: makeGLCanvas(), noticeEl: document.getElementById('notice') });
+check('engine created NO worker (single-thread; no worker handle)', typeof engine.worker === 'undefined' && typeof globalThis.Worker === 'undefined');
+check('engine presents on a MAIN-thread path (videoPath main-*)', /^main-/.test(engine.videoPath));
+
+// Boot the in-process runner (auto-plays), then pause so the live-mask frame test is
+// deterministic. The mock core needs no real WASM.
+await engine.init({ corePaths: ['cores/snes9x_libretro.js'] });
+engine.pause();
+fake.stepRaf(2);
 
 const { TASStudio } = await import('../piano-roll.js');
 const { LiveInput, GAMEPAD_STANDARD_MAP } = await import('../live-input.js');
@@ -201,16 +209,25 @@ check('touch press adds held class', heldClass);
 aBtn.dispatchEvent(new window.MouseEvent('mouseup', { bubbles: true }));
 check('touch release clears live mask', studio.live.getMask() === 0);
 
-// Live input is STREAMED to the worker: pressing B then polling streams a liveMask message
-// whose mask has B (bit 0) set. We drive the studio's stream tick directly (deterministic,
-// no rAF) and assert the exact protocol message the worker receives.
+// Live input is fed to the ENGINE in-process: pressing B then polling stores a live mask on
+// the engine whose bit 0 (B) is set. We drive the studio's stream tick directly (deterministic)
+// and assert the engine's stored live mask, then that the in-process runner OR-s it into the
+// next frame it runs.
 studio.live.setTouch('B', true);
-worker.__clear();
 studio.live.poll();
 engine.sendLiveMask(studio.live.getMask() >>> 0);
-const lm = worker.__last('liveMask');
-check('live touch mask is streamed to the worker via {type:liveMask}', lm && (lm.msg.mask & 1) === 1);
+check('live touch mask reaches the engine (engine._liveMask has B bit)', (engine._liveMask & 1) === 1);
+// Prove the stored live mask OR-s into the next frame the in-process runner executes.
+engine.pause();
+fake.stepRaf(2);
+shared.resolvedPerFrame.length = 0;
+{
+  const r = engine.frameAdvance();
+  if (r && typeof r.then === 'function') await r;
+}
+check('engine live mask OR-ed into the next in-process frame (B ran)', shared.resolvedPerFrame.length === 1 && (shared.resolvedPerFrame[0].mask & 1) === 1);
 studio.live.clearTouch();
+engine.sendLiveMask(0);
 
 // --- OR-merge determinism proven against the REAL InputResolver (the worker's resolver) ---
 // frame N runs with exactly (scripted log mask for N | liveMask) >>> 0.
@@ -268,6 +285,8 @@ stepBtn.dispatchEvent(pd2);
 check('pointerdown on Frame +1 advances exactly one frame', advanced === 1);
 stepBtn.dispatchEvent(new window.Event('click', { bubbles: true }));
 check('synthetic click after Frame +1 pointerdown does not double-advance', advanced === 1);
+
+fake.restore();
 
 // --- Report ---
 let failed = 0;

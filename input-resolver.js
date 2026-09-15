@@ -13,10 +13,10 @@
 // after a given frame so a state-load can rewind the timeline cleanly.
 //
 // It is deliberately pure and DOM-free / engine-free so it can be unit-tested in Node with
-// NO worker and NO browser (see tools/input-resolver.test.mjs). In FEAT-002 the worker will
-// own an InputResolver instance: the UI streams scripted edits (setFrameButton / truncateAfter
-// / restoreSnapshot) and per-frame live masks across postMessage, and the worker resolves the
-// exact mask before it runs each frame.
+// NO browser (see tools/input-resolver.test.mjs). The engine owns an InputResolver instance
+// IN-PROCESS on the main thread: the UI applies scripted edits (setFrameButton /
+// truncateAfter / restoreSnapshot) and per-frame live masks in-process (no postMessage
+// boundary), and the engine resolves the exact mask before it runs each frame.
 //
 // HARD RULE reminder: this module resolves CONTROLLER INPUT only. It has no memory-write,
 // poke, cheat, or level-select surface of any kind.
@@ -26,8 +26,8 @@
 import { InputLog } from './input-log.js';
 
 /**
- * The message-protocol op names the worker boundary uses to mutate the scripted log. These
- * are the ONLY mutations that cross the boundary — all of them controller-input edits.
+ * The op names the engine uses to mutate the scripted log in-process. These are the ONLY
+ * mutations applied to the log, all of them controller-input edits.
  */
 export const INPUT_OP = Object.freeze({
   SET_FRAME_BUTTON: 'setFrameButton', // { frame, button, on }
@@ -55,9 +55,9 @@ export function resolveMask(log, frame, liveMask = 0) {
  * Deterministic input resolver wrapping an authoritative InputLog.
  *
  * The resolver holds the scripted log and applies scripted edits through a small, explicit
- * op protocol so the exact same code path is exercised in a unit test and (later) behind the
- * worker's postMessage boundary. The live mask is supplied per-frame by the caller and is
- * never persisted, so it can never leak from one frame into another.
+ * op protocol so the exact same code path is exercised in a unit test and in the engine
+ * in-process. The live mask is supplied per-frame by the caller and is never persisted, so
+ * it can never leak from one frame into another.
  */
 export class InputResolver {
   /**
@@ -80,9 +80,9 @@ export class InputResolver {
   }
 
   /**
-   * Apply a scripted edit described by the worker-boundary op protocol. Returns true if the
-   * op was recognized and applied, false otherwise (fail-closed on unknown ops). This is the
-   * single entry point the worker uses for scripted-log mutations.
+   * Apply a scripted edit described by the in-process op protocol. Returns true if the op
+   * was recognized and applied, false otherwise (fail-closed on unknown ops). This is the
+   * single entry point the engine uses for scripted-log mutations.
    *
    * @param {{op:string, frame?:number, button?:string, on?:boolean, masks?:number[]}} msg
    * @returns {boolean}
@@ -107,7 +107,7 @@ export class InputResolver {
     }
   }
 
-  // -- Convenience wrappers over the op protocol (used by the UI-side proxy in FEAT-002) --
+  // -- Convenience wrappers over the op protocol (used by the engine + its callers) --
 
   /** Set/clear a button on a frame. Convenience over applyEdit(SET_FRAME_BUTTON). */
   setFrameButton(frame, button, on) {

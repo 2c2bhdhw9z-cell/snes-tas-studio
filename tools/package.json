@@ -2,11 +2,13 @@
   "name": "tas-studio-tools",
   "private": true,
   "description": "Dev-only tooling for the SNES TAS Studio: icon generation and headless smoke tests. Not shipped with the app.",
-  "_feat004_note": "FEAT-004 rewrote the DOM harnesses (studio-dom/mobile-smoke/engine-smoke/runloop) for the worker-proxy architecture: they now exercise the REAL main-thread proxy (tas-engine.js) + REAL piano-roll/memory-watch logic against a MOCK Worker (tools/mock-worker.mjs), and runloop tests the WORKER's self-scheduling run loop via emu-core-runner.js with a mock core. They are folded back into `test` (the temporary test:pending-feat004 split is gone). tools/worker-boundary.test.mjs is the authoritative determinism + OffscreenCanvas + save/load boundary test (real runner + real resolver + mock core). The full `test` chain is green: pure-logic + ABI + runner/resolver + worker-boundary + proxy DOM harnesses + precache v14.",
+  "_feat003_note": "FEAT-003 reworked the headless harnesses for THE GREAT REVERSAL (single-thread, main-thread rAF). The Web Worker is gone: tas-engine.js is now a DIRECT single-thread engine owning one EmuCoreRunner + one InputResolver + one GLPresenter driven by ONE requestAnimationFrame loop. The DOM/engine harnesses (engine-smoke/studio-dom/mobile-smoke/engine-determinism) now drive the REAL engine + REAL runner + REAL resolver against a CONTROLLABLE fake requestAnimationFrame + a MOCK libretro core via tools/single-thread-harness.mjs (which replaced the deleted tools/mock-worker.mjs). engine-smoke asserts one retro_run + one present per rAF at 1x, ~half at 0.5x, bounded catch-up, frame-advance-exactly-one, and no worker. engine-determinism.test.mjs (replacing the deleted worker-boundary.test.mjs) is the authoritative determinism + save/load + core-switch test (real runner + real resolver + mock core): frame N runs with exactly (log.getMask(N)|liveMask)>>>0. runloop.test.mjs retargets the accumulator/pacing assertions to the single-thread engine and adds one-present-per-rAF-under-bursts proofs. no-worker-check.mjs is a grep-proof that fails if new Worker/postMessage/MessageChannel/transferControlToOffscreen/OffscreenCanvas appears as live app code (tas-engine.js/app.js) and asserts emu-worker.js is gone. tools/emu-worker.test.mjs was deleted (worker retired). tools/bridge-profile.mjs was repurposed from the cross-thread present bridge into a single-thread steady-state per-frame allocation profiler. precache-check pins tas-studio-v22 and no longer lists emu-worker.js.",
   "scripts": {
     "icons": "node make-icons.js",
     "test:dom": "node dom-smoke.test.js",
     "test:engine": "node engine-smoke.mjs",
+    "test:determinism": "node engine-determinism.test.mjs",
+    "test:noworker": "node no-worker-check.mjs",
     "test:runloop": "node runloop.test.mjs",
     "test:env": "node env-callback.test.mjs",
     "test:studio": "node studio-dom.test.mjs",
@@ -16,10 +18,8 @@
     "test:coreurl": "node core-url-resolve.test.mjs",
     "test:runner": "node emu-core-runner.test.mjs",
     "test:inputresolver": "node input-resolver.test.mjs",
-    "test:worker": "node emu-worker.test.mjs",
     "test:glpresenter": "node gl-presenter.test.mjs",
     "test:fps": "node fps-meter.test.mjs",
-    "test:workerboundary": "node worker-boundary.test.mjs",
     "coreprobe": "node core-probe.mjs",
     "hud:calibrate": "node hud-calibrate.mjs",
     "hud:crosscheck:snes9x": "CORE=cores/snes9x_libretro.js node hud-crosscheck.mjs",
@@ -28,8 +28,8 @@
     "test:runsmoke:performance": "node run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12",
     "test:runsmoke:snes9x": "node run-smoke.mjs cores/snes9x_libretro.js 60",
     "leak:profile": "node --expose-gc leak-profile.mjs cores/snes9x_libretro.js 6000 500",
-    "bridge:profile": "node --expose-gc bridge-profile.mjs 20000 2000",
-    "test": "node inputlog-truncate.test.mjs && node env-callback.test.mjs && node core-url-resolve.test.mjs && node input-resolver.test.mjs && node emu-core-runner.test.mjs && node emu-worker.test.mjs && node gl-presenter.test.mjs && node worker-boundary.test.mjs && node runloop.test.mjs && node fps-meter.test.mjs && node engine-smoke.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node precache-check.mjs"
+    "alloc:profile": "node --expose-gc bridge-profile.mjs 20000 2000",
+    "test": "node inputlog-truncate.test.mjs && node env-callback.test.mjs && node core-url-resolve.test.mjs && node input-resolver.test.mjs && node emu-core-runner.test.mjs && node gl-presenter.test.mjs && node engine-determinism.test.mjs && node runloop.test.mjs && node fps-meter.test.mjs && node engine-smoke.mjs && node studio-dom.test.mjs && node mobile-smoke.test.mjs && node no-worker-check.mjs && node precache-check.mjs"
   },
   "devDependencies": {
     "jsdom": "^24.1.3"

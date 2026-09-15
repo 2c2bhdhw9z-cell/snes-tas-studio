@@ -1,21 +1,31 @@
 // tools/runloop.test.mjs
 //
-// Focused test for the WORKER's self-scheduling run loop, now owned by emu-core-runner.js
-// (the emulator moved off the main thread in FEAT-002; the old main-thread rAF loop is gone).
+// Focused test for the SINGLE-THREAD run loop pacing (THE GREAT REVERSAL, FEAT-002/003).
 //
-// The synchronous run loop yields between frames via an INJECTED scheduler (setTimeout(0) in
-// the worker; here a controllable fake) so control + input messages are processed BETWEEN
-// retro_run calls. This test drives that injected scheduler deterministically and asserts:
-//   - the loop keeps EXACTLY ONE tick outstanding (re-arms once per tick, never double-schedules)
-//   - pause() stops the loop (no re-arm, no further frames)
-//   - play() re-arms exactly one tick after a pause
-//   - speed scaling: 0.5x advances ~half as many frames as 2x for the same wall-clock
-//   - fast-forward runs a burst of frames per tick
-//   - frame-advance = EXACTLY one frame with that frame's resolved input, and does NOT start the loop
-//   - an ASYNCIFY core AWAITS retro_run (the loop only ticks after the awaited frame resolves)
+// The emulator is back on the main thread: tas-engine.js owns ONE requestAnimationFrame loop
+// and paces the reused EmuCoreRunner by injecting an rAF-based scheduleYield into it (design
+// CHOICE A). The runner keeps its target-time accumulator (bounded catch-up MAX_CATCHUP_FRAMES,
+// speed 0.1-2x, fast-forward burst, frame-skip beyond the clamp, ASYNCIFY awaits); the engine
+// coalesces to EXACTLY ONE present per rAF turn after each tick.
 //
-// This complements tools/emu-core-runner.test.mjs (which covers boot/decode/save-load/HUD) by
-// exercising the scheduling + speed + async semantics specifically. Run: node runloop.test.mjs
+// The first half of this file drives the runner's accumulator DIRECTLY through an injected
+// controllable scheduler (the exact seam the engine's rAF scheduleYield uses) and asserts the
+// pacing contract the reversal relies on:
+//   - exactly ONE tick outstanding (re-arms once per tick, never double-schedules)
+//   - pause() stops the loop; play() re-arms exactly one tick after a pause
+//   - speed scaling: 2x advances more frames than 0.5x for equal wall-clock
+//   - fast-forward runs a bounded burst per tick
+//   - frame-advance = EXACTLY one frame with that frame's resolved input, does NOT start the loop
+//   - an ASYNCIFY core AWAITS retro_run (never overlapping suspensions)
+//   - target-time pacing: ~60 emu-frames/sec at 1x, ~30 at 0.5x, ~120 at 2x, HARD-clamped
+//     catch-up, no death-spiral, present decoupled from compute
+//
+// The second half drives the REAL single-thread tas-engine.js rAF loop (fake rAF + mock core)
+// and asserts the top-level reversal invariant: EXACTLY ONE present per rAF turn, even under a
+// catch-up burst or a fast-forward burst (many retro_run in one turn -> still one draw).
+//
+// This complements tools/emu-core-runner.test.mjs (boot/decode/save-load/HUD) + engine-smoke.
+// Run: node runloop.test.mjs
 import assert from 'node:assert';
 import { EmuCoreRunner } from '../emu-core-runner.js';
 
@@ -293,75 +303,33 @@ await checkAsync('SYNCHRONOUS fast-forward burst is unchanged: 8 inline frames, 
 });
 
 // ======================================================================================
-// SCHEDULER: the default per-frame yield must use a MessageChannel (NO setTimeout clamp) when
-// available, falling back to setTimeout(0) only when MessageChannel is absent. Mobile Safari
-// clamps setTimeout to ~4ms, which alone capped the synchronous core near ~26 FPS; a
-// MessageChannel one-shot has no clamp, so the loop can pace up to the core's native fps.
+// SCHEDULER SEAM: the engine paces the runner by INJECTING an rAF-based scheduleYield (CHOICE
+// A). The runner's synchronous tick re-arms the NEXT turn FIRST (before running frames), so the
+// engine's rAF turn is decoupled from frame decode/present. We already inject a controllable
+// scheduler above (state.pending), which is exactly that seam. Here we assert the injected
+// scheduler is honored and the runner never falls back to any internal timer/macrotask when a
+// scheduler IS provided -- i.e. the running app's pacing is 100% the engine's rAF loop.
 
-await checkAsync('default scheduler uses MessageChannel (no setTimeout clamp) when available', async () => {
-  // A minimal MessageChannel/MessagePort stub whose port2.postMessage schedules port1.onmessage
-  // on a microtask — modelling the browser/worker MessageChannel that has NO timer clamp.
-  let mcConstructed = 0;
-  let posted = 0;
-  const savedMC = globalThis.MessageChannel;
+await checkAsync('injected scheduler is the ONLY loop driver (no setTimeout/MessageChannel fallback when injected)', async () => {
   const savedST = globalThis.setTimeout;
+  const savedMC = globalThis.MessageChannel;
   let setTimeoutUsed = 0;
-  class FakePort {
-    constructor() { this.onmessage = null; this._peer = null; }
-    postMessage() { posted += 1; const peer = this._peer; Promise.resolve().then(() => { if (peer && peer.onmessage) peer.onmessage({ data: 0 }); }); }
-  }
-  globalThis.MessageChannel = class {
-    constructor() { mcConstructed += 1; this.port1 = new FakePort(); this.port2 = new FakePort(); this.port1._peer = this.port2; this.port2._peer = this.port1; }
-  };
-  // Wrap setTimeout so we can prove the default scheduler did NOT use it while MC is present.
+  let mcUsed = 0;
   globalThis.setTimeout = (...args) => { setTimeoutUsed += 1; return savedST(...args); };
+  globalThis.MessageChannel = class { constructor() { mcUsed += 1; this.port1 = {}; this.port2 = { postMessage() {} }; } };
   try {
-    const mock = makeMockModule({ asyncify: false });
-    // NOTE: no scheduleYield injected — exercise the DEFAULT scheduler (defaultScheduleYield).
-    const runner = new EmuCoreRunner({
-      loadCore: async () => ({ ok: true, Module: mock, corePath: 'cores/snes9x_libretro.js' }),
-      fetchRom: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3, 4]) }),
-      getFrameInputMask: () => 0,
-    });
-    await runner.boot();
+    const { runner, mock, state } = await makeRunner(); // makeRunner injects scheduleYield
     CLOCK = 1000;
     runner.start();
-    // Let the MessageChannel-driven tick fire a couple of times via microtasks.
-    for (let i = 0; i < 5; i++) { CLOCK += 17; await Promise.resolve(); await Promise.resolve(); }
+    // Drive several turns through the INJECTED scheduler only.
+    for (let i = 0; i < 6; i++) { if (!state.pending) break; const cb = state.pending; state.pending = null; CLOCK += 17; cb(); }
     runner.pause();
-    assert.ok(mcConstructed >= 1, 'default scheduler constructed a MessageChannel');
-    assert.ok(posted >= 1, 'default scheduler posted through the MessageChannel port');
-    assert.strictEqual(setTimeoutUsed, 0, 'default scheduler did NOT fall back to the clamped setTimeout');
-    assert.ok(mock.__runs() >= 1, 'the MessageChannel-paced loop advanced frames');
+    assert.ok(mock.__runs() >= 1, 'the injected-scheduler-paced loop advanced frames');
+    assert.strictEqual(setTimeoutUsed, 0, 'no setTimeout fallback while a scheduler is injected (engine owns pacing)');
+    assert.strictEqual(mcUsed, 0, 'no MessageChannel fallback while a scheduler is injected (no cross-thread port)');
   } finally {
-    globalThis.MessageChannel = savedMC;
     globalThis.setTimeout = savedST;
-  }
-});
-
-await checkAsync('default scheduler falls back to setTimeout(0) when MessageChannel is unavailable', async () => {
-  const savedMC = globalThis.MessageChannel;
-  let setTimeoutZero = 0;
-  const savedST = globalThis.setTimeout;
-  globalThis.setTimeout = (cb, ms, ...rest) => { if (ms === 0) setTimeoutZero += 1; return savedST(cb, ms, ...rest); };
-  // eslint-disable-next-line no-undef
-  delete globalThis.MessageChannel;
-  try {
-    const mock = makeMockModule({ asyncify: false });
-    const runner = new EmuCoreRunner({
-      loadCore: async () => ({ ok: true, Module: mock, corePath: 'cores/snes9x_libretro.js' }),
-      fetchRom: async () => ({ ok: true, bytes: new Uint8Array([1, 2, 3, 4]) }),
-      getFrameInputMask: () => 0,
-    });
-    await runner.boot();
-    CLOCK = 1000;
-    runner.start();
-    await new Promise((r) => savedST(r, 5));
-    runner.pause();
-    assert.ok(setTimeoutZero >= 1, 'fallback used setTimeout(cb, 0) when MessageChannel absent');
-  } finally {
     globalThis.MessageChannel = savedMC;
-    globalThis.setTimeout = savedST;
   }
 });
 
@@ -565,13 +533,13 @@ await checkAsync('cadence is decoupled from present: onVideoFrame throwing never
 // ======================================================================================
 // HARDWARE-VSYNC (rAF) PACING PROOF.
 //
-// On the OffscreenCanvas present path the worker drives the runner's loop from
-// self.requestAnimationFrame (~60Hz, display-refresh-paced). We model that here by injecting a
-// scheduleYield that fires at a FIXED 60Hz cadence (advance the clock by one refresh interval
-// per turn), and assert the target-time accumulator advances ~60 emulated frames per simulated
-// second at 1x (one emu frame per rAF), and ~30 at 0.5x — WITHOUT reintroducing the old
-// cadence lock. This is the "verify the accumulator still advances ~60 emu-frames/sec under a
-// 60Hz rAF" check: rAF is display-driven, and one emu frame is due per refresh at 1x.
+// The single-thread engine drives the runner's loop from window.requestAnimationFrame (~60Hz,
+// display-refresh-paced) by injecting an rAF-based scheduleYield. We model that here by
+// injecting a scheduleYield that fires at a FIXED 60Hz cadence (advance the clock by one
+// refresh interval per turn), and assert the target-time accumulator advances ~60 emulated
+// frames per simulated second at 1x (one emu frame per rAF), and ~30 at 0.5x -- WITHOUT
+// reintroducing the old cadence lock. This is the "verify the accumulator still advances ~60
+// emu-frames/sec under a 60Hz rAF" check: rAF is display-driven, one emu frame due per refresh.
 function makeRunnerRafPaced() {
   const mock = makeMockModule({ asyncify: false });
   const state = { pending: null, inputFrames: [] };
@@ -646,6 +614,73 @@ await checkAsync('frame-advance still runs EXACTLY one frame after the free-runn
     assert.strictEqual(state.pending, null, 'frame-advance schedules no pump turn');
   });
 });
+
+// ======================================================================================
+// ENGINE rAF PRESENT-COALESCING PROOF (the top-level single-thread invariant).
+//
+// Drive the REAL tas-engine.js single-thread rAF loop with a fake rAF + mock core and assert
+// the reversal invariant: EXACTLY ONE present per rAF turn, even when a turn runs MANY retro_run
+// (a catch-up burst or a fast-forward burst). Drawing once-per-retro_run instead of once-per-rAF
+// (the open-loop flood the reversal removes) would FAIL these.
+{
+  // Isolate the engine harness in its own DOM-stub + fake-rAF scope (imported lazily so the
+  // runner-level CLOCK/perf shim above is not disturbed).
+  globalThis.window = globalThis;
+  globalThis.document = {
+    createElement: () => { let t = ''; return { className: '', set textContent(v) { t = v; }, get textContent() { return t; } }; },
+    getElementById: () => null,
+    head: { appendChild: () => {} },
+  };
+  const { installFakeRaf, installEngineMockRunner, makeGLCanvas } = await import('./single-thread-harness.mjs');
+  const fake = installFakeRaf();
+  const engMod = await import('../tas-engine.js');
+  const engine = engMod.default;
+  const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+  const shared = installEngineMockRunner(engine);
+  engine.attach({ canvas: makeGLCanvas({ gpu }), noticeEl: null });
+  await engine.init({ corePaths: ['cores/snes9x_libretro.js'] });
+
+  await checkAsync('engine: EXACTLY one present per rAF turn at 1x (never one-per-retro_run)', async () => {
+    engine.setSpeed(1);
+    fake.stepRaf(3);
+    shared.resolvedPerFrame.length = 0;
+    gpu.texImage2D = 0; gpu.texSubImage2D = 0; gpu.drawArrays = 0;
+    const TURNS = 20;
+    fake.stepRaf(TURNS);
+    assert.ok(gpu.drawArrays >= 1, 'presented at least once');
+    assert.ok(gpu.drawArrays <= TURNS, `at most one present per rAF turn (draws=${gpu.drawArrays} <= turns=${TURNS})`);
+    assert.strictEqual(gpu.texImage2D + gpu.texSubImage2D, gpu.drawArrays, 'one upload + one draw per present');
+  });
+
+  await checkAsync('engine: a catch-up burst (many retro_run in one turn) still presents ONCE', async () => {
+    engine.setSpeed(1);
+    fake.stepRaf(3);
+    shared.resolvedPerFrame.length = 0;
+    gpu.drawArrays = 0;
+    fake.advance(1000); // ~60 intervals overdue
+    fake.stepRaf(1); // ONE turn
+    assert.ok(shared.resolvedPerFrame.length <= 2, `catch-up bounded to <=2 retro_run (got ${shared.resolvedPerFrame.length})`);
+    assert.ok(gpu.drawArrays <= 1, `still ONE present under the catch-up burst (draws=${gpu.drawArrays})`);
+  });
+
+  await checkAsync('engine: a fast-forward burst (8 retro_run in one turn) still presents ONCE', async () => {
+    engine.pause();
+    fake.stepRaf(2);
+    engine.fastForward(true);
+    engine.play();
+    fake.stepRaf(2); // let fast-forward engage + settle
+    shared.resolvedPerFrame.length = 0;
+    gpu.drawArrays = 0;
+    fake.stepRaf(1); // ONE turn -> fast-forward runs a burst of frames
+    const burst = shared.resolvedPerFrame.length;
+    assert.ok(burst >= 4, `fast-forward advanced a burst in one turn (got ${burst})`);
+    assert.strictEqual(gpu.drawArrays, 1, `the fast-forward burst still presented EXACTLY once (draws=${gpu.drawArrays})`);
+    engine.fastForward(false);
+    engine.pause();
+  });
+
+  fake.restore();
+}
 
 let failed = 0;
 for (const r of results) {

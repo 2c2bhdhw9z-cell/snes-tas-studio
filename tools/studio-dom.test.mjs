@@ -1,28 +1,37 @@
 // tools/studio-dom.test.mjs
 //
-// Headless DOM test for the TAS Studio UI (worker-proxy architecture) using jsdom + a MOCK
-// Worker. jsdom does not execute <script type=module>, so we load index.html for its markup,
-// then drive the engine PROXY + TASStudio + memory-watch modules directly.
+// Headless DOM test for the TAS Studio UI (SINGLE-THREAD architecture) using jsdom + a fake
+// requestAnimationFrame + a MOCK libretro core. jsdom does not execute <script type=module>,
+// so we load index.html for its markup, then drive the REAL single-thread engine + TASStudio +
+// memory-watch modules directly.
 //
-// FEAT-004 rewrite: the emulator runs in a Web Worker; tas-engine.js is a thin proxy. This
-// test installs a mock Worker (recording postMessage + letting us push worker messages back)
-// so the REAL proxy + REAL piano-roll/memory-watch logic run against it. It asserts:
+// THE GREAT REVERSAL (FEAT-002/003): the emulator runs SINGLE-THREADED on the main thread in
+// tas-engine.js's own rAF loop -- there is NO Web Worker. This test wires the REAL engine to
+// its REAL EmuCoreRunner + REAL InputResolver backed by a MOCK core (no WASM), so the REAL
+// piano-roll/memory-watch logic runs against the real in-process engine. It asserts:
 //   - piano-roll grid renders rows-per-frame with the SNES button columns
-//   - clicking a cell toggles it (class + aria-pressed), updates the LOCAL MIRROR, AND sends
-//     an {type:'inputEdit', op:'setFrameButton'} message to the worker
+//   - clicking a cell toggles it (class + aria-pressed), updates the LOCAL MIRROR, AND applies
+//     an {op:'setFrameButton'} edit to the engine's IN-PROCESS authoritative InputLog
 //   - toolbar has frame-advance / play-pause / speed slider (0.1-2) / fast-forward and they
-//     forward the correct worker messages
-//   - HUD renders from STREAMED {type:'hud'} values (verified SMB1 addresses)
-//   - save/load send saveState/loadState + restoreSnapshot/truncateAfter, and the worker's
-//     stateLoaded ack truncates the log (re-record)
-//   - core-select maps to setCore messages; three cores incl. snes9x default; no file picker
+//     drive the engine directly (setSpeed clamps; frame-advance runs exactly one)
+//   - HUD renders from the engine's READ-ONLY memory view (verified SMB1 addresses)
+//   - save/load: save produces a state node; load restores + fires onStateLoaded so the log
+//     truncates (re-record); no memory-write path
+//   - core-select maps to setCore (in-process teardown+reinit); three cores incl. snes9x
+//     default; no file picker
+//   - the engine created NO worker (single-thread)
 //
 // Run from tools/: node studio-dom.test.mjs   (requires jsdom installed here)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
-import { installMockWorkerEnv, mockWorkerRegistry } from './mock-worker.mjs';
+import {
+  installFakeRaf,
+  installEngineMockRunner,
+  makeGLCanvas,
+  SMB1_HUD_ADDR,
+} from './single-thread-harness.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -49,25 +58,32 @@ const { document } = window;
 globalThis.window = window;
 globalThis.document = document;
 globalThis.HTMLCanvasElement = window.HTMLCanvasElement;
-globalThis.requestAnimationFrame = () => 0;
-globalThis.cancelAnimationFrame = () => {};
 globalThis.fetch = async () => ({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) });
 
-// Install the mock Worker BEFORE importing the proxy. No OffscreenCanvas support here, so the
-// proxy keeps a main-thread 2d context and would blit posted {type:'video'} frames.
-installMockWorkerEnv({ offscreen: false });
+// Install the CONTROLLABLE fake rAF (on globalThis AND window) BEFORE importing the engine.
+const fake = installFakeRaf();
 
-// Load engine singleton (proxy), then studio + HUD; wire them like the bootstrap would.
+// Load the engine singleton (single-thread), then studio + HUD; wire them like the bootstrap.
 const engineMod = await import('../tas-engine.js');
 const engine = engineMod.default;
 window.TASEngine = engine;
 
-// Attach a canvas so the proxy creates its worker (jsdom canvas has no
-// transferControlToOffscreen, so the fallback path is taken — exactly like older Safari).
-const canvasEl = document.getElementById('screen');
-engine.attach({ canvas: canvasEl, noticeEl: document.getElementById('notice') });
-const worker = mockWorkerRegistry.last;
-check('proxy created a module worker on attach', worker && worker.opts.type === 'module');
+// Wire the engine's internal runner to a MOCK core (real EmuCoreRunner, no WASM) BEFORE init.
+// Use a WebGL-capable canvas so the engine builds a real GLPresenter on the main thread.
+const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+const glCanvas = makeGLCanvas({ gpu });
+const shared = installEngineMockRunner(engine);
+
+// jsdom's #screen canvas has no WebGL; use our GL canvas object for the presenter, but keep
+// the DOM canvas element in the tree for layout. attach() only needs a getContext-capable obj.
+engine.attach({ canvas: glCanvas, noticeEl: document.getElementById('notice') });
+check('engine created NO worker on attach (single-thread)', typeof engine.worker === 'undefined' && typeof globalThis.Worker === 'undefined');
+check('engine presents on a MAIN-thread path (videoPath main-*)', /^main-/.test(engine.videoPath));
+
+// Boot the in-process runner (auto-plays), then pause so our clicks are deterministic.
+await engine.init({ corePaths: ['cores/snes9x_libretro.js'] });
+engine.pause();
+fake.stepRaf(2);
 
 const { TASStudio } = await import('../piano-roll.js');
 const { createMemoryWatch } = await import('../memory-watch.js');
@@ -95,8 +111,7 @@ const rows = document.querySelectorAll('#piano-roll .pr-body .pr-row');
 check('piano-roll has many frame rows', rows.length >= 100);
 check('rows are indexed by frame', document.querySelector('#piano-roll .pr-row[data-frame="0"]'));
 
-// --- Clicking a cell toggles it AND sends an inputEdit message to the worker ---
-worker.__clear();
+// --- Clicking a cell toggles it AND applies an inputEdit to the engine's in-process log ---
 const targetCell = document.querySelector('#piano-roll .pr-cell--btn[data-frame="3"][data-col="A"]');
 check('target cell exists (frame 3, A)', targetCell);
 const before = targetCell.classList.contains('pr-cell--on');
@@ -105,15 +120,14 @@ const after = targetCell.classList.contains('pr-cell--on');
 check('clicking cell toggles class', before === false && after === true);
 check('clicking cell sets aria-pressed', targetCell.getAttribute('aria-pressed') === 'true');
 check('toggle recorded in LOCAL MIRROR input log', studio.log.isSet(3, 'A'));
-const edit = worker.__last('inputEdit');
-check('cell toggle sends {type:inputEdit, op:setFrameButton} to the worker',
-  edit && edit.msg.op === 'setFrameButton' && edit.msg.frame === 3 && edit.msg.button === 'A' && edit.msg.on === true);
-// Click again to toggle off (and send another edit with on:false).
-worker.__clear();
+// The engine's IN-PROCESS authoritative resolver now reflects the scripted A on frame 3.
+check('cell toggle applied to the engine in-process InputLog (frame 3 A set)',
+  engine._resolver.getFrameInputMask(3, 0) === (1 << 8) >>> 0);
+// Click again to toggle off.
 targetCell.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('second click toggles off', !targetCell.classList.contains('pr-cell--on') && !studio.log.isSet(3, 'A'));
-const edit2 = worker.__last('inputEdit');
-check('second toggle sends inputEdit on:false', edit2 && edit2.msg.op === 'setFrameButton' && edit2.msg.on === false);
+check('second toggle cleared the in-process log (frame 3 A cleared)',
+  engine._resolver.getFrameInputMask(3, 0) === 0);
 
 // --- Toolbar controls ---
 check('frame advance button exists', document.getElementById('btn-frame-advance'));
@@ -125,8 +139,6 @@ check('speed slider min=0.1', speed && speed.min === '0.1');
 check('speed slider max=2', speed && speed.max === '2');
 check('save button exists', document.getElementById('btn-savestate'));
 check('load button exists', document.getElementById('btn-loadstate'));
-// Live FPS readout sits in the toolbar next to the frame counter (prominent, read-only perf
-// display; sourced from actual advanced frames over a rolling 1s window by app.js).
 check('frame counter exists', document.getElementById('frame-counter'));
 check('#fps-readout exists in the toolbar', document.getElementById('fps-readout'));
 check('#fps-readout is inside #frame-controls', (() => {
@@ -136,78 +148,90 @@ check('#fps-readout is inside #frame-controls', (() => {
 })());
 check('#fps-readout initial text is a plain FPS label', /FPS:\s*0/.test((document.getElementById('fps-readout') || {}).textContent || ''));
 
-// Speed slider drives engine.setSpeed (clamped) and posts a setSpeed message.
-worker.__clear();
+// Speed slider drives engine.setSpeed (clamped) directly.
 speed.value = '1.5';
 speed.dispatchEvent(new window.Event('input', { bubbles: true }));
 check('speed slider updates engine.speed', Math.abs(engine.speed - 1.5) < 1e-6);
-check('speed slider posts a setSpeed message', worker.__last('setSpeed') && Math.abs(worker.__last('setSpeed').msg.mult - 1.5) < 1e-6);
+check('speed slider drives the runner speed', Math.abs(shared.runner.speed - 1.5) < 1e-6);
+engine.setSpeed(1);
 
-// Frame-advance button posts EXACTLY one frameAdvance message.
-worker.__clear();
+// Frame-advance button runs EXACTLY one retro_run through the in-process runner.
+engine.pause();
+fake.stepRaf(2);
+shared.resolvedPerFrame.length = 0;
+const frameBefore = shared.runner.currentFrame;
 document.getElementById('btn-frame-advance').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-check('Frame +1 posts exactly one frameAdvance message', worker.__all('frameAdvance').length === 1);
+check('Frame +1 runs exactly one retro_run in-process', shared.resolvedPerFrame.length === 1 && shared.runner.currentFrame === frameBefore + 1);
 
-// --- HUD renders from STREAMED {type:'hud'} values (verified SMB1 addresses) ---
+// --- HUD renders from the engine's READ-ONLY memory view (verified SMB1 addresses) ---
 const hud = document.getElementById('hud');
 const keys = Array.from(hud.querySelectorAll('.hud__value')).map((v) => v.dataset.key);
 for (const k of ['frame', 'marioX', 'marioY', 'speedX']) {
   check(`HUD field ${k} rendered`, keys.includes(k));
 }
-// Before any HUD message, emulation-dependent fields show placeholder dashes.
-check('HUD shows placeholder before any streamed HUD value', hud.querySelector('[data-key="marioX"]').textContent === '--');
-// Simulate the worker streaming HUD values read from the verified SMB1 addresses. The worker
-// labels each byte by the ADDRESS it was read at (SMB1_HUD_ADDR): xHi=byte@0x0042,
-// xSub=byte@0x0043 (this is the X PAGE per memory-watch.js), xPage=byte@0x0401 (the X
-// SUB-PIXEL). memory-watch.js reads readU8(0x0043) as the page and readU8(0x0401) as the
-// sub-pixel, so with page=0x80 and pixel=0x30: marioX = 0x80*256 + 0x30 = 32816, sub = 0x02.
-// (Distinct bytes at 0x0043 vs 0x0401 make this FAIL if the proxy transposes them.)
-worker.__emit({ type: 'hud', values: { hSpeed: -16, xHi: 0x30, xSub: 0x80, xPage: 0x02, yHi: 0xb0, ySub: 0x40 } });
+// Seed the mock core WRAM with DISTINCT bytes at each verified SMB1 address so a transpose bug
+// (X page 0x0043 vs X sub-pixel 0x0401) is caught. memory-watch reads:
+//   marioX = readU8(0x0043)*256 + readU8(0x0042), sub = readU8(0x0401)
+//   marioY = readU8(0x0002),                      sub = readU8(0x041c)
+//   speedX = signed readU8(0x005d)
+// So with page(0x0043)=0x80, pixel(0x0042)=0x30, sub(0x0401)=0x02: marioX = 0x80*256+0x30 =
+// 32816, sub = 002; Y hi(0x0002)=0xb0=176, Y sub(0x041c)=0x40=064; H-Speed(0x005d)=0xf0=-16.
+{
+  const M = shared.module;
+  const base = M.WRAM_PTR;
+  M.HEAPU8[base + SMB1_HUD_ADDR.H_SPEED] = 0xf0; // -16
+  M.HEAPU8[base + SMB1_HUD_ADDR.X_HI] = 0x30; // X pixel 0x0042
+  M.HEAPU8[base + SMB1_HUD_ADDR.X_SUB] = 0x80; // X PAGE 0x0043
+  M.HEAPU8[base + SMB1_HUD_ADDR.X_PAGE] = 0x02; // X SUB-PIXEL 0x0401
+  M.HEAPU8[base + SMB1_HUD_ADDR.Y_HI] = 0xb0; // Y pixel 0x0002
+  M.HEAPU8[base + SMB1_HUD_ADDR.Y_SUB] = 0x40; // Y SUB-PIXEL 0x041c
+}
 watch.update();
 check('HUD X renders page(0x0043)*256+pixel(0x0042) . sub(0x0401)', hud.querySelector('[data-key="marioX"]').textContent === '32816.002');
-check('HUD Y renders from streamed values (hi . sub)', hud.querySelector('[data-key="marioY"]').textContent === '176.064');
-check('HUD H-Speed renders the signed streamed value', hud.querySelector('[data-key="speedX"]').textContent === '-16');
+check('HUD Y renders from WRAM (hi . sub)', hud.querySelector('[data-key="marioY"]').textContent === '176.064');
+check('HUD H-Speed renders the signed value', hud.querySelector('[data-key="speedX"]').textContent === '-16');
+// Read-only: the engine memory view exposes no writer.
+{
+  const mem = engine.getMemoryView();
+  check('engine memory view is READ-ONLY (no writer)', mem && ['writeU8', 'poke', 'set', 'inject'].every((k) => typeof mem[k] === 'undefined'));
+}
 
-// --- DOM-REUSE PROOF: the per-frame HUD update MUTATES cached nodes in place; it does NOT
-// rebuild rows / churn DOM nodes each frame (the layout-thrash leak that fed the FPS decay). ---
+// --- DOM-REUSE PROOF: the per-frame HUD update MUTATES cached nodes in place ---
 {
   const marioXNodeBefore = hud.querySelector('[data-key="marioX"]');
   const rowsBefore = hud.querySelectorAll('.hud__row').length;
-  // Repaint the SAME values many times (models 60x/sec identical frames). Node identity must
-  // be preserved (no createElement/innerHTML rebuild) and row count must not grow.
   for (let i = 0; i < 60; i++) watch.update();
   const marioXNodeAfter = hud.querySelector('[data-key="marioX"]');
   check('HUD update reuses the SAME value node (no per-frame createElement/innerHTML)', marioXNodeBefore === marioXNodeAfter);
   check('HUD update does not append rows over time (no unbounded DOM growth)', hud.querySelectorAll('.hud__row').length === rowsBefore);
   // A CHANGED value updates the SAME node in place (mutation, not replacement).
-  worker.__emit({ type: 'hud', values: { hSpeed: 8, xHi: 0x31, xSub: 0x80, xPage: 0x03, yHi: 0xb1, ySub: 0x41 } });
+  const M = shared.module;
+  const base = M.WRAM_PTR;
+  M.HEAPU8[base + SMB1_HUD_ADDR.X_HI] = 0x31; // pixel -> 0x31
+  M.HEAPU8[base + SMB1_HUD_ADDR.X_SUB] = 0x80; // page stays 0x80
+  M.HEAPU8[base + SMB1_HUD_ADDR.X_PAGE] = 0x03; // sub -> 0x03
   watch.update();
   check('HUD value change mutates the cached node in place', hud.querySelector('[data-key="marioX"]') === marioXNodeBefore);
   check('HUD value change is reflected (in-place textContent update)', hud.querySelector('[data-key="marioX"]').textContent === '32817.003');
 }
 
-// --- Save-state tree renders a node after Save; save posts a saveState command ---
-worker.__clear();
+// --- Save-state tree renders a node after Save; save serializes in-process ---
 document.getElementById('btn-savestate').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 check('save-state tree shows a node', document.querySelector('#savestate-tree .savestate-node'));
-check('Save posts a saveState command to the worker', worker.__last('saveState'));
-// The worker replies with serialized bytes; the node fills in asynchronously.
-worker.__emit({ type: 'saved', bytes: new Uint8Array([1, 2, 3, 4]).buffer });
+// Save is async (engine.saveState returns a Promise); let it settle.
 await new Promise((r) => setTimeout(r, 0));
 
-// --- Load path: sends restoreSnapshot + loadState; stateLoaded ack truncates the log ---
+// --- Load path: restore + onStateLoaded truncates the mirror log (re-record) ---
 // Script some input past the saved frame first (frame 0 is the saved node's frame).
 studio.log.set(5, 'B', true);
-worker.__clear();
 const saveNodeBtn = document.querySelector('#savestate-tree .savestate-node');
 saveNodeBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-check('Load sends a restoreSnapshot inputEdit', worker.__all('inputEdit').some((e) => e.msg.op === 'restoreSnapshot'));
-// The worker acks the load with stateLoaded(frame) -> proxy onStateLoaded -> truncateAfter.
-worker.__emit({ type: 'stateLoaded', frame: 0 });
-check('stateLoaded ack truncates the mirror log after the loaded frame (re-record)', !studio.log.isSet(5, 'B'));
-check('stateLoaded ack sends a truncateAfter inputEdit to the worker', worker.__all('inputEdit').some((e) => e.msg.op === 'truncateAfter' && e.msg.frame === 0));
+await new Promise((r) => setTimeout(r, 0));
+check('load truncates the mirror log after the loaded frame (re-record)', !studio.log.isSet(5, 'B'));
+check('load truncates the engine in-process log after the loaded frame',
+  engine._resolver.getFrameInputMask(5, 0) === 0);
 
-// --- Core selection dropdown maps to setCore messages ---
+// --- Core selection dropdown maps to setCore (in-process teardown + reinit) ---
 const coreSelect = document.getElementById('core-select');
 check('core-select dropdown exists', !!coreSelect);
 check('core-select is a <select>', coreSelect && coreSelect.tagName === 'SELECT');
@@ -238,16 +262,15 @@ check('all three cores have DISTINCT export names',
 check('DEFAULT_CORE_PATHS now defaults to snes9x (real-time)',
   Array.isArray(DEFAULT_CORE_PATHS) && DEFAULT_CORE_PATHS[0] === 'cores/snes9x_libretro.js');
 
-// engine.setCore() maps to a setCore worker message (core swap over the boundary).
+// engine.setCore() tears the runner down and re-inits in-process (core swap on the main thread).
 check('engine.setCore is a function', typeof engine.setCore === 'function');
-worker.__clear();
+installEngineMockRunner(engine, 'cores/bsnes_mercury_performance_libretro.js');
 const switchResult = await engine.setCore('cores/bsnes_mercury_performance_libretro.js');
-check('setCore resolves a dispatched command (does not throw)', switchResult && switchResult.ok === true);
-const sc = worker.__last('setCore');
-check('setCore posts a setCore message with the selected core path',
-  sc && sc.msg.corePath === 'cores/bsnes_mercury_performance_libretro.js');
+check('setCore re-inits in-process (does not throw)', switchResult && switchResult.ok === true);
 check('setCore updates the mirrored activeCoreId', engine.activeCoreId === 'performance');
 check('setCore did not introduce a file picker', document.querySelectorAll('input[type="file"]').length === 0);
+
+fake.restore();
 
 // --- Report ---
 let failed = 0;

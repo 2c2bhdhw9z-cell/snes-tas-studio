@@ -126,103 +126,109 @@ This is a **static, client-side vanilla-JS PWA** (no framework, no build step to
 uses a **thin custom libretro JS frontend** (not the full EmulatorJS UI) so we control
 frame-advance, state serialize/deserialize, and raw read-only memory peek directly.
 
-### The emulator runs in a Web Worker (why, and how the boundary works)
+### The emulator runs single-threaded in one main-thread rAF loop (why, and how)
 
-**The problem this solves:** on real iOS Safari a synchronous WASM libretro core running on
-the **main thread** starves the UI — the emulator crawls (~15 FPS) and, because it never
-yields, the browser swallows touch/DOM events, so the on-screen controller stops responding.
-No amount of tuning fixes a synchronous Wasm emulator sharing the main thread with a DOM UI
-on iOS.
+**The Great Reversal.** The emulator used to run in a dedicated Web Worker. That was a
+misdiagnosis. The main thread only ever choked on iOS because of three now-fixed bugs: a
+`setTimeout(0)` clamp that half-vsync-locked the loop, ~300 DOM nodes/sec banner+HUD churn,
+and a per-frame HUD object allocation storm. With all three fixed (cached DOM nodes mutated
+in place, one reused HUD values object, a bounded target-time accumulator), the numbers are
+clear: snes9x executes `retro_run` in **~1.2 ms**, which fits comfortably inside a 16.6 ms
+frame budget without blocking touch. The Web Worker added cross-thread `postMessage` latency,
+transferable pooling, and iOS WebKit bridging that were themselves incompatible with iOS
+Safari's GC at 60 Hz - the decay persisted even on the worker-computes + main-thread-WebGL
+fallback path, which proved the boundary itself was the liability.
 
-**The fix:** the entire emulator was moved **off the main thread into a dedicated module Web
-Worker**. The main thread now does **only** DOM events + presentation; every heavy thing
-(WASM instantiation, `retro_run`, save/load, WRAM reads, framebuffer decode) happens in the
-worker. Touch is never blocked again.
+**The fix:** the emulator moves **back onto the main thread** and runs in **one tight
+`requestAnimationFrame` loop**. There is **no Web Worker, no `postMessage`, no
+`MessageChannel`, and no `OffscreenCanvas`** anywhere in the running app. `emu-worker.js` is
+retired. `tas-engine.js` is now the single-thread engine: it **owns** one `EmuCoreRunner`
+(the libretro glue), one `InputResolver` (the authoritative scripted log, now in-process), and
+one `GLPresenter` (the WebGL presenter on the DOM canvas), and drives them all from its own
+rAF loop.
 
 ```
- main thread (DOM only)                          worker thread (all WASM)
- ┌───────────────────────────┐   postMessage    ┌───────────────────────────────┐
- │ app.js  (bootstrap)        │  ───────────────▶│ emu-worker.js (message router)│
- │ piano-roll.js (UI + input) │   init/play/     │   └ emu-core-runner.js (ABI +  │
- │ memory-watch.js (HUD)      │     pause/edit/   │        run loop + decode)      │
- │ tas-engine.js  (PROXY)     │◀───────────────  │   └ input-resolver.js (log)    │
- └───────────────────────────┘   frame/hud/      └───────────────────────────────┘
-        ▲ OffscreenCanvas          video/saved/
-        └ (transferred to worker)  stateLoaded
+ main thread - one requestAnimationFrame loop
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │ app.js (bootstrap) · piano-roll.js (UI + input) · memory-watch.js (HUD)    │
+ │ tas-engine.js (TASEngine)                                                  │
+ │   ├ input-resolver.js  (authoritative scripted InputLog, in-process)       │
+ │   ├ emu-core-runner.js (libretro ABI + target-time accumulator + decode)   │
+ │   └ gl-presenter.js    (one texture, per-frame texSubImage2D + drawArrays) │
+ │                                                                            │
+ │  each rAF tick, IN ORDER:                                                  │
+ │    (a) read inputs  → resolved inside retro_run via getFrameInputMask      │
+ │    (b) retro_run    → advance emulation (bounded catch-up, frame-skip)     │
+ │    (c) update HUD   → from the cached read-only WRAM view                  │
+ │    (d) present ONCE → gl.texSubImage2D + gl.drawArrays (latest frame)      │
+ └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-**How each concern crosses the boundary:**
+**How each concern works now (all in-process):**
 
-- **Input (deterministic).** The **authoritative scripted `InputLog` lives in the worker**
-  (wrapped by `input-resolver.js`). The UI sends `{type:'inputEdit'}` edits
-  (`setFrameButton` / `truncateAfter` / `restoreSnapshot`) when you toggle a piano-roll cell,
-  and it streams the **live** controller/touch mask each animation frame via
-  `{type:'liveMask'}`. The worker resolves **exactly `(log.getMask(frame) | latestLiveMask)
-  >>> 0`** at the instant `retro_run` pulls input for the frame it is about to run — so frame
-  N always runs with frame N's input and never N+1's. Frame-advance runs **exactly one**
-  `retro_run` with that frame's resolved input.
-- **Video (OffscreenCanvas, with an iOS-safe fallback).** `tas-engine.js` feature-detects
-  `HTMLCanvasElement.prototype.transferControlToOffscreen` + a working `OffscreenCanvas` 2d
-  context. **If supported**, it `transferControlToOffscreen()` and posts the canvas to the
-  worker (as a transferable), and the worker presents decoded RGBA **directly** via WebGL
-  (`gl-presenter.js`; one texture + per-frame `texSubImage2D`) — no per-frame message crosses
-  the boundary. **If not supported** (older Safari), the worker posts each frame as
-  `{type:'video'}` with a transferable `ArrayBuffer` of RGBA + dimensions and the main thread
-  presents it. Both paths use the same decoder in `emu-core-runner.js`.
-- **Present loop bound to hardware V-Sync (the GPU-command-queue-flood fix).** Presenting
-  cannot be **open-loop** or the iOS WebGL command queue grows unbounded and the FPS decays
-  smoothly (60 → 12). So there is **exactly one loop driver active at a time**, chosen by the
-  present path:
-  - **OffscreenCanvas path (worker presents):** the run/present loop is driven by
-    **`self.requestAnimationFrame` inside the worker** (available in a dedicated worker that
-    was transferred an OffscreenCanvas, and paced to the display refresh ~60Hz). Each rAF the
-    worker advances emulation with the target-time accumulator (bounded catch-up stays, so a
-    slow device **frame-skips** instead of bursting) and then presents **exactly one** frame —
-    the **latest** decoded that turn — so even a catch-up or fast-forward burst issues **one
-    `texSubImage2D`+draw per refresh**. rAF gives **implicit** WebGL backpressure: the browser
-    will not schedule the next rAF until the previous frame's GL commands are consumed, so the
-    command queue cannot flood. Frame-advance while paused is a **separate one-shot present**,
-    not the rAF loop.
-  - **Fallback path (main thread presents):** the worker gates the next posted frame on a
-    **main-thread `requestAnimationFrame` ACK** — the proxy presents inside its own rAF then
-    acks, so at most **one frame is in flight** and the present is vsync-paced there too.
-  - **Headless / non-presenting (Node, tests):** no rAF, so the loop uses the **MessageChannel
-    one-shot** yield (`defaultScheduleYield`); tests inject their own scheduler. The code
-    feature-detects `self.requestAnimationFrame` and cleanly uses the injected/MessageChannel
-    scheduler when it is absent (rAF **XOR** MessageChannel — never both).
-- **HUD (streamed, read-only).** The worker reads the verified SMB1 WRAM addresses
-  **read-only** each frame and posts a small values object via `{type:'hud'}`. The proxy
-  surfaces those through `getMemoryView()` (read accessors only, keyed by WRAM offset) so
-  `memory-watch.js` renders with **no synchronous WRAM read** and **no write path** anywhere
-  across the boundary.
-- **Save / load (transferable bytes).** `saveState()` messages the worker, which
-  `retro_serialize`s and returns the bytes as a transferable `ArrayBuffer` (`{type:'saved'}`);
-  `loadState(bytes)` sends the bytes (transferable) to the worker's `retro_unserialize`, and
-  the worker's `{type:'stateLoaded'}` ack fires the proxy's `onStateLoaded` so re-record
-  truncation still runs.
-- **Core switch.** The **Core** dropdown calls `setCore(path)`, which posts `{type:'setCore'}`;
-  the worker tears the current core down and boots the selected one (snes9x is driven as a
-  **synchronous** self-scheduling loop; the ASYNCIFY bsnes cores are **awaited**). snes9x
-  remains the default.
+- **Input (deterministic).** The **authoritative scripted `InputLog` lives in-process** in the
+  engine's `InputResolver`. `piano-roll.js` applies `sendInputEdit()` edits (`setFrameButton` /
+  `truncateAfter` / `restoreSnapshot`) when you toggle a piano-roll cell, and streams the
+  **live** controller/touch mask each animation frame via `sendLiveMask()`. The runner resolves
+  **exactly `(log.getMask(frame) | liveMask) >>> 0`** at the instant `retro_run` pulls input
+  for the frame it is about to run - so frame N always runs with frame N's input and never
+  N+1's. Frame-advance runs **exactly one** `retro_run` with that frame's resolved input.
+- **The single rAF loop (the heart of this).** The engine owns **one**
+  `requestAnimationFrame` loop and paces the runner's target-time accumulator with it. Each
+  tick, in order: (a) inputs are resolved inside `retro_run`; (b) the accumulator advances
+  emulation up to real time - **1-2 `retro_run` at 1x (~60/sec), ~30/sec at 0.5x**, with
+  bounded catch-up (`MAX_CATCHUP_FRAMES`) so a slow device **frame-skips** instead of bursting
+  (no death-spiral); (c) the HUD updates from the cached read-only WRAM view; (d) the engine
+  presents **exactly one** frame - the **latest** decoded that turn - via `gl.texSubImage2D` +
+  `gl.drawArrays`, so even a catch-up or fast-forward burst issues **one present per refresh**.
+  rAF gives **native vsync pacing + implicit WebGL backpressure**: the browser will not
+  schedule the next rAF until the previous frame's GL commands are consumed, so the command
+  queue cannot flood. Frame-advance while paused is a **separate one-shot present**, not the
+  loop.
+- **Video (WebGL on the main thread).** `attach()` builds a `GLPresenter` directly on the DOM
+  canvas via `createGLPresenter(canvas, 'main')` - one texture + one program + one quad, with
+  per-frame `texSubImage2D` + `drawArrays` (no per-frame `putImageData`). A 2D `putImageData`
+  context is kept **only** as a last resort when WebGL is unavailable (e.g. jsdom). The active
+  present path is surfaced in the status snapshot as `videoPath`, so the debug banner **Video**
+  field reads **`main-webgl2`** (or `main-webgl1` / `main-2d`). **On-device steady-FPS is the
+  final judge** of the reversal.
+- **ASYNCIFY (bsnes) single-threaded.** The bsnes accuracy/performance cores are ASYNCIFY, so
+  `retro_run` may return a Promise (libco/Asyncify can have **at most one** suspension
+  outstanding). The runner **awaits** each `retro_run`; the engine's rAF wrapper **awaits** the
+  tick before presenting the stashed frame and before scheduling the next rAF, so only one
+  suspension is ever outstanding and exactly one present happens per rAF. snes9x (synchronous)
+  presents immediately after the tick.
+- **HUD (read-only).** The runner reads the verified SMB1 WRAM addresses **read-only** each
+  frame into one reused values object. `getMemoryView()` returns the runner's **cached
+  read-only** WRAM view (rebuilt only when the WRAM ptr/size changes), which exposes read
+  accessors only (`readU8`/`readS8`/`readU16`/`readS16`/`snapshot`) - there is **no write
+  path** anywhere. `memory-watch.js` renders from it, observation only.
+- **Save / load.** `saveState()` returns a Promise resolving to the runner's serialized
+  `Uint8Array`; `loadState(bytes, {frame})` calls `retro_unserialize` in-process and fires
+  `onStateLoaded` so re-record truncation still runs, then presents the restored frame once.
+- **Core switch.** The **Core** dropdown calls `setCore(path)`, which tears the current runner
+  down and re-boots the selected core in-process, restoring the prior paused state (snes9x is
+  driven as a **synchronous** loop; the ASYNCIFY bsnes cores are **awaited**). snes9x remains
+  the default.
 
 | File | Role |
 | --- | --- |
 | `index.html` | App shell: iOS/standalone/no-bounce meta tags, canvas, HUD, piano-roll, frame controls, save-state tree, touch controls, notice banner, on-screen debug banner. Loads `app.js` as the bootstrap module. |
-| `app.js` | App-level bootstrap/orchestration: service-worker registration, engine attach/init wiring (attach() creates the worker and, when supported, transfers the canvas to it as an OffscreenCanvas **before** any main-thread `getContext`), iOS bounce/pinch gesture suppression, and the always-visible on-screen debug banner (WASM core status, ROM fetch status, and a `window.onerror`/`unhandledrejection` listener that prints uncaught JS/WASM errors on screen). Status/errors only — adds no emulation, memory-write, cheat, or level-select capability. |
-| `tas-engine.js` | The **thin main-thread PROXY** (`window.TASEngine`). Creates the emulator module worker (`new Worker(url, {type:'module'})`), forwards commands as `postMessage`, and mirrors `currentFrame`/`status`/`coreStatus`/`romStatus`/`engineStatus`/`activeCoreId` from worker messages so the banner + piano-roll + HUD read them without blocking. Does the OffscreenCanvas feature-detect + transfer (or the fallback `{type:'video'}` blit). Contains **no** `retro_*`/`cwrap`/`addFunction`/`retro_run` — no synchronous WASM work on the main thread. |
-| `emu-worker.js` | The **module Web Worker entry**: routes the IN/OUT message protocol, owns the authoritative `InputResolver` (scripted `InputLog`) + the latest live mask, hosts one `EmuCoreRunner`, and either blits to a transferred OffscreenCanvas or posts `{type:'video'}` frames. Enforces the determinism contract by construction. |
-| `emu-core-runner.js` | The **DOM-free libretro core runner** (runs inside the worker): dynamic-imports the core, fetches the ROM (`encodeURI`), `cwrap`s the `retro_*` ABI, installs env/video/audio/input callbacks, drives the self-scheduling run loop (synchronous core yields between frames; ASYNCIFY core awaits `retro_run`), decodes the framebuffer to RGBA, save/load, and read-only WRAM/HUD reads. Unit-testable in Node with a mock core. |
-| `input-resolver.js` | The **deterministic input resolver** (in the worker): wraps the authoritative `InputLog` and resolves `(log.getMask(frame) \| liveMask) >>> 0`; applies the scripted-edit op protocol. Pure, DOM-free, unit-testable. |
-| `piano-roll.js` | The TAS Studio UI (`TASStudio`): piano-roll input editor (cell toggle → local mirror log **+** `{type:'inputEdit'}` to the worker), frame-control toolbar, save-state tree with re-record truncation, and the per-animation-frame live-mask stream to the worker. Owns a local **mirror** `InputLog` (for grid rendering) and the `LiveInput`. |
-| `input-log.js` | Pure, DOM-free per-frame input log (`InputLog`): a libretro joypad bitmask per frame, plus the `truncateAfter` re-record primitive. Used as the worker's authoritative log **and** the UI's render mirror. Unit-testable in Node. |
-| `live-input.js` | Real-time controller input (`LiveInput`): HTML5 Gamepad API polling + on-screen touch controls; its mask is streamed to the worker and OR-ed into the frame the worker runs next. |
-| `memory-watch.js` | Read-only Live HUD: renders Mario X/Y sub-pixel, horizontal speed, and the frame counter from the **streamed** HUD values (observation only). |
-| `core/core-loader.js` | Fetches + instantiates the Emscripten libretro core **inside the worker**; degrades gracefully when absent. |
-| `sw.js` | Service worker (`tas-studio-v20`): cache-first offline app shell, precaching `emu-worker.js` + `emu-core-runner.js` + `input-resolver.js` + `gl-presenter.js`. **Never caches the ROM.** |
+| `app.js` | App-level bootstrap/orchestration: service-worker registration, engine attach/init wiring (attach() builds the main-thread WebGL presenter on `#screen`; no worker, no canvas transfer), iOS bounce/pinch gesture suppression, and the always-visible on-screen debug banner (WASM core status, ROM fetch status, and a `window.onerror`/`unhandledrejection` listener that prints uncaught JS/WASM errors on screen). Status/errors only - adds no emulation, memory-write, cheat, or level-select capability. |
+| `tas-engine.js` | The **single-thread main-thread engine** (`window.TASEngine`). **Owns** one `EmuCoreRunner`, one in-process `InputResolver`, and one `GLPresenter`, and drives them from **one `requestAnimationFrame` loop** (read input → `retro_run` → update HUD → `texSubImage2D` + `drawArrays`, one present per rAF). Exposes `currentFrame`/`status`/`coreStatus`/`romStatus`/`engineStatus`/`activeCoreId`/`videoPath` for the banner + piano-roll + HUD. **No** `new Worker`/`postMessage`/`MessageChannel`/`OffscreenCanvas`. |
+| `emu-core-runner.js` | The **DOM-free libretro core runner** (now driven on the main thread): dynamic-imports the core, fetches the ROM (`encodeURI`), `cwrap`s the `retro_*` ABI, installs env/video/audio/input callbacks, runs the target-time accumulator loop (synchronous snes9x; ASYNCIFY bsnes awaits `retro_run`), decodes the framebuffer to RGBA, save/load, and cached read-only WRAM/HUD reads. Dependency-injected + unit-testable in Node with a mock core. |
+| `input-resolver.js` | The **deterministic input resolver** (in-process): wraps the authoritative `InputLog` and resolves `(log.getMask(frame) \| liveMask) >>> 0`; applies the scripted-edit op protocol. Pure, DOM-free, unit-testable. |
+| `piano-roll.js` | The TAS Studio UI (`TASStudio`): piano-roll input editor (cell toggle → local mirror log **+** `engine.sendInputEdit()`), frame-control toolbar, save-state tree with re-record truncation, and the per-animation-frame live-mask stream via `engine.sendLiveMask()`. Owns a local **mirror** `InputLog` (for grid rendering) and the `LiveInput`. |
+| `input-log.js` | Pure, DOM-free per-frame input log (`InputLog`): a libretro joypad bitmask per frame, plus the `truncateAfter` re-record primitive. Used as the engine's authoritative log **and** the UI's render mirror. Unit-testable in Node. |
+| `live-input.js` | Real-time controller input (`LiveInput`): HTML5 Gamepad API polling + on-screen touch controls; its mask is streamed to the engine and OR-ed into the frame `retro_run` runs next. |
+| `gl-presenter.js` | The **WebGL video presenter**: one texture + one program + one quad, created once; per-frame `texSubImage2D` + `drawArrays` (a `texImage2D` realloc only on geometry change). Built on the DOM canvas via `createGLPresenter(canvas, 'main')` - labels `main-webgl2`/`main-webgl1`. Returns `null` when WebGL is unavailable so the engine falls back to a 2D context (`main-2d`). |
+| `memory-watch.js` | Read-only Live HUD: renders Mario X/Y sub-pixel, horizontal speed, and the frame counter from the runner's cached read-only WRAM view via `engine.getMemoryView()` (observation only). |
+| `core/core-loader.js` | Fetches + instantiates the Emscripten libretro core **on the main thread**; degrades gracefully when absent. |
+| `sw.js` | Service worker (`tas-studio-v22`): cache-first offline app shell, precaching `tas-engine.js` + `emu-core-runner.js` + `input-resolver.js` + `gl-presenter.js`. **Never caches the ROM.** |
 | `manifest.json` | PWA manifest: standalone, landscape, dark theme, icons. |
 | `styles.css` | Studio UI + low-opacity on-screen touch controls. |
 | `icons/` | PWA icons (placeholder solids; regenerate with `tools/make-icons.js`). |
-| `cores/` | Bundled from-source **bsnes-mercury** WASM cores — **accuracy** (`bsnes_mercury_accuracy_libretro.*`, `EXPORT_NAME=bsnes_accuracy`) and **performance** (`bsnes_mercury_performance_libretro.*`, `EXPORT_NAME=bsnes_performance`), plus `core.json`, `build.json`, GPLv3 `license.txt` — **committed** and deployed. Both are ASYNCIFY builds so `retro_run` yields (proven by `tools/run-smoke.mjs`) and are selectable from the toolbar **Core** dropdown. |
+| `cores/` | Bundled from-source **bsnes-mercury** WASM cores - **accuracy** (`bsnes_mercury_accuracy_libretro.*`, `EXPORT_NAME=bsnes_accuracy`) and **performance** (`bsnes_mercury_performance_libretro.*`, `EXPORT_NAME=bsnes_performance`), plus `core.json`, `build.json`, GPLv3 `license.txt` - **committed** and deployed. Both are ASYNCIFY builds so `retro_run` yields (proven by `tools/run-smoke.mjs`) and are selectable from the toolbar **Core** dropdown. |
 | `assets/` | **Runtime drop location** for the ROM. Not committed. |
 
 ### Verified libretro ABI hooks (from `libretro.h`)

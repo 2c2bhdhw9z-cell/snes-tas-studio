@@ -15,7 +15,6 @@ const need = [
   'fps-meter.js',
   'tas-engine.js',
   'gl-presenter.js',
-  'emu-worker.js',
   'emu-core-runner.js',
   'input-resolver.js',
   'piano-roll.js',
@@ -40,7 +39,7 @@ const version = (sw.match(/CACHE_VERSION\s*=\s*'([^']+)'/) || [])[1];
 // The cache version MUST bump whenever a precached shell file (e.g. core/core-loader.js)
 // changes, otherwise returning users' service worker keeps serving the OLD file. Pin the
 // expected version so an un-bumped edit is caught here.
-const EXPECTED_VERSION = 'tas-studio-v21';
+const EXPECTED_VERSION = 'tas-studio-v22';
 const versionOk = version === EXPECTED_VERSION;
 if (!versionOk) {
   console.log(`CACHE_VERSION mismatch: expected ${EXPECTED_VERSION}, got ${version}`);
