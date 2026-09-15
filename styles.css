@@ -43,20 +43,36 @@ body {
   overflow: hidden;
 }
 
+/* Base layout: a single #sidebar element holds all the tools (frame controls, HUD,
+   save-state tree, piano roll). Portrait stacks stage over sidebar; landscape puts them
+   side by side (see the orientation media queries below). */
 #app {
   display: grid;
-  grid-template-columns: 1fr 300px;
-  grid-template-rows: auto auto 1fr auto auto;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto auto auto 1fr;
   grid-template-areas:
-    "banner banner"
-    "notice notice"
-    "stage  side"
-    "controls controls"
-    "pianoroll pianoroll";
+    "banner"
+    "notice"
+    "stage"
+    "sidebar";
   gap: 8px;
   height: 100vh;
   height: 100dvh;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+/* The tools sidebar: a flex column that stacks frame-controls, the HUD/save-state side
+   panel, and the piano roll. It is the single scroll container for the tools. */
+#sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
 }
 
 /* Always-visible on-screen debug banner (populated by app.js). Sits at the very top and
@@ -223,9 +239,8 @@ body {
 .dpad .right { grid-column: 3; grid-row: 2; }
 .dpad .down { grid-column: 2; grid-row: 3; }
 
-/* Side panel: HUD + save-state tree */
+/* Side panel: HUD + save-state tree (a child of #sidebar). */
 #side {
-  grid-area: side;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -289,9 +304,8 @@ body {
   font-weight: 600;
 }
 
-/* Frame controls toolbar */
+/* Frame controls toolbar (a child of #sidebar). */
 #frame-controls {
-  grid-area: controls;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -361,9 +375,8 @@ body {
 #frame-controls select#core-select:hover { border-color: var(--accent); }
 #frame-controls select#core-select:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* Piano roll */
+/* Piano roll (a child of #sidebar). */
 #piano-roll {
-  grid-area: pianoroll;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -475,18 +488,16 @@ body {
    height while preserving 8:7); the side panel, frame controls, and piano roll occupy the
    right column and scroll there. The canvas is never overlapped or crushed into a corner. */
 
-/* PORTRAIT — stacked, canvas on top full width. */
+/* PORTRAIT — stacked: canvas on top full width at 8:7, tools sidebar below (scrolls). */
 @media (orientation: portrait) {
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto auto auto auto;
+    grid-template-rows: auto auto auto 1fr;
     grid-template-areas:
       "banner"
       "notice"
       "stage"
-      "side"
-      "controls"
-      "pianoroll";
+      "sidebar";
   }
   /* Canvas full width, height derived from the 8:7 aspect so it never overflows. */
   #stage {
@@ -499,52 +510,88 @@ body {
     height: 100%;
     max-height: 100%;
   }
-  #side {
-    max-height: 30vh;
-  }
-  #piano-roll {
+  /* In portrait the tools stack under the canvas; the piano roll keeps an inner scroll so a
+     long timeline does not push everything off-screen. */
+  #sidebar > #piano-roll {
     max-height: 40vh;
+    overflow: auto;
   }
 }
 
-/* LANDSCAPE — 2-column: canvas left, controls/piano roll right. */
+/* LANDSCAPE — 2 panes: the game canvas DOMINATES the left (majority width, 8:7 aspect,
+   never crushed), and ONE fixed-width, independently scrollable sidebar on the right stacks
+   ALL the tools (frame controls + core/speed, Live HUD, save-state tree, piano roll).
+
+   Layout: the debug banner and notice rows still span the full width. Below them, a single
+   grid row holds two columns: a wide `stage` (majority) and a `sidebar` (fixed width). The
+   left `stage` spans the whole content row as one tall pane; the right `sidebar` is one
+   scroll container (overflow-y:auto) holding the stacked tools, so scrolling the tools never
+   steals width from or shrinks the canvas. */
 @media (orientation: landscape) {
   #app {
-    grid-template-columns: 1fr minmax(280px, 360px);
-    grid-template-rows: auto auto 1fr auto;
+    /* fixed-width right sidebar; the left (1.5fr) stage gets the majority of the width. */
+    grid-template-columns: 1.5fr minmax(300px, 360px);
+    grid-template-rows: auto auto 1fr;
     grid-template-areas:
-      "banner   banner"
-      "notice   notice"
-      "stage    side"
-      "controls pianoroll";
-  }
-  /* The stage fills the left column and full height; the canvas scales to the stage while
-     keeping its 8:7 aspect (height:100% + width:auto via the base #screen rule) so it never
-     shrinks into a corner and never overlaps the right column. */
-  #stage {
+      "banner  banner"
+      "notice  notice"
+      "stage   sidebar";
     min-height: 0;
+  }
+
+  /* Left pane: the stage owns the whole content row and the majority of the width. The
+     canvas scales to fit while keeping 8:7 (see #screen below), centred, never overflowing
+     and never overlapped by the sidebar. */
+  #stage {
+    grid-area: stage;
+    min-height: 0;
+    min-width: 0;
     height: 100%;
+    width: 100%;
   }
-  /* Right-column regions each get their own scroll area so nothing pushes the canvas. */
-  #side {
+  /* Keep the canvas at its true 8:7 aspect, fitted to whichever of the stage's dimensions is
+     the binding constraint (tall-and-narrow vs short-and-wide landustape phones both work).
+     max-width/height:100% clamp it inside the stage; aspect-ratio keeps 256x224 proportions;
+     margin:auto centres it. This also un-squishes the #touch-controls overlay, which is
+     inset:0 over #stage. */
+  #screen {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    aspect-ratio: 8 / 7;
+    margin: auto;
+  }
+
+  /* The #sidebar itself is the single independent scroll area (base rule sets overflow-y:
+     auto + flex column). In landscape the tools inside stack at natural height and scroll
+     together; none imposes its own inner scroll or max-height, so scrolling them never
+     steals width from or shrinks the canvas. */
+  #sidebar > #frame-controls,
+  #sidebar > #side,
+  #sidebar > #piano-roll {
+    flex: 0 0 auto;
     max-height: none;
-    grid-area: side;
+    height: auto;
+    overflow: visible;
   }
-  #piano-roll {
-    grid-area: pianoroll;
-    max-height: none;
-    height: 100%;
-  }
-  #frame-controls {
-    grid-area: controls;
+  /* Long input timelines can still scroll horizontally within the sidebar. */
+  #sidebar > #piano-roll {
+    overflow-x: auto;
   }
 }
 
-/* Very narrow landscape (small phones on their side): keep the split but let the right
-   column shrink a little so the canvas keeps usable width. */
-@media (orientation: landscape) and (max-height: 420px) {
+/* Very short landscape (small phones on their side, height ~390-430px): the right sidebar
+   scrolls on its own and the canvas fits the available height. Reconciles the old
+   max-height:420px tweak: instead of clamping the canvas, we simply keep the sidebar a touch
+   narrower so the 8:7 canvas keeps usable width. */
+@media (orientation: landscape) and (max-height: 430px) {
   #app {
-    grid-template-columns: 1fr minmax(240px, 300px);
+    grid-template-columns: 1.5fr minmax(260px, 320px);
+  }
+  /* The canvas is bound by height on short screens; 8:7 + max-height keeps it fitted. */
+  #screen {
+    max-height: 100%;
   }
 }
 

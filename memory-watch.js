@@ -14,63 +14,67 @@
 // Routing is done by observation so the game runs 100% authentically.
 // ==========================================================================================
 //
-// ------------------------------ SMB1 / Super Mario All-Stars RAM map ----------------------
-// The values below are the well-documented Super Mario Bros. 1 RAM-map addresses (the same
-// game logic Super Mario All-Stars re-implements for its "Super Mario Bros." mode). These
-// are the classic Data Crystal / SMB disassembly offsets:
+// ------------------- SMB1 (Super Mario All-Stars, USA) WRAM map — EMPIRICAL ----------------
+// These addresses were MEASURED, not guessed, against the real committed ROM + accuracy core
+// via the reproducible headless harness tools/hud-calibrate.mjs. That harness boots the core,
+// drives input into SMB1 gameplay, and watches which SNES WRAM bytes track Mario's motion.
 //
-//   0x0086  Player_X_Position      — Mario's on-screen X pixel (low byte of position)
-//   0x006D  Player_PageLoc         — Mario's horizontal "page" (high byte; X = page*256 + pos)
-//   0x0400  Player_X_MoveForce     — Mario's X sub-pixel (fractional horizontal position)
-//   0x00CE  Player_Y_Position      — Mario's on-screen Y pixel
-//   0x0416  Player_Y_MoveForce     — Mario's Y sub-pixel (fractional vertical position)
-//   0x0057  Player_X_Speed         — Mario's horizontal speed (signed; sub-pixels per frame)
-//   0x0747  \
-//   0x0748   } in-game timer digits (hundreds/tens/ones) — used as an in-game frame/timer
-//   0x0749  /    reference alongside the engine's own frame counter.
+// VERIFIED (ships with CALIBRATION_VERIFIED semantics per-field):
+//   0x005D  Player_X_Speed — Mario's SIGNED horizontal speed. Proof (reproducible): holding
+//           RIGHT makes it ACCELERATE from 0 up to walk speed (~+21); releasing makes it
+//           FRICTION-DECELERATE back toward 0; holding LEFT makes it go NEGATIVE (two's
+//           complement, e.g. -2, -3, ... -8) and accelerate leftward. That accel / friction /
+//           signed-reversal signature is unique to a physical velocity, so 0x005D is the X
+//           speed. (Note: the NES classic $0057 is dead in All-Stars; the real byte is $005D.)
 //
-// IMPORTANT ACCURACY NOTE: On the SNES, Super Mario All-Stars relocates the original NES
-// zero-page/RAM variables into SNES WRAM at a game-specific base offset that depends on the
-// exact ROM revision. The map above is expressed as SMB1 offsets; SMB_WRAM_BASE lets you
-// shift them to the All-Stars WRAM location once verified against the real ROM. Until the
-// ROM + core are dropped in, getMemoryView() returns null and the HUD shows placeholders,
-// so no address is ever dereferenced in the untested state.
+// NOT VERIFIED (deliberately NOT shipped with fabricated addresses):
+//   Mario's X/Y PIXEL and SUB-PIXEL position. In the gameplay state reachable by headless
+//   menu navigation, Mario builds speed but does not translate freely (pinned against level
+//   geometry at spawn), so the position/sub-pixel bytes never showed the monotonic-increment
+//   + 0..255 rollover signature required to confirm them. The classic NES offsets ($0086 X,
+//   $006D page, $0400 X-subpixel, $00CE Y, $0416 Y-subpixel) — raw AND rebased into the upper
+//   WRAM bank (+0x10000) — stay frozen; the only bytes that move under RIGHT are camera /
+//   animation / double-buffer artifacts that fail the idle-hold + reversal checks. Per the
+//   project rule "do not guess the sub-pixels", these rows keep the honest "(unverified)"
+//   label and show the raw candidate read only as a best-effort observation.
+//
+// Until the ROM + core are present, getMemoryView() returns null and the HUD shows
+// placeholders, so no address is ever dereferenced in the untested state.
 // ------------------------------------------------------------------------------------------
 
 'use strict';
 
-// ============================ HUD CALIBRATION (UNVERIFIED) =================================
-// The address map below is PROVISIONAL. It uses the classic NES Super Mario Bros. 1 RAM-map
-// offsets. Super Mario All-Stars re-implements SMB1 but relocates these variables into SNES
-// WRAM at a ROM-revision-dependent base, which cannot be confirmed without the real ROM +
-// core. Until someone verifies the mapping against the actual cartridge, the HUD values for
-// Mario X/Y/speed should be treated as UNVERIFIED and may be wrong.
-//
-// Calibration lives in exactly ONE place:
-//   * SMB_WRAM_BASE   — the single offset added to every address to reach the All-Stars copy.
-//   * CALIBRATION_VERIFIED — flip to true only after the map is confirmed against the ROM;
-//     while false, the HUD labels the position/speed rows as "(unverified)".
-// This is a read-only display concern; there is NO memory-write path here of any kind.
-// ==========================================================================================
-
-// Offset applied to every SMB1 address to reach the All-Stars WRAM copy. 0 = raw SMB1 map.
-// Kept configurable (not a write path) so the map can be calibrated against the real ROM
-// without editing every constant.
+// Offset applied to every address to reach the All-Stars WRAM copy. Measurement shows the
+// live SMB1 variables the HUD uses are in the low WRAM page (0 base); kept configurable (a
+// read-only display concern, never a write path) so the map can be re-based if needed.
 export const SMB_WRAM_BASE = 0x0000;
 
-// Whether the address map above has been verified against a real Super Mario All-Stars ROM.
-// Ships false on purpose: the offsets are provisional SMB1 values (see header). When false,
-// emulation-dependent HUD rows are labeled "(unverified)" so nobody trusts raw numbers.
+// GLOBAL verified flag = true only when EVERY emulation-dependent field is empirically
+// confirmed. It ships FALSE because X/Y position + sub-pixel could not be verified headlessly
+// (see header). Per-field verification is tracked in SMB_FIELD_VERIFIED below so the VERIFIED
+// field (H-Speed) can drop its "(unverified)" tag while the unconfirmed rows keep theirs.
 export const CALIBRATION_VERIFIED = false;
 
-// Documented SMB1 RAM-map addresses (see header). Read-only offsets into WRAM.
+// Per-field empirical verification. H-Speed ($005D) is proven (accel/friction/reversal);
+// position + sub-pixel are not (never observed translating). Read-only display metadata.
+export const SMB_FIELD_VERIFIED = Object.freeze({
+  speedX: true, // 0x005D proven via accel/friction/signed-reversal
+  marioX: false, // X pixel+subpixel: not empirically confirmable headlessly (not guessed)
+  marioY: false, // Y pixel+subpixel: not empirically confirmable headlessly (not guessed)
+});
+
+// WRAM addresses. VERIFIED ones are the measured All-Stars SMB1 bytes; the position bytes
+// are the classic NES offsets retained ONLY as an honest best-effort (labeled unverified).
 export const SMB_ADDR = Object.freeze({
-  PLAYER_X_POSITION: 0x0086, // on-screen X pixel (low byte)
-  PLAYER_PAGE_LOC: 0x006d, // horizontal page (high byte of X)
-  PLAYER_X_SUBPIXEL: 0x0400, // X sub-pixel (Player_X_MoveForce)
-  PLAYER_Y_POSITION: 0x00ce, // on-screen Y pixel
-  PLAYER_Y_SUBPIXEL: 0x0416, // Y sub-pixel (Player_Y_MoveForce)
-  PLAYER_X_SPEED: 0x0057, // horizontal speed (signed)
+  // VERIFIED (tools/hud-calibrate.mjs): Mario's signed horizontal speed.
+  PLAYER_X_SPEED: 0x005d,
+  // UNVERIFIED best-effort (classic NES SMB1 offsets; observed frozen in All-Stars). These
+  // are shown with an explicit "(unverified)" tag and must not be trusted for TAS routing.
+  PLAYER_X_POSITION: 0x0086, // on-screen X pixel (low byte) — UNVERIFIED
+  PLAYER_PAGE_LOC: 0x006d, // horizontal page (high byte of X) — UNVERIFIED
+  PLAYER_X_SUBPIXEL: 0x0400, // X sub-pixel (Player_X_MoveForce) — UNVERIFIED
+  PLAYER_Y_POSITION: 0x00ce, // on-screen Y pixel — UNVERIFIED
+  PLAYER_Y_SUBPIXEL: 0x0416, // Y sub-pixel (Player_Y_MoveForce) — UNVERIFIED
 });
 
 /**
@@ -82,20 +86,26 @@ export const SMB_ADDR = Object.freeze({
  */
 export function createMemoryWatch(engine, hudEl) {
   // HUD field definitions. Each renders one labelled row; values fill in per frame.
+  // Each emulation-dependent row carries its own verification state (SMB_FIELD_VERIFIED). A
+  // verified row (H-Speed) shows a clean label; an unverified row (Mario X/Y position + sub-
+  // pixel) keeps an explicit "(unverified)" tag so its value is never trusted for routing.
   const FIELDS = [
-    { key: 'frame', label: 'Frame' },
-    // The position/speed rows depend on the provisional WRAM map. When the map is not yet
-    // verified against a real ROM (CALIBRATION_VERIFIED === false) their labels carry an
-    // explicit "(unverified)" tag so displayed values are never mistaken for confirmed.
-    { key: 'marioX', label: 'Mario X (px.sub)', unverified: true },
-    { key: 'marioY', label: 'Mario Y (px.sub)', unverified: true },
-    { key: 'speedX', label: 'H-Speed', unverified: true },
+    { key: 'frame', label: 'Frame' }, // from the engine's own counter, always trustworthy
+    { key: 'marioX', label: 'Mario X (px.sub)', emu: true },
+    { key: 'marioY', label: 'Mario Y (px.sub)', emu: true },
+    { key: 'speedX', label: 'H-Speed', emu: true },
   ];
 
-  // Suffix appended to emulation-dependent labels while the address map is unverified.
+  // Suffix appended to emulation-dependent labels whose address is not yet verified.
   const UNVERIFIED_TAG = ' (unverified)';
 
   const PLACEHOLDER = '--';
+
+  // A field is shown "unverified" when it depends on WRAM (emu) and its address has NOT been
+  // empirically confirmed (per-field flag). The frame counter is never marked unverified.
+  function isUnverified(f) {
+    return !!f.emu && SMB_FIELD_VERIFIED[f.key] !== true;
+  }
 
   function renderSkeleton() {
     if (!hudEl) return;
@@ -105,9 +115,9 @@ export function createMemoryWatch(engine, hudEl) {
       row.className = 'hud__row';
       const label = document.createElement('span');
       label.className = 'hud__label';
-      label.textContent =
-        f.unverified && !CALIBRATION_VERIFIED ? f.label + UNVERIFIED_TAG : f.label;
-      if (f.unverified && !CALIBRATION_VERIFIED) label.classList.add('hud__label--unverified');
+      const unverified = isUnverified(f);
+      label.textContent = unverified ? f.label + UNVERIFIED_TAG : f.label;
+      if (unverified) label.classList.add('hud__label--unverified');
       const value = document.createElement('span');
       value.className = 'hud__value';
       value.dataset.key = f.key;

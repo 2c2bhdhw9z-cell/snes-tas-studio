@@ -14,6 +14,7 @@
     "test:precache": "node precache-check.mjs",
     "test:coreurl": "node core-url-resolve.test.mjs",
     "coreprobe": "node core-probe.mjs",
+    "hud:calibrate": "node hud-calibrate.mjs",
     "test:runsmoke": "node run-smoke.mjs",
     "test:runsmoke:accuracy": "node run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12",
     "test:runsmoke:performance": "node run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12",

@@ -69,21 +69,13 @@
         </div>
       </section>
 
-      <!-- Side panel: Live HUD + save-state tree. -->
-      <aside id="side">
-        <div class="panel">
-          <h2 class="panel__title">Live HUD (read-only)</h2>
-          <div id="hud"></div>
-        </div>
-        <div class="panel">
-          <h2 class="panel__title">Save-State Tree</h2>
-          <div id="savestate-tree">
-            <div class="savestate-empty">No states yet.</div>
-          </div>
-        </div>
-      </aside>
-
-      <!-- Frame control toolbar + piano-roll timeline. -->
+      <!-- Tools sidebar: in landscape this is ONE fixed-width, independently scrollable
+           column on the right (frame controls, Live HUD, save-state tree, piano roll). In
+           portrait it stacks below the canvas. Wrapping the tools in a single element is what
+           makes the landscape "scroll the tools without shrinking the canvas" behaviour clean
+           (the sidebar is the only scroll container; the canvas keeps its 8:7 aspect). -->
+      <div id="sidebar">
+      <!-- Frame control toolbar (kept first so TAS buttons + core/speed are at the top). -->
       <div id="frame-controls">
         <!-- Core selection: emulator-accuracy choice only (NOT a ROM/level picker). Defaults
              to Accuracy; switching swaps the WASM core live. Options are populated from the
@@ -109,10 +101,26 @@
         <span id="frame-counter" class="speed-group">Frame: 0</span>
       </div>
 
+      <!-- Live HUD + save-state tree. -->
+      <aside id="side">
+        <div class="panel">
+          <h2 class="panel__title">Live HUD (read-only)</h2>
+          <div id="hud"></div>
+        </div>
+        <div class="panel">
+          <h2 class="panel__title">Save-State Tree</h2>
+          <div id="savestate-tree">
+            <div class="savestate-empty">No states yet.</div>
+          </div>
+        </div>
+      </aside>
+
       <!-- Piano-roll timeline (populated in FEAT-002). -->
       <div id="piano-roll" aria-label="Per-frame input timeline">
         <div class="piano-roll__empty">Piano-roll input editor loads with the ROM.</div>
       </div>
+      </div>
+      <!-- /#sidebar -->
     </div>
 
     <!-- Engine + Studio UI + HUD as ES modules. Order does not matter for modules (deferred). -->
