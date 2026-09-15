@@ -89,9 +89,59 @@ function renderFps() {
   renderBanner();
 }
 
+// Cached banner DOM so the per-frame render MUTATES existing text nodes instead of rebuilding
+// the whole banner every frame. renderBanner() runs up to 60x/sec (once per emulated frame),
+// so the old `el.innerHTML = '' + createElement x5` churned ~300 DOM nodes/sec and forced a
+// full layout each time — a per-frame allocation + layout-thrash leak contributing to the
+// steady FPS decay. We now build the skeleton ONCE, cache the value text nodes, and update a
+// node's textContent ONLY when its value actually changed (no churn, no needless layout).
+const bannerDom = {
+  el: null, // the #debug-banner container the skeleton was built into
+  values: null, // { core, rom, engine, fps, err } -> the Text node holding each value
+  items: null, // { err } -> the wrapper span (for the per-error class toggle)
+  last: { core: null, rom: null, engine: null, fps: null, err: null, hasError: null, errItem: null },
+};
+
+function buildBannerSkeleton(el) {
+  el.innerHTML = '';
+  const values = {};
+  const items = {};
+  const mk = (key, label, extraClass) => {
+    const span = document.createElement('span');
+    span.className = 'debug-banner__item' + (extraClass ? ' ' + extraClass : '');
+    const strong = document.createElement('strong');
+    strong.textContent = label + ': ';
+    span.appendChild(strong);
+    const value = document.createTextNode('');
+    span.appendChild(value);
+    el.appendChild(span);
+    values[key] = value;
+    items[key] = span;
+  };
+  mk('core', 'Core');
+  mk('rom', 'ROM');
+  mk('engine', 'Engine');
+  mk('fps', 'FPS');
+  mk('err', 'Err');
+  bannerDom.el = el;
+  bannerDom.values = values;
+  bannerDom.items = items;
+  bannerDom.last = { core: null, rom: null, engine: null, fps: null, err: null, hasError: null, errItem: null };
+}
+
+// Update a cached Text node only when its value changed (avoids needless layout invalidation).
+function setBannerText(key, text) {
+  if (bannerDom.last[key] !== text) {
+    bannerDom.values[key].nodeValue = text;
+    bannerDom.last[key] = text;
+  }
+}
+
 function renderBanner() {
   const el = document.getElementById('debug-banner');
   if (!el) return;
+  // Build (or rebuild if the element was replaced) the skeleton once, then mutate in place.
+  if (bannerDom.el !== el || !bannerDom.values) buildBannerSkeleton(el);
 
   const errLine =
     bannerState.errors.length > 0
@@ -99,28 +149,25 @@ function renderBanner() {
       : 'none';
   const hasError = bannerState.errors.length > 0 || /Failed|Error|HTTP/.test(bannerState.rom + bannerState.core);
 
-  el.classList.toggle('debug-banner--error', hasError);
-  el.innerHTML = '';
+  if (bannerDom.last.hasError !== hasError) {
+    el.classList.toggle('debug-banner--error', hasError);
+    bannerDom.last.hasError = hasError;
+  }
 
-  const mk = (label, value, extraClass) => {
-    const span = document.createElement('span');
-    span.className = 'debug-banner__item' + (extraClass ? ' ' + extraClass : '');
-    const strong = document.createElement('strong');
-    strong.textContent = label + ': ';
-    span.appendChild(strong);
-    span.appendChild(document.createTextNode(value));
-    return span;
-  };
-
-  el.appendChild(mk('Core', bannerState.core));
-  el.appendChild(mk('ROM', bannerState.rom));
+  setBannerText('core', bannerState.core);
+  setBannerText('rom', bannerState.rom);
   // Engine lifecycle + live frame counter, exactly as:  Engine: [state] | Frame: [N]
-  el.appendChild(mk('Engine', `${bannerState.engine} | Frame: ${bannerState.frame}`));
+  setBannerText('engine', `${bannerState.engine} | Frame: ${bannerState.frame}`);
   // Live measured FPS (rolling 1-second window of actual advanced frames).
-  el.appendChild(mk('FPS', String(bannerState.fps)));
-  el.appendChild(
-    mk('Err', errLine, bannerState.errors.length > 0 ? 'debug-banner__item--err' : '')
-  );
+  setBannerText('fps', String(bannerState.fps));
+  setBannerText('err', errLine);
+
+  // Toggle the error class on the Err item only when it changes.
+  const errItem = bannerState.errors.length > 0;
+  if (bannerDom.last.errItem !== errItem) {
+    bannerDom.items.err.classList.toggle('debug-banner__item--err', errItem);
+    bannerDom.last.errItem = errItem;
+  }
 }
 
 function recordError(message) {

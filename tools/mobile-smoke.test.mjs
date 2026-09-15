@@ -122,7 +122,13 @@ check('#fps-readout styled prominent (bold, accent, tabular-nums)', /\.fps-reado
 check('app.js sources FPS from a rolling-window FpsMeter', /new\s+FpsMeter\(/.test(appSrc));
 check('app.js ticks the FPS meter on each advanced frame (fpsMeter.tick)', /fpsMeter\.tick\(/.test(appSrc));
 check('app.js renders the FPS readout element (#fps-readout text)', /getElementById\(\s*['"]fps-readout['"]\s*\)/.test(appSrc));
-check('debug banner carries an FPS field', /mk\(\s*['"]FPS['"]/.test(appSrc));
+check('debug banner carries an FPS field', /mk\(\s*['"]fps['"]\s*,\s*['"]FPS['"]/.test(appSrc));
+// DOM-REUSE (steady-decay fix): the per-frame banner render must MUTATE cached text nodes,
+// not rebuild the banner every frame. renderBanner() runs up to 60x/sec (once per onFrame), so
+// a per-frame `innerHTML=''` + createElement x5 would churn ~300 nodes/sec + force full layout.
+check('app.js builds the banner skeleton once (buildBannerSkeleton) and caches value nodes', /buildBannerSkeleton\s*\(/.test(appSrc) && /bannerDom\.values/.test(appSrc));
+check('app.js updates banner text via a change-detecting cached-node setter (setBannerText)', /function\s+setBannerText\s*\(/.test(appSrc) && /nodeValue\s*=/.test(appSrc));
+check('renderBanner() does NOT rebuild the banner every call (no unconditional innerHTML reset in the frame path)', !/renderBanner\s*\(\s*\)\s*\{[\s\S]*?\bel\.innerHTML\s*=\s*['"]{2}/.test(appSrc));
 
 // ROM fetch uses encodeURI so Safari does not 400/404 on spaces/parens. The fetch now lives
 // in the worker-side core runner (emu-core-runner.js), not the main-thread proxy.

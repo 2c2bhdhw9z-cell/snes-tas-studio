@@ -47,6 +47,15 @@ export const ROM_PATH = 'assets/Super Mario All-Stars (USA).sfc';
 // RETRO_MEMORY_SYSTEM_RAM — the id passed to retro_get_memory_data/size for WRAM.
 const RETRO_MEMORY_SYSTEM_RAM = 2;
 
+// HARD catch-up clamp for the target-time run loop (the death-spiral fix). The accumulator
+// runs AT MOST this many retro_run per pump turn to catch up to real time; if it is still
+// behind after that, it FRAME-SKIPS (snaps the due-time anchor forward to now) instead of
+// bursting more frames. On a device that keeps up this is one frame per due interval (steady
+// real-time 60). It is deliberately tiny (2) so a mobile CPU dip can never trigger a large
+// catch-up burst that costs more than its time budget and ratchets the framerate down.
+// Fast-forward (a user-opted fixed burst) is a separate path and is NOT governed by this.
+const MAX_CATCHUP_FRAMES = 2;
+
 // The subset of RETRO_ENVIRONMENT_* commands this frontend explicitly handles. Every other
 // command is answered fail-closed (false). Copied verbatim from the original main-thread
 // engine so the extracted runner boots real cores identically (proven by run-smoke.mjs).
@@ -887,17 +896,23 @@ export class EmuCoreRunner {
     }
 
     const frameMs = this._baseFrameMs / this.speed;
-    let guard = 0;
+    let ran = 0;
     // Target-time accumulator: advance the due-time by exactly one interval per frame so the
-    // loop tracks real time (no fractional shedding). Bounded catch-up prevents a stall spiral.
-    while (now - this._nextFrameTime >= 0 && guard < 10) {
+    // loop tracks real time (no fractional shedding). Catch-up is HARD-CLAMPED to at most
+    // MAX_CATCHUP_FRAMES per tick (death-spiral fix): on a device that keeps up this runs
+    // exactly one frame per due interval (real-time 60); on a CPU dip it runs at most a tiny
+    // bounded burst, then FRAME-SKIPS the rest by snapping the anchor forward.
+    while (now - this._nextFrameTime >= 0 && ran < MAX_CATCHUP_FRAMES) {
       this._runOneFrame();
       this._nextFrameTime += frameMs;
-      guard += 1;
+      ran += 1;
     }
-    if (guard >= 10) {
-      // Fell far behind (tab backgrounded, GC pause): resync the anchor to avoid a runaway
-      // catch-up burst on the next turn (bounded, never a 2x over-run).
+    if (now - this._nextFrameTime >= 0) {
+      // Still overdue after the clamp — we are BEHIND real time. Do NOT try to replay the
+      // missed wall-clock by bursting retro_run (that is the spiral: a burst costs more than
+      // its budget, so we fall further behind and ratchet down). Instead FRAME-SKIP: drop the
+      // missed frames' present and re-anchor the clock one interval ahead of now. Emulation
+      // keeps advancing at real time going forward; it just doesn't try to catch up the past.
       this._nextFrameTime = now + frameMs;
     }
   }
@@ -912,13 +927,19 @@ export class EmuCoreRunner {
       this._nextFrameTime = now + this._baseFrameMs / this.speed;
     } else {
       const frameMs = this._baseFrameMs / this.speed;
-      let guard = 0;
-      while (this._now() - this._nextFrameTime >= 0 && guard < 10) {
+      let ran = 0;
+      // Same HARD catch-up clamp as the synchronous path (death-spiral fix): at most
+      // MAX_CATCHUP_FRAMES awaited retro_run per tick, then FRAME-SKIP by re-anchoring the
+      // clock forward rather than bursting to replay missed wall-clock time. Each frame is
+      // still awaited so ASYNCIFY suspensions never overlap (libco constraint).
+      while (this._now() - this._nextFrameTime >= 0 && ran < MAX_CATCHUP_FRAMES) {
         await this._runOneFrame();
         this._nextFrameTime += frameMs;
-        guard += 1;
+        ran += 1;
       }
-      if (guard >= 10) this._nextFrameTime = this._now() + frameMs;
+      if (this._now() - this._nextFrameTime >= 0) {
+        this._nextFrameTime = this._now() + frameMs;
+      }
     }
 
     // Re-arm exactly ONE tick AFTER the awaited work, so only ONE retro_run suspension is ever

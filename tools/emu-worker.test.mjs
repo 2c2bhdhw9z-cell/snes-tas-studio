@@ -317,6 +317,75 @@ await checkAsync('HUD values (verified SMB1 fields) are streamed read-only', asy
   assert.ok('xHi' in hud.msg.values && 'yHi' in hud.msg.values, 'verified SMB1 fields present');
 });
 
+await checkAsync('BACKPRESSURE: fallback video never posts a 2nd undrawn frame (drops/coalesces, never queues)', async () => {
+  scope.__posted.length = 0;
+  const { worker } = makeWorker();
+  await worker._onMessage({ data: { type: 'init' } }); // no offscreen -> fallback video path
+  // Present MANY frames with NO ack in between (models a main thread that has not drawn yet).
+  for (let i = 0; i < 50; i++) {
+    worker._presentFrame(new Uint8ClampedArray(2 * 2 * 4).fill(i & 0xff), 2, 2, 8, 2);
+  }
+  const videos = scope.__posted.filter((p) => p.msg && p.msg.type === 'video');
+  // Only ONE undrawn video frame may be outstanding — the other 49 are DROPPED, not queued.
+  assert.strictEqual(videos.length, 1, `at most one undrawn frame posted (got ${videos.length}; must not queue)`);
+  assert.ok(worker._videoInFlight, 'the in-flight backpressure gate is set while unacked');
+
+  // Now the main thread acks the drawn frame (transferring the buffer back). The gate clears
+  // and exactly one MORE frame may be posted for the next present.
+  const buf = videos[0].msg.buffer;
+  await worker._onMessage({ data: { type: 'videoAck', buffer: buf } });
+  assert.ok(!worker._videoInFlight, 'gate released on ack');
+  worker._presentFrame(new Uint8ClampedArray(2 * 2 * 4).fill(1), 2, 2, 8, 2);
+  const videos2 = scope.__posted.filter((p) => p.msg && p.msg.type === 'video');
+  assert.strictEqual(videos2.length, 2, 'exactly one further frame posted after the ack (still bounded)');
+});
+
+await checkAsync('BUFFER REUSE: acked buffers are pooled and reused (no unbounded per-frame allocation)', async () => {
+  scope.__posted.length = 0;
+  const { worker } = makeWorker();
+  await worker._onMessage({ data: { type: 'init' } });
+  const distinct = new Set();
+  // Present -> ack -> present -> ack ... many times. Each ack returns the buffer for reuse, so
+  // steady state must recycle a tiny fixed set of buffers, NOT allocate a fresh one per frame.
+  let lastBuf = null;
+  for (let i = 0; i < 100; i++) {
+    worker._presentFrame(new Uint8ClampedArray(2 * 2 * 4).fill(i & 0xff), 2, 2, 8, 2);
+    const last = scope.__posted.filter((p) => p.msg && p.msg.type === 'video').pop();
+    if (!last) continue;
+    distinct.add(last.msg.buffer);
+    lastBuf = last.msg.buffer;
+    await worker._onMessage({ data: { type: 'videoAck', buffer: lastBuf } });
+  }
+  // With ack-gated reuse the worker cycles a bounded pool (<= its cap), never ~100 buffers.
+  assert.ok(distinct.size <= worker._VIDEO_POOL_MAX, `buffers reused from a bounded pool (distinct=${distinct.size}, cap=${worker._VIDEO_POOL_MAX})`);
+  assert.ok(distinct.size >= 1, 'at least one buffer was used');
+});
+
+await checkAsync('present NEVER blocks compute: dropping video frames does not stop retro_run/frame emission', async () => {
+  scope.__posted.length = 0;
+  const { worker, shared } = makeWorker();
+  await worker._onMessage({ data: { type: 'init' } });
+  // Never ack. Drive many frame-advances: video frames drop after the first, but the emulator
+  // keeps advancing (frame messages keep flowing) — present is decoupled from compute.
+  for (let i = 0; i < 20; i++) await worker._onMessage({ data: { type: 'frameAdvance' } });
+  const frames = scope.__posted.filter((p) => p.msg && p.msg.type === 'frame');
+  const videos = scope.__posted.filter((p) => p.msg && p.msg.type === 'video');
+  assert.strictEqual(frames.length, 20, 'all 20 frames ran (compute never blocked on present)');
+  assert.strictEqual(videos.length, 1, 'video dropped to a single undrawn frame (best-effort present)');
+  assert.strictEqual(shared.resolvedPerFrame.length, 20, 'all frames resolved deterministic input');
+});
+
+await checkAsync('OffscreenCanvas direct-blit path posts NO video messages and needs no ack gate', async () => {
+  scope.__posted.length = 0;
+  const { worker } = makeWorker();
+  const off = makeFakeOffscreen();
+  await worker._onMessage({ data: { type: 'init', offscreen: off } });
+  for (let i = 0; i < 30; i++) await worker._onMessage({ data: { type: 'frameAdvance' } });
+  assert.ok(off.__blits.length >= 30, 'worker blit directly for every frame on the direct path');
+  assert.strictEqual(scope.__posted.filter((p) => p.msg && p.msg.type === 'video').length, 0, 'no video messages crossed the boundary');
+  assert.ok(!worker._videoInFlight, 'direct path never sets the fallback backpressure gate');
+});
+
 check('unknown / malformed messages are ignored (fail-closed, no throw)', () => {
   const { worker } = makeWorker();
   // These must not throw.

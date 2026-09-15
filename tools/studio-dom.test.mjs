@@ -168,6 +168,24 @@ check('HUD X renders page(0x0043)*256+pixel(0x0042) . sub(0x0401)', hud.querySel
 check('HUD Y renders from streamed values (hi . sub)', hud.querySelector('[data-key="marioY"]').textContent === '176.064');
 check('HUD H-Speed renders the signed streamed value', hud.querySelector('[data-key="speedX"]').textContent === '-16');
 
+// --- DOM-REUSE PROOF: the per-frame HUD update MUTATES cached nodes in place; it does NOT
+// rebuild rows / churn DOM nodes each frame (the layout-thrash leak that fed the FPS decay). ---
+{
+  const marioXNodeBefore = hud.querySelector('[data-key="marioX"]');
+  const rowsBefore = hud.querySelectorAll('.hud__row').length;
+  // Repaint the SAME values many times (models 60x/sec identical frames). Node identity must
+  // be preserved (no createElement/innerHTML rebuild) and row count must not grow.
+  for (let i = 0; i < 60; i++) watch.update();
+  const marioXNodeAfter = hud.querySelector('[data-key="marioX"]');
+  check('HUD update reuses the SAME value node (no per-frame createElement/innerHTML)', marioXNodeBefore === marioXNodeAfter);
+  check('HUD update does not append rows over time (no unbounded DOM growth)', hud.querySelectorAll('.hud__row').length === rowsBefore);
+  // A CHANGED value updates the SAME node in place (mutation, not replacement).
+  worker.__emit({ type: 'hud', values: { hSpeed: 8, xHi: 0x31, xSub: 0x80, xPage: 0x03, yHi: 0xb1, ySub: 0x41 } });
+  watch.update();
+  check('HUD value change mutates the cached node in place', hud.querySelector('[data-key="marioX"]') === marioXNodeBefore);
+  check('HUD value change is reflected (in-place textContent update)', hud.querySelector('[data-key="marioX"]').textContent === '32817.003');
+}
+
 // --- Save-state tree renders a node after Save; save posts a saveState command ---
 worker.__clear();
 document.getElementById('btn-savestate').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));

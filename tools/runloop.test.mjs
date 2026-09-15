@@ -377,12 +377,13 @@ await checkAsync('fps pacing: loop targets the core-declared frame time (_baseFr
   // Advance just over one frame-time of wall clock: the accumulator should release exactly 1.
   pump(runner, state, 1, runner._baseFrameMs + 0.5);
   assert.strictEqual(mock.__runs() - seeded, 1, 'exactly one frame per one frame-time of elapsed wall clock');
-  // Advance ten frame-times at once: paced loop catches up (bounded by the guard) — proving
-  // it targets real time rather than running one frame per tick regardless of elapsed time.
+  // Advance ten frame-times at once in a SINGLE tick: the paced loop advances more than one
+  // frame (proving it targets real time, not one-frame-per-tick), but catch-up is HARD-CLAMPED
+  // to at most 2 per tick (death-spiral fix) — it does NOT burst all ten.
   const before = mock.__runs();
   pump(runner, state, 1, runner._baseFrameMs * 10);
   const caughtUp = mock.__runs() - before;
-  assert.ok(caughtUp >= 5, `paced catch-up advanced multiple frames for 10x elapsed (got ${caughtUp})`);
+  assert.ok(caughtUp >= 1 && caughtUp <= 2, `single-tick catch-up clamped to 1-2 frames for 10x elapsed (got ${caughtUp})`);
 });
 
 // ======================================================================================
@@ -469,27 +470,71 @@ await checkAsync('speed 2x issues ~120 frames per simulated second (double 60), 
   });
 });
 
-await checkAsync('catch-up is bounded: a long stall does NOT trigger a runaway 2x-overrun burst', () => {
+await checkAsync('catch-up is HARD-CLAMPED: a long stall runs AT MOST 2 frames that turn, then FRAME-SKIPS', () => {
   return makeRunner().then(({ runner, mock, state }) => {
     CLOCK = 500000;
     runner.setSpeed(1);
     runner.start();
     // Seed one turn at real cadence, then jump the clock a full simulated second in ONE turn
-    // (models a tab-backgrounded stall). The per-turn guard caps catch-up to <=10 frames.
+    // (models a tab-backgrounded stall / a big CPU dip).
     runFreeRunning(runner, state, 20, 4);
     const before = mock.__runs();
-    // One giant turn: advance the clock 1000ms but fire the tick once.
+    const anchorBefore = runner._nextFrameTime;
+    // One giant turn: advance the clock 1000ms (~60 intervals overdue) but fire the tick once.
     const cb = state.pending;
     state.pending = null;
     CLOCK += 1000;
     cb();
     const burst = mock.__runs() - before;
-    assert.ok(burst <= 10, `single-turn catch-up burst bounded by guard (got ${burst}, must be <=10)`);
+    // DEATH-SPIRAL FIX: the clamp caps catch-up to at most 2 frames — NOT a ~60-frame burst,
+    // NOT the old <=10. A device that fell behind must never try to replay missed wall-clock.
+    assert.ok(burst <= 2, `single-turn catch-up burst HARD-clamped to <=2 (got ${burst})`);
+    // FRAME-SKIP: rather than staying behind (which would burst again next turn), the anchor
+    // was snapped forward to ~now, so the loop is caught up to real time WITHOUT replaying.
+    assert.ok(runner._nextFrameTime > anchorBefore, 'anchor advanced (frame-skip), not left behind');
+    assert.ok(
+      runner._nextFrameTime >= CLOCK,
+      'anchor snapped forward to now+interval (missed frames dropped, not queued)'
+    );
     // And after the resync, normal cadence resumes at ~60 (not a compounding backlog).
     const afterBurst = mock.__runs();
     runFreeRunning(runner, state, 500, 4);
     const resumed = mock.__runs() - afterBurst;
-    assert.ok(resumed >= 26 && resumed <= 34, `~60 fps resumes after a bounded catch-up (got ${resumed} in 0.5s)`);
+    assert.ok(resumed >= 26 && resumed <= 34, `~60 fps resumes after the frame-skip (got ${resumed} in 0.5s)`);
+  });
+});
+
+await checkAsync('DEATH-SPIRAL PROOF: sustained CPU slowness never grows runs-per-tick (bounded, no ratchet)', () => {
+  // Model a device that is CONTINUOUSLY too slow: every pump turn advances the clock by MANY
+  // frame-intervals (the CPU can only turn the pump slowly). The OLD loop would try to catch
+  // up with a burst of up to 10 retro_run per turn — each burst costs more than its budget, so
+  // it falls further behind and ratchets the framerate down (the user's 60->48->...->11 decay).
+  // The clamp+skip must instead cap EVERY turn at <=2 runs and keep re-anchoring, so
+  // runs-per-tick is FLAT (no growth) no matter how far behind the device is.
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 800000;
+    runner.setSpeed(1);
+    runner.start();
+    let maxPerTick = 0;
+    const perTick = [];
+    // 40 turns, each jumping the clock 100ms forward (~6 intervals overdue per turn) — a
+    // device running the pump at only ~10Hz while owing ~60fps of work.
+    for (let i = 0; i < 40 && state.pending; i++) {
+      const before = mock.__runs();
+      const cb = state.pending;
+      state.pending = null;
+      CLOCK += 100;
+      cb();
+      const ran = mock.__runs() - before;
+      perTick.push(ran);
+      if (ran > maxPerTick) maxPerTick = ran;
+    }
+    assert.ok(maxPerTick <= 2, `runs-per-tick never exceeds the clamp under sustained slowness (max ${maxPerTick})`);
+    // No RATCHET: every steady-state turn is bounded by the clamp, so the per-tick cost is FLAT
+    // (a spiral would show later turns running MORE than the clamp as the backlog compounds).
+    // The very first turn does 0-1 (seed), so compare the tail turns' max against the clamp.
+    const tailMax = perTick.slice(5).reduce((a, b) => Math.max(a, b), 0);
+    assert.ok(tailMax <= 2, `steady-state runs-per-tick stays clamped, never ratchets up (tailMax=${tailMax})`);
   });
 });
 

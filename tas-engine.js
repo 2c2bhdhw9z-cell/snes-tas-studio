@@ -316,9 +316,17 @@ class TASEngine {
   // ------------------------------------------------------------------ video (fallback blit)
 
   _blitVideoMessage(msg) {
-    if (!this._ctx || this._usingOffscreen) return;
     const { buffer, width, height } = msg;
-    if (!buffer || !width || !height) return;
+    // Even if we cannot draw (no ctx / offscreen path), ACK so the worker never wedges its
+    // backpressure gate. The buffer is transferred BACK for reuse in the worker's pool.
+    if (!buffer || !width || !height) {
+      if (buffer instanceof ArrayBuffer) this._ackVideo(buffer);
+      return;
+    }
+    if (!this._ctx || this._usingOffscreen) {
+      this._ackVideo(buffer);
+      return;
+    }
     try {
       if (this._fbWidth !== width || this._fbHeight !== height || !this._imageData) {
         this._fbWidth = width;
@@ -334,6 +342,15 @@ class TASEngine {
     } catch (err) {
       console.warn('[TASEngine] video blit failed:', err);
     }
+    // ACK after drawing: transfer the buffer BACK to the worker so it reuses it (no per-frame
+    // allocation) and is unblocked to post the next frame. This ack-gating is the backpressure
+    // that stops the fallback postMessage queue from growing unbounded (the steady-decay fix).
+    this._ackVideo(buffer);
+  }
+
+  /** Return a drawn video buffer to the worker for reuse and release its backpressure gate. */
+  _ackVideo(buffer) {
+    this._postToWorker({ type: 'videoAck', buffer }, [buffer]);
   }
 
   // ------------------------------------------------------------------ status surface

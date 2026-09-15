@@ -178,6 +178,14 @@ export function createMemoryWatch(engine, hudEl) {
   // (verified vs "(unverified)") when the user swaps cores from the dropdown.
   let renderedCoreId = null;
 
+  // Cached value-node references + last-rendered text per field. update() runs once per
+  // emulated frame (up to 60x/sec), so it MUST NOT search the DOM or rewrite text needlessly:
+  // we cache each field's value element at skeleton build and only touch textContent when the
+  // value actually changed. This avoids a per-frame querySelector + layout-thrash leak that
+  // otherwise compounds into the steady FPS decay.
+  const valueEls = Object.create(null);
+  const lastText = Object.create(null);
+
   function activeCoreId() {
     return engine && typeof engine.activeCoreId === 'string' ? engine.activeCoreId : null;
   }
@@ -194,6 +202,9 @@ export function createMemoryWatch(engine, hudEl) {
     if (!hudEl) return;
     renderedCoreId = activeCoreId();
     hudEl.innerHTML = '';
+    // Reset the caches: the skeleton (and thus every value node) is being rebuilt.
+    for (const k of Object.keys(valueEls)) delete valueEls[k];
+    for (const k of Object.keys(lastText)) delete lastText[k];
     for (const f of FIELDS) {
       const row = document.createElement('div');
       row.className = 'hud__row';
@@ -209,13 +220,21 @@ export function createMemoryWatch(engine, hudEl) {
       row.appendChild(label);
       row.appendChild(value);
       hudEl.appendChild(row);
+      // Cache the value node + seed the last-rendered text so the first real value writes once.
+      valueEls[f.key] = value;
+      lastText[f.key] = PLACEHOLDER;
     }
   }
 
+  // Mutate a cached value node's text ONLY when it changed (no per-frame DOM search, no
+  // needless textContent write / layout invalidation).
   function setValue(key, text) {
-    if (!hudEl) return;
-    const el = hudEl.querySelector(`[data-key="${key}"]`);
-    if (el) el.textContent = text;
+    const el = valueEls[key];
+    if (!el) return;
+    if (lastText[key] !== text) {
+      el.textContent = text;
+      lastText[key] = text;
+    }
   }
 
   // Format a signed byte (SMB stores speed as a signed 8-bit value).

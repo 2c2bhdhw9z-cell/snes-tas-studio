@@ -17,6 +17,7 @@
 // IN  (main -> worker):
 //   { type:'init', corePath?, offscreen?:OffscreenCanvas, asyncify? }
 //   { type:'setOffscreen', canvas:OffscreenCanvas }        // transferable
+//   { type:'videoAck', buffer:ArrayBuffer }                // fallback: drawn-frame buffer back (reuse)
 //   { type:'play' } | { type:'pause' } | { type:'frameAdvance' }
 //   { type:'setSpeed', mult } | { type:'fastForward', on }
 //   { type:'setCore', corePath, asyncify? }
@@ -85,6 +86,21 @@ class EmuWorker {
     this._offW = 0;
     this._offH = 0;
 
+    // ---- Fallback video path: BACKPRESSURE + BUFFER REUSE (steady-decay fix) ----
+    // The fallback posts decoded RGBA to the main thread. Two mechanisms prevent the
+    // monotonic FPS decay the user saw:
+    //  (1) BACKPRESSURE: at most ONE undrawn frame is ever outstanding. While a posted frame
+    //      is unacked the worker DROPS newer frames (present is best-effort — video may drop
+    //      intermediate frames; emulation keeps running at 60 regardless). This decouples
+    //      PRESENT from COMPUTE and means a slow drawer causes frame DROPS, never an unbounded
+    //      postMessage queue that bloats memory and thrashes GC.
+    //  (2) BUFFER REUSE: instead of a fresh ~229KB Uint8Array every frame, buffers are pooled
+    //      and the main thread transfers the buffer BACK on ack so the worker reuses it. This
+    //      eliminates the per-frame allocation / GC churn.
+    this._videoInFlight = false; // a posted frame is awaiting a videoAck
+    this._videoPool = []; // reusable ArrayBuffers ping-ponged with the main thread
+    this._VIDEO_POOL_MAX = 3; // small cap; we never need more than a couple in flight
+
     this.runner = null;
     this._corePath = null;
     this._asyncify = false;
@@ -140,15 +156,46 @@ class EmuWorker {
       this._blitOffscreen(rgba, width, height);
       return;
     }
-    // Fallback: copy into a standalone ArrayBuffer and transfer it (zero-copy handoff). We
-    // copy because `rgba` is the runner's reused framebuffer — transferring it would detach
-    // the runner's buffer. A fresh copy keeps the runner's next-frame decode intact.
-    const copy = new Uint8Array(width * height * 4);
-    copy.set(rgba.subarray(0, copy.length));
+    // Fallback path. BACKPRESSURE: if the previous posted frame has not been drawn+acked yet,
+    // DROP this frame (coalesce to the latest). Video is best-effort; the emulator keeps
+    // running at full speed. This is what prevents the postMessage queue from growing unbounded
+    // and dragging the framerate down over time.
+    if (this._videoInFlight) return;
+
+    const need = width * height * 4;
+    // BUFFER REUSE: take a pooled buffer of the right size, else allocate once. We copy because
+    // `rgba` is the runner's reused framebuffer — transferring it would detach the runner's
+    // buffer. The main thread transfers this buffer BACK on ack, so it re-enters the pool and
+    // there is NO per-frame allocation in steady state.
+    let buffer = null;
+    while (this._videoPool.length) {
+      const b = this._videoPool.pop();
+      if (b.byteLength === need) {
+        buffer = b;
+        break;
+      }
+      // Wrong size (geometry changed): drop it and keep looking / allocate fresh.
+    }
+    if (!buffer) buffer = new ArrayBuffer(need);
+
+    new Uint8Array(buffer).set(rgba.subarray(0, need));
+    this._videoInFlight = true;
     this.post(
-      { type: 'video', buffer: copy.buffer, width, height, pitch, pixelFormat },
-      [copy.buffer]
+      { type: 'video', buffer, width, height, pitch, pixelFormat },
+      [buffer]
     );
+  }
+
+  /**
+   * Main thread acks a drawn video frame, transferring the buffer BACK so the worker can
+   * reuse it (buffer pool) and post the next frame. Clears the in-flight gate so the next
+   * present is allowed. Never queues: while in-flight, presents are dropped.
+   */
+  _onVideoAck(buffer) {
+    this._videoInFlight = false;
+    if (buffer instanceof ArrayBuffer && this._videoPool.length < this._VIDEO_POOL_MAX) {
+      this._videoPool.push(buffer);
+    }
   }
 
   _blitOffscreen(rgba, width, height) {
@@ -257,6 +304,11 @@ class EmuWorker {
           this._adoptOffscreen(msg.canvas);
           break;
         }
+        case 'videoAck':
+          // Main thread finished drawing the last fallback frame and transferred its buffer
+          // back for reuse. Release the backpressure gate + pool the buffer.
+          this._onVideoAck(msg.buffer);
+          break;
         case 'play':
           if (this.runner) this.runner.start();
           break;
