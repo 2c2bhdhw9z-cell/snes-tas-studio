@@ -17,7 +17,7 @@
 //   - HUD renders from the engine's READ-ONLY memory view (verified SMB1 addresses)
 //   - save/load: save produces a state node; load restores + fires onStateLoaded so the log
 //     truncates (re-record); no memory-write path
-//   - core-select maps to setCore (in-process teardown+reinit); three cores incl. snes9x
+//   - core-select maps to setCore (in-process teardown+reinit); four cores incl. snes9x
 //     default; no file picker
 //   - the engine created NO worker (single-thread)
 //   - the BLINDFOLD (no-present) diagnostic: the #blindfold-toggle checkbox exists in
@@ -290,6 +290,7 @@ const coreOptionValues = coreSelect
   : [];
 check('core-select has a Real-Time (snes9x) option', coreOptionValues.includes('realtime'));
 check('core-select has an Accuracy option', coreOptionValues.includes('accuracy'));
+check('core-select has a Balanced option', coreOptionValues.includes('balanced'));
 check('core-select has a Performance option', coreOptionValues.includes('performance'));
 check('Real-Time (snes9x) is the first/default option', coreOptionValues[0] === 'realtime');
 check('core-select is NOT a file/ROM picker', coreSelect && coreSelect.tagName !== 'INPUT');
@@ -298,17 +299,19 @@ check('no file input introduced anywhere', document.querySelectorAll('input[type
 // Core catalog + resolver from core-loader.
 const loaderMod = await import('../core/core-loader.js');
 const { CORE_CATALOG, coreById, DEFAULT_CORE_PATHS } = loaderMod;
-check('CORE_CATALOG has three cores', Array.isArray(CORE_CATALOG) && CORE_CATALOG.length === 3);
+check('CORE_CATALOG has four cores', Array.isArray(CORE_CATALOG) && CORE_CATALOG.length === 4);
 check('catalog realtime path is the snes9x core',
   coreById('realtime') && coreById('realtime').path === 'cores/snes9x_libretro.js');
 check('catalog realtime is the FIRST catalog entry (default-selected)',
   CORE_CATALOG[0] && CORE_CATALOG[0].id === 'realtime');
 check('catalog accuracy path is the accuracy core',
   coreById('accuracy') && coreById('accuracy').path === 'cores/bsnes_mercury_accuracy_libretro.js');
+check('catalog balanced path is the balanced core',
+  coreById('balanced') && coreById('balanced').path === 'cores/bsnes_mercury_balanced_libretro.js');
 check('catalog performance path is the performance core',
   coreById('performance') && coreById('performance').path === 'cores/bsnes_mercury_performance_libretro.js');
-check('all three cores have DISTINCT export names',
-  new Set(CORE_CATALOG.map((c) => c.exportName)).size === 3);
+check('all four cores have DISTINCT export names',
+  new Set(CORE_CATALOG.map((c) => c.exportName)).size === 4);
 check('DEFAULT_CORE_PATHS now defaults to snes9x (real-time)',
   Array.isArray(DEFAULT_CORE_PATHS) && DEFAULT_CORE_PATHS[0] === 'cores/snes9x_libretro.js');
 

@@ -62,10 +62,15 @@ export const DEFAULT_CORE_PATHS = [
 // The catalog of selectable emulator cores.
 //   - snes9x  : from-source raw-libretro snes9x compiled to WASM WITHOUT ASYNCIFY (retro_run
 //               is a normal synchronous call). Real-time routing/playback; DEFAULT boot core.
-//   - bsnes-mercury accuracy + performance : compiled to WASM with -s ASYNCIFY (so retro_run
-//               yields to the browser and returns) + the Emscripten Fibers libco backend (so
-//               bsnes's cooperative cothreads cooperate with ASYNCIFY). Paused, frame-perfect
-//               sub-pixel accuracy.
+//   - bsnes-mercury accuracy + balanced + performance : compiled to WASM with -s ASYNCIFY (so
+//               retro_run yields to the browser and returns) + the Emscripten Fibers libco
+//               backend (so bsnes's cooperative cothreads cooperate with ASYNCIFY). Paused,
+//               frame-perfect sub-pixel accuracy. The three profiles trade PPU/coprocessor
+//               timing fidelity for speed: `accuracy` renders the PPU dot-by-dot (the
+//               reference for sub-pixel work, and by far the most expensive — measured ~7.5x
+//               the frame cost of `balanced`); `balanced` keeps bsnes's cycle-accurate
+//               CPU/SMP/DSP but renders the PPU per scanline; `performance` relaxes the most.
+//               All three are bsnes-derived and therefore far more accurate than snes9x.
 //
 // This is CORE selection only — an emulator-accuracy choice. It is NOT a ROM/level picker
 // and grants no cheat/memory-write capability. Each entry records the MODULARIZE
@@ -87,6 +92,12 @@ export const CORE_CATALOG = Object.freeze([
     exportName: 'bsnes_accuracy',
   }),
   Object.freeze({
+    id: 'balanced',
+    label: 'Balanced (bsnes-mercury)',
+    path: 'cores/bsnes_mercury_balanced_libretro.js',
+    exportName: 'bsnes_balanced',
+  }),
+  Object.freeze({
     id: 'performance',
     label: 'Performance (bsnes-mercury)',
     path: 'cores/bsnes_mercury_performance_libretro.js',
@@ -94,7 +105,7 @@ export const CORE_CATALOG = Object.freeze([
   }),
 ]);
 
-/** Look up a catalog entry by its id (e.g. 'accuracy' | 'performance'). */
+/** Look up a catalog entry by its id (e.g. 'accuracy' | 'balanced' | 'performance'). */
 export function coreById(id) {
   return CORE_CATALOG.find((c) => c.id === id) || null;
 }

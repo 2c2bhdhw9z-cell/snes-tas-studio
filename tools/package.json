@@ -26,6 +26,7 @@
     "hud:crosscheck:snes9x": "CORE=cores/snes9x_libretro.js node hud-crosscheck.mjs",
     "test:runsmoke": "node run-smoke.mjs",
     "test:runsmoke:accuracy": "node run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12",
+    "test:runsmoke:balanced": "node run-smoke.mjs cores/bsnes_mercury_balanced_libretro.js 12",
     "test:runsmoke:performance": "node run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12",
     "test:runsmoke:snes9x": "node run-smoke.mjs cores/snes9x_libretro.js 60",
     "leak:profile": "node --expose-gc leak-profile.mjs cores/snes9x_libretro.js 6000 500",

@@ -26,6 +26,8 @@
 //   node tools/run-smoke.mjs cores/bsnes_mercury_accuracy_libretro.js 12
 //   node tools/run-smoke.mjs cores/bsnes_mercury_performance_libretro.js 12
 // Env overrides: CORE=... RUN_N=... RUN_TIMEOUT_MS=... ENV_VERBOSE=1
+//   RUNSMOKE_NO_LIFTOFF=1  measure on V8's OPTIMIZING wasm tier instead of the baseline
+//                          --liftoff-only tier (see the V8 codegen guard note below)
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -33,12 +35,23 @@ import { dirname, join, isAbsolute } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 // V8 codegen guard. The ASYNCIFY-instrumented cores are large WASM modules. When Node's
-// TurboFan tier-2 compiler optimizes one, current V8 can hit an internal assertion
+// TurboFan tier-2 compiler optimizes one, some V8 versions hit an internal assertion
 // (`Check failed: IdField::is_valid(id)`) — a Node-side JIT limit, NOT a core defect
 // (browsers don't hit it, and retro_run genuinely returns; see the core notes). Running
 // under --liftoff-only keeps WASM on the baseline compiler and side-steps that crash.
 // If we weren't started with it, transparently re-exec ourselves once with the flag.
-if (!process.execArgv.some((a) => a.includes('liftoff-only')) && process.env.__RUNSMOKE_REEXEC !== '1') {
+//
+// TIMING CAVEAT: --liftoff-only is the BASELINE WASM compiler, so the ms/frame it reports
+// systematically UNDER-states an optimized core (a browser will tier the module up).
+// Set RUNSMOKE_NO_LIFTOFF=1 to skip the re-exec and measure on the optimizing tier
+// instead. As of Node 22.23.2 TurboFan no longer crashes on any of the bundled cores, so
+// both numbers are obtainable; cores/build.json records both. Correctness assertions are
+// identical either way — only the timing differs. Real on-device FPS is the final judge.
+if (
+  !process.execArgv.some((a) => a.includes('liftoff-only')) &&
+  process.env.__RUNSMOKE_REEXEC !== '1' &&
+  process.env.RUNSMOKE_NO_LIFTOFF !== '1'
+) {
   const res = spawnSync(
     process.execPath,
     ['--liftoff-only', fileURLToPath(import.meta.url), ...process.argv.slice(2)],
