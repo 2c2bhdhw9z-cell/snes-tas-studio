@@ -51,6 +51,7 @@
 //   onFrame(cb) onStatus(cb) onStateLoaded(cb) getMemoryView() sendLiveMask(mask)
 //   sendInputEdit(edit) statusSnapshot() (includes videoPath)
 //   plus the blindfold diagnostic: setBlindfold(on) isBlindfold() and a `blindfold` property
+//   plus teardown() (stops the resume listeners + the in-process runner; used by init/setCore)
 //   plus synced fields: currentFrame paused status coreStatus romStatus romBytes engineStatus
 //   speed activeCoreId. Exported ROM_PATH + JOYPAD + re-exported EmuCoreRunner + SMB1_HUD_ADDR.
 //
@@ -248,6 +249,32 @@ class TASEngine {
     // engine presents exactly one frame per rAF after each tick.
     this._scheduleYield = this._scheduleYield.bind(this);
 
+    // ---------------- ZERO-CHURN rAF SCHEDULING (see _scheduleYield) ----------------
+    // The scheduling path used to allocate FIVE objects per animation frame: a fresh
+    // `requestAnimationFrame.bind(scope)`, a fresh arrow passed to rAF, a fresh
+    // `{kind:'raf', id, scope}` handle, and (on the ASYNCIFY path) two more arrows for
+    // `r.then(onOk, onErr)`. At 60Hz that is ~300 avoidable allocations/sec feeding the GC for
+    // the entire session. Everything below is created ONCE and REUSED every turn, so the steady
+    // state allocates nothing per turn while the loop semantics are unchanged.
+    this._rafFn = null; // cached BOUND requestAnimationFrame
+    this._rafRawFn = null; // the scope's rAF identity the cache was built from
+    this._rafScopeRef = null; // the scope the cache was bound to
+    this._pendingTickCb = null; // the runner tick for the ONE outstanding turn
+    this._rafTurn = () => this._runTurn(); // ONE reused rAF/timeout callback
+    this._presentNow = () => this._presentPending(); // ONE reused promise continuation
+    this._rafHandleObj = { kind: 'raf', id: 0, scope: null }; // ONE reused cancellable handle
+    this._timeoutHandleObj = { kind: 'timeout', id: 0 };
+    this._microtaskHandleObj = { kind: 'microtask' };
+    // Allocation counters for the scheduling path, incremented ONLY where something new is
+    // actually created. A steady-state loop must never grow these (tools/engine-smoke.mjs
+    // asserts it): rafBinds is 1 per scope, and the callbacks/handles are 1 for the session.
+    this._schedAlloc = { rafBinds: 0, turnCbs: 1, presentCbs: 1, handles: 3 };
+
+    // Resume (iOS suspend/resume) listener bookkeeping - see _startResumeWatch(). Bound ONCE.
+    this._onResume = this._onResume.bind(this);
+    this._resumeWatch = null;
+    this._resumeEvents = 0;
+
     // Notice banner element (set via attach()).
     this._noticeEl = null;
 
@@ -315,54 +342,80 @@ class TASEngine {
    *   - When rAF is unavailable (Node/headless/tests) fall back to a microtask/timeout so the
    *     loop still advances; tests inject their own scheduler anyway.
    * Returns a tagged handle the runner's _cancelYield can cancel.
+   *
+   * ZERO STEADY-STATE ALLOCATION: the bound rAF, the turn callback (_rafTurn), the present
+   * continuation (_presentNow) and the cancellable handle object are all created ONCE in the
+   * constructor and REUSED on every turn (the handle's id/scope are mutated in place, which is
+   * safe because exactly ONE turn is ever outstanding). Semantics are unchanged: one turn
+   * outstanding, the tick awaited on the ASYNCIFY path, exactly one present per turn after the
+   * tick, and the returned handle still cancels the pending turn.
    */
   _scheduleYield(cb) {
+    // The ONE outstanding turn's tick. Read+cleared by _runTurn BEFORE it invokes the tick, so
+    // the tick's own re-arm (the synchronous path re-arms first) sets the next turn's cb.
+    this._pendingTickCb = cb;
     const raf = this._raf();
     if (raf) {
-      const id = raf(() => {
-        this._rafHandle = 0;
-        // (a) inputs are resolved inside retro_run; (b) the runner advances emulation via its
-        // target-time accumulator (bounded catch-up); (c) HUD updates per advanced frame; the
-        // onVideoFrame sink stashes only the latest decoded frame this turn.
-        const r = cb();
-        // (d) present the single latest stashed frame ONCE, AFTER the tick. For an ASYNCIFY
-        // core the tick is async (awaits each retro_run); present AFTER it resolves so exactly
-        // one present happens per rAF and suspensions never overlap. Synchronous cores present
-        // immediately.
-        if (r && typeof r.then === 'function') {
-          r.then(() => this._presentPending(), () => this._presentPending());
-        } else {
-          this._presentPending();
-        }
-      });
+      const id = raf(this._rafTurn);
       this._rafHandle = id;
-      return { kind: 'raf', id, scope: this._rafScope() };
+      const h = this._rafHandleObj;
+      h.id = id;
+      h.scope = this._rafScopeRef;
+      return h;
     }
     // Headless fallback: no display to pace against. Advance on a microtask/timeout and present
     // synchronously after the tick so a Node harness still sees one present per turn.
     if (typeof setTimeout === 'function') {
-      const id = setTimeout(() => {
-        const r = cb();
-        if (r && typeof r.then === 'function') r.then(() => this._presentPending(), () => this._presentPending());
-        else this._presentPending();
-      }, 0);
-      return { kind: 'timeout', id };
+      const h = this._timeoutHandleObj;
+      h.id = setTimeout(this._rafTurn, 0);
+      return h;
     }
-    Promise.resolve().then(() => {
-      const r = cb();
-      if (r && typeof r.then === 'function') r.then(() => this._presentPending(), () => this._presentPending());
-      else this._presentPending();
-    });
-    return { kind: 'microtask' };
+    Promise.resolve().then(this._rafTurn);
+    return this._microtaskHandleObj;
   }
 
-  /** The requestAnimationFrame function bound to its scope, or null when unavailable. */
+  /**
+   * ONE loop turn (the reused rAF callback body):
+   *   (a) inputs are resolved inside retro_run; (b) the runner advances emulation via its
+   *   target-time accumulator (bounded catch-up); (c) HUD updates per advanced frame; the
+   *   onVideoFrame sink stashes only the latest decoded frame this turn; then
+   *   (d) present the single latest stashed frame ONCE, AFTER the tick. For an ASYNCIFY core the
+   *   tick is async (it awaits each retro_run); present AFTER it resolves so exactly one present
+   *   happens per turn and suspensions never overlap. Synchronous cores present immediately.
+   */
+  _runTurn() {
+    this._rafHandle = 0;
+    const cb = this._pendingTickCb;
+    this._pendingTickCb = null;
+    if (typeof cb !== 'function') return;
+    const r = cb();
+    if (r && typeof r.then === 'function') r.then(this._presentNow, this._presentNow);
+    else this._presentPending();
+  }
+
+  /**
+   * The requestAnimationFrame function bound to its scope, or null when unavailable. The bound
+   * function is CACHED and only rebuilt when the scope (or its requestAnimationFrame identity)
+   * actually changes - so the running app binds exactly once for the whole session instead of
+   * allocating a fresh bound function on every animation frame. (Test harnesses that swap
+   * window.requestAnimationFrame are still honored: the identity check catches the swap.)
+   */
   _raf() {
     const scope = this._rafScope();
-    if (scope && typeof scope.requestAnimationFrame === 'function') {
-      return scope.requestAnimationFrame.bind(scope);
+    const raw = scope && typeof scope.requestAnimationFrame === 'function' ? scope.requestAnimationFrame : null;
+    if (!raw) {
+      this._rafFn = null;
+      this._rafRawFn = null;
+      this._rafScopeRef = null;
+      return null;
     }
-    return null;
+    if (raw !== this._rafRawFn || scope !== this._rafScopeRef) {
+      this._rafFn = raw.bind(scope);
+      this._rafRawFn = raw;
+      this._rafScopeRef = scope;
+      this._schedAlloc.rafBinds += 1;
+    }
+    return this._rafFn;
   }
 
   _rafScope() {
@@ -425,6 +478,103 @@ class TASEngine {
         console.warn('[TASEngine] 2D present failed:', err);
       }
     }
+  }
+
+  // ------------------------------------------------------- iOS suspend / resume hardening
+
+  /**
+   * Watch for the page RESUMING and re-anchor the run loop's target-time accumulator.
+   *
+   * THE BUG THIS FIXES (user report): backgrounding the installed PWA and coming back dropped
+   * the app to ~4 FPS "permanently, never recovering". While iOS suspends a backgrounded PWA it
+   * stops firing requestAnimationFrame but performance.now() keeps advancing, so the first turn
+   * after resuming is arbitrarily overdue. The runner now CLAMPS the overdue time it will even
+   * consider (MAX_OVERDUE_MS) and frame-skips instead of replaying the gap, so it can no longer
+   * wedge; on top of that we re-anchor EXPLICITLY the moment the page comes back, so the very
+   * first turn after resuming starts from a clean anchor rather than from a stale one.
+   *
+   * Listens on document 'visibilitychange' (the reliable iOS signal) plus window 'focus' and
+   * 'pageshow' (which also fire when returning from the page cache / app switcher). Idempotent,
+   * fully defensive (a headless/stubbed document without addEventListener is simply skipped),
+   * and removed again by _stopResumeWatch() on teardown/re-init so listeners never accumulate.
+   */
+  _startResumeWatch() {
+    if (this._resumeWatch) return;
+    const doc = typeof document !== 'undefined' ? document : null;
+    const win = this._rafScope();
+    const bound = [];
+    try {
+      if (doc && typeof doc.addEventListener === 'function') {
+        doc.addEventListener('visibilitychange', this._onResume);
+        bound.push({ target: doc, type: 'visibilitychange' });
+      }
+      if (win && typeof win.addEventListener === 'function') {
+        win.addEventListener('focus', this._onResume);
+        bound.push({ target: win, type: 'focus' });
+        win.addEventListener('pageshow', this._onResume);
+        bound.push({ target: win, type: 'pageshow' });
+      }
+    } catch (_err) {
+      /* a hostile/stubbed environment must never break boot */
+    }
+    this._resumeWatch = bound.length ? bound : null;
+    return this._resumeWatch;
+  }
+
+  /** Remove the resume listeners (teardown / re-init). Idempotent; never throws. */
+  _stopResumeWatch() {
+    const bound = this._resumeWatch;
+    this._resumeWatch = null;
+    if (!bound) return;
+    for (const b of bound) {
+      try {
+        if (b.target && typeof b.target.removeEventListener === 'function') {
+          b.target.removeEventListener(b.type, this._onResume);
+        }
+      } catch (_err) {
+        /* best-effort */
+      }
+    }
+  }
+
+  /**
+   * The page came back (or may have). Re-anchor the runner's accumulator so the first turn after
+   * a suspend/resume gap starts clean instead of trying to reason about a multi-second jump.
+   * Ignores the HIDDEN half of visibilitychange (that is the suspend, not the resume).
+   */
+  _onResume() {
+    try {
+      const doc = typeof document !== 'undefined' ? document : null;
+      if (doc && typeof doc.visibilityState === 'string' && doc.visibilityState === 'hidden') return;
+      this._resumeEvents += 1;
+      if (this.runner && typeof this.runner.resetClockAnchor === 'function') {
+        this.runner.resetClockAnchor('resume');
+      }
+      // A resume also invalidates any frame stashed before the gap.
+      this._pendingFrame = null;
+    } catch (_err) {
+      /* never let a resume hook throw into an event handler */
+    }
+  }
+
+  /**
+   * Tear the engine down: stop the resume listeners and the in-process runner/loop. Used by
+   * init() before a (re-)boot or a core swap so nothing (listeners, rAF turns, cores) leaks
+   * across re-inits. Never throws.
+   */
+  teardown() {
+    this._stopResumeWatch();
+    if (this.runner) {
+      try {
+        this.runner.teardown();
+      } catch (_err) {
+        /* best-effort */
+      }
+      this.runner = null;
+    }
+    this._pendingTickCb = null;
+    this._pendingFrame = null;
+    return this;
   }
 
   // ------------------------------------------------------------------ attach / notices
@@ -643,18 +793,14 @@ class TASEngine {
     this.clearNotices();
     this._setStatus({ coreStatus: 'Loading', romStatus: 'Idle', romBytes: 0, engineStatus: 'Init' });
 
-    // Tear down any prior runner (idempotent init / re-init).
-    if (this.runner) {
-      try {
-        this.runner.teardown();
-      } catch (_err) {
-        /* best-effort */
-      }
-      this.runner = null;
-    }
-    this._pendingFrame = null;
+    // Tear down any prior runner + its resume listeners (idempotent init / re-init, core swap):
+    // nothing may accumulate across re-inits.
+    this.teardown();
 
     this.runner = this._makeRunner(this._asyncify);
+    // Re-anchor the run loop whenever the page resumes from an iOS suspend (see the note on
+    // _startResumeWatch). Attached AFTER the runner exists so the handler always has a target.
+    this._startResumeWatch();
     let result;
     try {
       result = await this.runner.boot({ corePaths: corePath ? [corePath] : undefined });

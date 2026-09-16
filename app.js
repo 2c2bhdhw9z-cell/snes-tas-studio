@@ -107,6 +107,14 @@ function renderFps() {
 // full layout each time — a per-frame allocation + layout-thrash leak contributing to the
 // steady FPS decay. We now build the skeleton ONCE, cache the value text nodes, and update a
 // node's textContent ONLY when its value actually changed (no churn, no needless layout).
+// PER-FRAME PATH NOTE: renderBanner() runs once per emulated frame (up to 60x/sec) from the
+// engine.onFrame subscriber below, so it must do NO DOM lookup and NO avoidable work. The
+// #debug-banner element is looked up once and CACHED here (the old code called
+// document.getElementById on every single frame), and the error-state test (a regex over the
+// ROM+core status strings) is memoized on those two strings instead of re-running per frame.
+let bannerEl = null;
+const errState = { rom: null, core: null, hasError: false };
+
 const bannerDom = {
   el: null, // the #debug-banner container the skeleton was built into
   values: null, // { core, rom, engine, fps, video, err } -> the Text node holding each value
@@ -176,9 +184,26 @@ function setBannerText(key, text) {
   }
 }
 
+/** Memoized "do the ROM/core status strings report a failure?" test (see the note above). */
+function statusHasError() {
+  if (errState.rom !== bannerState.rom || errState.core !== bannerState.core) {
+    errState.rom = bannerState.rom;
+    errState.core = bannerState.core;
+    errState.hasError =
+      /Failed|Error|HTTP/.test(String(bannerState.rom)) || /Failed|Error|HTTP/.test(String(bannerState.core));
+  }
+  return errState.hasError;
+}
+
 function renderBanner() {
-  const el = document.getElementById('debug-banner');
-  if (!el) return;
+  // Cached element lookup: only hit getElementById until the banner exists (renderBanner can be
+  // called before the DOM is parsed), then reuse the node forever.
+  let el = bannerEl;
+  if (!el) {
+    el = document.getElementById('debug-banner');
+    if (!el) return;
+    bannerEl = el;
+  }
   // Build (or rebuild if the element was replaced) the skeleton once, then mutate in place.
   if (bannerDom.el !== el || !bannerDom.values) buildBannerSkeleton(el);
 
@@ -186,7 +211,7 @@ function renderBanner() {
     bannerState.errors.length > 0
       ? bannerState.errors[bannerState.errors.length - 1]
       : 'none';
-  const hasError = bannerState.errors.length > 0 || /Failed|Error|HTTP/.test(bannerState.rom + bannerState.core);
+  const hasError = bannerState.errors.length > 0 || statusHasError();
 
   if (bannerDom.last.hasError !== hasError) {
     el.classList.toggle('debug-banner--error', hasError);

@@ -463,6 +463,16 @@ body {
 .pr-row {
   display: flex;
 }
+/* Scroll-extent spacers for the WINDOWED (virtualized) piano roll. The grid keeps a bounded,
+   recycled pool of row elements around the playhead (see piano-roll.js); these two empty divs
+   carry the height of the frames above/below that window so the scrollbar still represents the
+   whole timeline. They hold no cells and are inert. */
+.pr-spacer {
+  display: block;
+  width: 100%;
+  height: 0;
+  pointer-events: none;
+}
 /* Sticky header row so column labels stay visible while scrolling frames. */
 .pr-row--header {
   position: sticky;

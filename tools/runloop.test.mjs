@@ -506,6 +506,105 @@ await checkAsync('DEATH-SPIRAL PROOF: sustained CPU slowness never grows runs-pe
   });
 });
 
+// ======================================================================================
+// iOS SUSPEND / RESUME HARDENING (the "4 FPS forever after backgrounding" bug).
+//
+// While iOS suspends a backgrounded PWA it stops firing requestAnimationFrame but
+// performance.now() keeps advancing, so the first turn after resuming can be SECONDS overdue.
+// The runner now (1) CLAMPS the overdue time a single turn will even consider (MAX_OVERDUE_MS)
+// and re-anchors instead of reasoning about the gap, and (2) exposes resetClockAnchor() which
+// the engine calls on visibilitychange/focus/pageshow so a resume starts from a clean anchor.
+// These tests prove a multi-second stall can neither burst nor wedge the loop into a permanent
+// low-FPS state, and that the resume re-anchor path exists and works.
+
+await checkAsync('SUSPEND/RESUME: a multi-second clock jump runs AT MOST the clamped frames in the first turn', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 900000;
+    runner.setSpeed(1);
+    runner.start();
+    runFreeRunning(runner, state, 100, 16.7); // normal cadence first
+    const before = mock.__runs();
+    const stallsBefore = runner._stallSkips;
+    // THE SUSPEND: 5 simulated seconds pass with NO rAF turns at all (iOS froze the page).
+    CLOCK += 5000;
+    // THE RESUME: the first turn fires.
+    const cb = state.pending;
+    state.pending = null;
+    cb();
+    const firstTurn = mock.__runs() - before;
+    assert.ok(firstTurn <= 2, `first turn after a 5s stall runs at most the clamp (got ${firstTurn})`);
+    assert.ok(runner._stallSkips > stallsBefore, 'the turn was classified as a STALL (overdue clamped, missed time discarded)');
+    assert.ok(runner._nextFrameTime >= CLOCK, 'anchor re-anchored to now + one interval (gap discarded, not queued)');
+  });
+});
+
+await checkAsync('SUSPEND/RESUME: cadence returns to ~60 frames/simulated-second after the stall (no permanent low-FPS state)', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 1100000;
+    runner.setSpeed(1);
+    runner.start();
+    runFreeRunning(runner, state, 200, 16.7);
+    // Suspend for 8 simulated seconds, then resume and run one simulated second of turns.
+    CLOCK += 8000;
+    const after = mock.__runs();
+    runFreeRunning(runner, state, 1000, 16.7);
+    const resumed = mock.__runs() - after;
+    assert.ok(resumed >= 55 && resumed <= 63, `~60 frames in the simulated second after resuming (got ${resumed})`);
+    // And it stays there for a second second (no ratchet, no compounding backlog).
+    const after2 = mock.__runs();
+    runFreeRunning(runner, state, 1000, 16.7);
+    const resumed2 = mock.__runs() - after2;
+    assert.ok(resumed2 >= 55 && resumed2 <= 63, `still ~60 frames the next simulated second (got ${resumed2})`);
+  });
+});
+
+await checkAsync('SUSPEND/RESUME: repeated multi-second stalls never grow per-turn work (flat, bounded)', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 1300000;
+    runner.setSpeed(1);
+    runner.start();
+    runFreeRunning(runner, state, 50, 16.7);
+    let maxPerTurn = 0;
+    for (let i = 0; i < 10; i++) {
+      CLOCK += 3000 + i * 1000; // ever LONGER suspends (3s, 4s, 5s, ... 12s)
+      const before = mock.__runs();
+      const cb = state.pending;
+      state.pending = null;
+      cb();
+      const ran = mock.__runs() - before;
+      if (ran > maxPerTurn) maxPerTurn = ran;
+      runFreeRunning(runner, state, 100, 16.7); // a little normal running in between
+    }
+    assert.ok(maxPerTurn <= 2, `per-turn work stays clamped however long the stall (max ${maxPerTurn})`);
+  });
+});
+
+await checkAsync('SUSPEND/RESUME: resetClockAnchor() re-anchors the accumulator and is counted', () => {
+  return makeRunner().then(({ runner, mock, state }) => {
+    CLOCK = 1500000;
+    runner.setSpeed(1);
+    runner.start();
+    runFreeRunning(runner, state, 100, 16.7);
+    assert.strictEqual(typeof runner.resetClockAnchor, 'function', 'the runner exposes resetClockAnchor()');
+    const resyncsBefore = runner._clockResyncs;
+    CLOCK += 30000; // a 30-second suspend
+    runner.resetClockAnchor('resume');
+    assert.strictEqual(runner._clockResyncs, resyncsBefore + 1, 'the resync was counted');
+    assert.ok(runner._nextFrameTime >= CLOCK, 'anchor moved to now + one interval (nothing overdue after a resume)');
+    // The very next turn must run at most one frame (not a catch-up burst), then hold ~60.
+    const before = mock.__runs();
+    const cb = state.pending;
+    state.pending = null;
+    CLOCK += 16.7;
+    cb();
+    assert.ok(mock.__runs() - before <= 1, 'first turn after an explicit re-anchor is not a burst');
+    const after = mock.__runs();
+    runFreeRunning(runner, state, 1000, 16.7);
+    const resumed = mock.__runs() - after;
+    assert.ok(resumed >= 55 && resumed <= 63, `~60 fps after the explicit re-anchor (got ${resumed})`);
+  });
+});
+
 await checkAsync('cadence is decoupled from present: onVideoFrame throwing never stalls frame advance', () => {
   // The present sink must never pace or block compute. Even if presenting throws every frame,
   // the loop keeps advancing retro_run at ~60 fps (the runner swallows sink errors).
@@ -626,10 +725,25 @@ await checkAsync('frame-advance still runs EXACTLY one frame after the free-runn
   // Isolate the engine harness in its own DOM-stub + fake-rAF scope (imported lazily so the
   // runner-level CLOCK/perf shim above is not disturbed).
   globalThis.window = globalThis;
+  // A document stub WITH an event-listener registry + visibilityState, so the engine's iOS
+  // suspend/resume watch (document 'visibilitychange') can be attached and fired on demand.
+  const docListeners = new Map();
   globalThis.document = {
     createElement: () => { let t = ''; return { className: '', set textContent(v) { t = v; }, get textContent() { return t; } }; },
     getElementById: () => null,
     head: { appendChild: () => {} },
+    visibilityState: 'visible',
+    addEventListener: (type, fn) => {
+      if (!docListeners.has(type)) docListeners.set(type, new Set());
+      docListeners.get(type).add(fn);
+    },
+    removeEventListener: (type, fn) => {
+      if (docListeners.has(type)) docListeners.get(type).delete(fn);
+    },
+    __listeners: docListeners,
+    __fire: (type) => {
+      for (const fn of docListeners.get(type) || []) fn({ type });
+    },
   };
   const { installFakeRaf, installEngineMockRunner, makeGLCanvas } = await import('./single-thread-harness.mjs');
   const fake = installFakeRaf();
@@ -677,6 +791,67 @@ await checkAsync('frame-advance still runs EXACTLY one frame after the free-runn
     assert.strictEqual(gpu.drawArrays, 1, `the fast-forward burst still presented EXACTLY once (draws=${gpu.drawArrays})`);
     engine.fastForward(false);
     engine.pause();
+  });
+
+  // --------------------------------------------------------------------------------
+  // ENGINE-LEVEL RESUME RE-ANCHOR: the engine subscribes to document 'visibilitychange'
+  // (+ window focus/pageshow) and re-anchors the runner's accumulator when the page comes
+  // back, so the first turn after an iOS suspend starts clean. Also proves the listeners are
+  // REMOVED on teardown (they must never accumulate across re-inits / core swaps).
+  await checkAsync('engine: visibilitychange (resume) re-anchors the run loop and is cleaned up on teardown', async () => {
+    engine.setSpeed(1);
+    engine.play();
+    fake.stepRaf(5);
+    assert.ok(
+      (globalThis.document.__listeners.get('visibilitychange') || new Set()).size >= 1,
+      'the engine attached a visibilitychange listener during init()'
+    );
+    const runner = shared.runner;
+    const resyncsBefore = runner._clockResyncs;
+
+    // SUSPEND: 7 simulated seconds with no rAF turns, then the page becomes visible again.
+    fake.advance(7000);
+    globalThis.document.visibilityState = 'visible';
+    globalThis.document.__fire('visibilitychange');
+    assert.strictEqual(runner._clockResyncs, resyncsBefore + 1, 'the resume re-anchored the accumulator');
+    assert.ok(runner._nextFrameTime >= fake.now(), 'the anchor was moved to now + one interval');
+
+    // The first turns after resuming must be normal, bounded turns (no burst, no wedge).
+    shared.resolvedPerFrame.length = 0;
+    fake.stepRaf(1);
+    assert.ok(shared.resolvedPerFrame.length <= 2, `first post-resume turn is bounded (ran ${shared.resolvedPerFrame.length})`);
+    shared.resolvedPerFrame.length = 0;
+    const TURNS = 30;
+    fake.stepRaf(TURNS);
+    assert.ok(
+      shared.resolvedPerFrame.length >= TURNS - 4 && shared.resolvedPerFrame.length <= TURNS + 2,
+      `cadence back to ~one frame per turn after resuming (got ${shared.resolvedPerFrame.length} over ${TURNS} turns)`
+    );
+
+    // The HIDDEN half of visibilitychange must NOT be treated as a resume.
+    const beforeHidden = runner._clockResyncs;
+    globalThis.document.visibilityState = 'hidden';
+    globalThis.document.__fire('visibilitychange');
+    assert.strictEqual(runner._clockResyncs, beforeHidden, 'going hidden does not re-anchor (that is the suspend, not the resume)');
+    globalThis.document.visibilityState = 'visible';
+
+    // TEARDOWN removes the listeners (no accumulation across re-inits).
+    engine.pause();
+    fake.stepRaf(2);
+    engine.teardown();
+    assert.strictEqual(
+      (globalThis.document.__listeners.get('visibilitychange') || new Set()).size,
+      0,
+      'teardown removed the visibilitychange listener'
+    );
+    // Re-init for the remaining engine assertions below (and prove listeners do not double-add).
+    installEngineMockRunner(engine);
+    await engine.init({ corePaths: ['cores/snes9x_libretro.js'] });
+    assert.strictEqual(
+      (globalThis.document.__listeners.get('visibilitychange') || new Set()).size,
+      1,
+      're-init attached exactly ONE visibilitychange listener (never two)'
+    );
   });
 
   fake.restore();

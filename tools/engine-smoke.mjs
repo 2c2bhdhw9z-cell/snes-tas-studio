@@ -703,6 +703,135 @@ await checkAsync('(i-e) blindfold ON blocks the 2D last-resort path too: ZERO pu
   twoD.pause();
 });
 
+// ======================================================================================
+// (j) ZERO-CHURN rAF SCHEDULING: the per-turn scheduling path must allocate NOTHING.
+//
+// The old _scheduleYield allocated FIVE objects per animation frame: a fresh
+// `requestAnimationFrame.bind(scope)`, a fresh arrow handed to rAF, a fresh
+// `{kind:'raf', id, scope}` handle, plus TWO more arrows for `r.then(ok, err)` on the ASYNCIFY
+// path — ~300 avoidable allocations/sec for the whole session, feeding exactly the GC churn the
+// whole investigation was chasing. The runner also allocated a fresh `() => this._tick()` per
+// re-arm. Everything is now created ONCE and reused, and the engine counts the creations
+// (engine._schedAlloc) so a regression is a hard test failure rather than an invisible
+// slow burn. The LOOP SEMANTICS must be untouched: one turn outstanding, one present per turn.
+// ======================================================================================
+await checkAsync('(j) rAF scheduling allocates NOTHING per turn (same bound rAF / callback / handle reused)', async () => {
+  // A FRESH engine on the synchronous (snes9x) core so the counters describe this run only.
+  const { TASEngine } = mod;
+  const eng = new TASEngine();
+  const jgpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+  const jshared = installEngineMockRunner(eng);
+  eng.attach({ canvas: makeGLCanvas({ gpu: jgpu }), noticeEl: null });
+  const ret = await eng.init({ corePaths: ['cores/snes9x_libretro.js'] });
+  assert.ok(ret && ret.ok === true, 'fixture engine booted');
+
+  const alloc = eng._schedAlloc;
+  assert.ok(alloc && typeof alloc.rafBinds === 'number', 'the engine exposes scheduling allocation counters');
+  // The bound rAF is cached: calling _raf() repeatedly returns the IDENTICAL function object.
+  assert.strictEqual(eng._raf(), eng._raf(), 'the bound requestAnimationFrame is cached (same function identity)');
+  assert.ok(typeof eng._rafTurn === 'function', 'ONE reused rAF turn callback exists');
+  assert.ok(typeof eng._presentNow === 'function', 'ONE reused present continuation exists');
+
+  eng.setSpeed(1);
+  eng.play();
+  fake.stepRaf(5); // settle the anchor
+  const bindsBefore = alloc.rafBinds;
+  const runner = jshared.runner;
+  // Identity capture: the handle object and the runner's tick callback must not be re-created.
+  const handleBefore = runner._loopHandle;
+  const tickCbBefore = runner._boundTick;
+  const turnCbBefore = eng._rafTurn;
+  const presentCbBefore = eng._presentNow;
+  assert.ok(typeof tickCbBefore === 'function', 'the runner holds ONE pre-bound tick callback');
+
+  const TURNS = 200;
+  const fired = fake.stepRaf(TURNS);
+  assert.ok(fired >= TURNS - 1, `fired ~${TURNS} rAF turns (got ${fired})`);
+
+  assert.strictEqual(alloc.rafBinds, bindsBefore, `ZERO new bound rAF functions over ${fired} turns`);
+  assert.strictEqual(eng._rafTurn, turnCbBefore, 'the SAME rAF turn callback object was reused every turn');
+  assert.strictEqual(eng._presentNow, presentCbBefore, 'the SAME present continuation was reused every turn');
+  assert.strictEqual(runner._boundTick, tickCbBefore, 'the runner reused the SAME tick callback (no per-turn closure)');
+  assert.strictEqual(runner._loopHandle, handleBefore, `the SAME handle object was reused (no per-turn {kind:'raf'} object)`);
+  assert.strictEqual(runner._loopHandle, eng._rafHandleObj, 'the handle is the engine-owned reused handle object');
+  assert.strictEqual(alloc.turnCbs, 1, 'exactly ONE turn callback was ever created');
+  assert.strictEqual(alloc.presentCbs, 1, 'exactly ONE present continuation was ever created');
+  assert.strictEqual(alloc.rafBinds, 1, 'exactly ONE bound rAF for the whole session');
+
+  // SEMANTICS UNCHANGED: still exactly one outstanding turn, ~one retro_run + one present each.
+  assert.strictEqual(fake.pending(), 1, 'exactly ONE rAF turn outstanding after the run');
+  jshared.resolvedPerFrame.length = 0;
+  jgpu.texImage2D = 0;
+  jgpu.texSubImage2D = 0;
+  jgpu.drawArrays = 0;
+  const T2 = 20;
+  const fired2 = fake.stepRaf(T2);
+  assert.ok(jgpu.drawArrays >= 1 && jgpu.drawArrays <= fired2, `still at most one present per turn (draws=${jgpu.drawArrays})`);
+  assert.strictEqual(jgpu.texImage2D + jgpu.texSubImage2D, jgpu.drawArrays, 'still one upload + one draw per present');
+  assert.ok(jshared.resolvedPerFrame.length >= fired2 - 3, `still ~one retro_run per turn (${jshared.resolvedPerFrame.length})`);
+  eng.pause();
+  fake.stepRaf(2);
+});
+
+await checkAsync('(j) ASYNCIFY deferred present reuses the SAME promise continuations (no per-turn arrows)', async () => {
+  // The ASYNCIFY path is the one that used to allocate TWO extra arrows per turn inside
+  // r.then(() => present(), () => present()). Boot a fresh ASYNCIFY (bsnes) engine and prove the
+  // continuation identity is stable while the awaited-suspension semantics still hold.
+  const { TASEngine } = mod;
+  const eng = new TASEngine();
+  const jgpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+  const jshared = installEngineMockRunner(eng, 'cores/bsnes_mercury_accuracy_libretro.js');
+  eng.attach({ canvas: makeGLCanvas({ gpu: jgpu }), noticeEl: null });
+  const ret = await eng.init({ corePaths: ['cores/bsnes_mercury_accuracy_libretro.js'] });
+  assert.ok(ret && ret.ok === true, 'ASYNCIFY fixture engine booted');
+  assert.strictEqual(eng._asyncify, true, 'engine is on the ASYNCIFY path');
+
+  // A turn's present is deferred to a microtask, and the async runner re-arms only after the
+  // awaited retro_run resolves, so drain microtasks between turns (same pattern as (h)).
+  const drain = async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  };
+  async function runAsyncTurns(n) {
+    await drain();
+    let fired = 0;
+    for (let i = 0; i < n; i++) {
+      const f = fake.stepRaf(1);
+      if (f === 0) {
+        await drain();
+        continue;
+      }
+      fired += f;
+      await drain();
+    }
+    return fired;
+  }
+
+  eng.setSpeed(1);
+  await runAsyncTurns(4); // settle
+  const presentCb = eng._presentNow;
+  const bindsBefore = eng._schedAlloc.rafBinds;
+  const handleBefore = jshared.runner._loopHandle;
+  const tickCbBefore = jshared.runner._boundTick;
+  jshared.resolvedPerFrame.length = 0;
+  jgpu.drawArrays = 0;
+  jgpu.texImage2D = 0;
+  jgpu.texSubImage2D = 0;
+
+  const TURNS = 40;
+  const fired = await runAsyncTurns(TURNS);
+  assert.ok(fired >= TURNS - 2, `drove ~${TURNS} ASYNCIFY turns (fired ${fired})`);
+  assert.strictEqual(eng._presentNow, presentCb, 'ASYNCIFY turns reused the SAME present continuation');
+  assert.strictEqual(eng._schedAlloc.rafBinds, bindsBefore, 'ASYNCIFY turns bound no new rAF function');
+  assert.strictEqual(eng._schedAlloc.presentCbs, 1, 'still exactly ONE present continuation for the session');
+  assert.strictEqual(jshared.runner._boundTick, tickCbBefore, 'the ASYNCIFY runner reused the SAME tick callback');
+  assert.strictEqual(jshared.runner._loopHandle, handleBefore, 'the ASYNCIFY loop reused the SAME handle object');
+  assert.ok(jshared.resolvedPerFrame.length >= 1, 'the ASYNCIFY core advanced frames through the reused path');
+  assert.ok(jgpu.drawArrays <= fired, `still at most one present per ASYNCIFY turn (draws=${jgpu.drawArrays})`);
+  assert.strictEqual(jshared.maxInFlight, 1, 'ASYNCIFY suspensions still NEVER overlap (max in-flight == 1)');
+  eng.pause();
+  await drain();
+});
+
 fake.restore();
 
 let failed = 0;

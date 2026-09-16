@@ -56,6 +56,19 @@ const RETRO_MEMORY_SYSTEM_RAM = 2;
 // Fast-forward (a user-opted fixed burst) is a separate path and is NOT governed by this.
 const MAX_CATCHUP_FRAMES = 2;
 
+// iOS SUSPEND/RESUME HARDENING: the maximum amount of OVERDUE time a single pump turn will even
+// CONSIDER. performance.now() keeps running while iOS suspends a backgrounded PWA (and while the
+// page is frozen for a long GC / a system alert / a screen lock), so the first turn after
+// resuming can be seconds - even minutes - overdue. Rather than reasoning about that gap at all,
+// any overdue time beyond this clamp is declared a STALL: the missed wall-clock is DISCARDED
+// (never replayed) by snapping the due-time anchor to the clamp boundary, so the resuming turn
+// does exactly the same bounded work as any normal turn (at most MAX_CATCHUP_FRAMES) and the
+// trailing frame-skip re-anchors to now + one interval. The loop therefore CANNOT wedge itself
+// in a permanent catch-up/low-FPS state after a long gap: every turn is bounded, and the very
+// next turn is back on the normal ~60/sec cadence. See also resetClockAnchor(), which the engine
+// calls on visibilitychange/focus/pageshow so a resume starts from a clean anchor immediately.
+const MAX_OVERDUE_MS = 100;
+
 // The subset of RETRO_ENVIRONMENT_* commands this frontend explicitly handles. Every other
 // command is answered fail-closed (false). Copied verbatim from the original main-thread
 // engine so the extracted runner boots real cores identically (proven by run-smoke.mjs).
@@ -242,6 +255,28 @@ export class EmuCoreRunner {
     this._lastTs = 0;
     // Target-time anchor for the free-running accumulator (wall-clock instant frame N is due).
     this._nextFrameTime = 0;
+    // ONE reused pump-turn callback for the whole session: _scheduleTick re-arms the loop with
+    // this SAME function reference instead of allocating a fresh `() => this._tick()` arrow on
+    // every single turn (60 closures/sec of avoidable garbage).
+    this._boundTick = () => this._tick();
+    // ONE reused ASYNCIFY frame continuation (see _runOneFrame): the awaited retro_run resolves
+    // into this SAME function instead of a fresh arrow per emulated frame.
+    this._afterAsyncFrame = () => {
+      this.currentFrame += 1;
+      this._afterFrame();
+    };
+    // Cached activeCoreId resolution. memory-watch.js reads engine.activeCoreId TWICE per frame
+    // (skeleton check + WRAM map select); resolving it through CORE_CATALOG.find() each time
+    // allocated a closure + scanned the catalog 120x/sec for a value that only changes on a core
+    // swap. Invalidated by corePath (see the activeCoreId getter).
+    this._coreIdCache = null;
+    this._coreIdCachePath = null;
+    // Suspend/resume + stall diagnostics (READ-ONLY counters; see resetClockAnchor/_clampOverdue).
+    // _clockResyncs counts explicit resume re-anchors, _stallSkips counts turns whose overdue
+    // time exceeded MAX_OVERDUE_MS and was therefore DISCARDED rather than replayed.
+    this._clockResyncs = 0;
+    this._stallSkips = 0;
+    this._lastResyncReason = '';
     this.DEFAULT_FPS = 60.098;
     this.fps = this.DEFAULT_FPS;
     this._baseFrameMs = 1000 / this.fps;
@@ -408,6 +443,9 @@ export class EmuCoreRunner {
     this._saveDirPtr = 0;
     this.Module = null;
     this.corePath = null;
+    // Drop the cached core-id resolution with the corePath it was keyed on.
+    this._coreIdCache = null;
+    this._coreIdCachePath = null;
     this._fn = {};
     this._romData = null;
     this._wramPtr = 0;
@@ -813,10 +851,9 @@ export class EmuCoreRunner {
     if (!this._fn.retro_run) return;
     if (this._asyncify) {
       // ASYNCIFY core: retro_run may return a Promise when it suspends. Await it, then tick.
-      return Promise.resolve(this._fn.retro_run()).then(() => {
-        this.currentFrame += 1;
-        this._afterFrame();
-      });
+      // The continuation is the SAME pre-bound function every frame (_afterAsyncFrame) instead
+      // of a fresh arrow per retro_run - one less per-frame allocation on the bsnes path.
+      return Promise.resolve(this._fn.retro_run()).then(this._afterAsyncFrame);
     }
     this._fn.retro_run();
     this.currentFrame += 1;
@@ -872,8 +909,54 @@ export class EmuCoreRunner {
     return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
   }
 
+  /**
+   * RE-ANCHOR the target-time accumulator so the NEXT pump turn starts clean.
+   *
+   * Called by the engine when the page RESUMES (document visibilitychange -> visible, window
+   * focus, pageshow) - the iOS suspend/resume path. While a PWA is backgrounded, iOS stops
+   * firing requestAnimationFrame but performance.now() keeps advancing, so on return the
+   * accumulator is arbitrarily overdue. Re-anchoring here means the first turn after resuming
+   * neither replays the gap nor tries to catch up: it simply resumes real-time cadence.
+   * (_tickSync/_tickAsync ALSO clamp overdue time to MAX_OVERDUE_MS, so the loop is safe even if
+   * no resume event ever arrives - this just makes the recovery immediate rather than one turn
+   * later.) Safe to call at any time, running or paused; never throws.
+   *
+   * @param {string} [reason] diagnostic label (counted, not logged per call)
+   * @returns {boolean} whether the anchor was re-seeded
+   */
+  resetClockAnchor(reason = 'resume') {
+    this._lastTs = 0;
+    this._accumulator = 0;
+    // Re-seed to "one interval from now" while running so the next turn runs at most the frames
+    // genuinely due from here; a paused loop re-seeds lazily on its next turn (anchor 0).
+    this._nextFrameTime = this._loopRunning ? this._now() + this._baseFrameMs / this.speed : 0;
+    this._clockResyncs += 1;
+    this._lastResyncReason = String(reason || '');
+    return true;
+  }
+
+  /**
+   * Clamp how much OVERDUE time this turn may consider (iOS suspend/resume + long-stall
+   * hardening). Returns the (possibly re-anchored) overdue milliseconds, which is always
+   * <= MAX_OVERDUE_MS, so the catch-up loop below can never be handed a multi-second gap.
+   * Discarded time is never replayed: the anchor is snapped forward instead.
+   */
+  _clampOverdue(now) {
+    let overdue = now - this._nextFrameTime;
+    if (overdue > MAX_OVERDUE_MS) {
+      // A STALL, not a CPU dip: the page was suspended/frozen (or the clock jumped). Drop the
+      // missed wall-clock entirely by snapping the anchor to the clamp boundary.
+      this._nextFrameTime = now - MAX_OVERDUE_MS;
+      overdue = MAX_OVERDUE_MS;
+      this._stallSkips += 1;
+    }
+    return overdue;
+  }
+
   _scheduleTick() {
-    this._loopHandle = this._scheduleYield(() => this._tick());
+    // The tick callback is created ONCE (this._boundTick) and re-armed BY REFERENCE, so the
+    // steady-state loop allocates no closure per turn.
+    this._loopHandle = this._scheduleYield(this._boundTick);
   }
 
   /**
@@ -922,6 +1005,11 @@ export class EmuCoreRunner {
     }
 
     const frameMs = this._baseFrameMs / this.speed;
+    // SUSPEND/RESUME + STALL CLAMP (see MAX_OVERDUE_MS): cap the overdue time this turn may
+    // consider BEFORE the catch-up loop, so a multi-second performance.now() jump (iOS
+    // backgrounding, screen lock, a frozen tab) is treated as a stall and discarded instead of
+    // being reasoned about. This turn then does the same bounded work as any other turn.
+    this._clampOverdue(now);
     let ran = 0;
     // Target-time accumulator: advance the due-time by exactly one interval per frame so the
     // loop tracks real time (no fractional shedding). Catch-up is HARD-CLAMPED to at most
@@ -953,6 +1041,9 @@ export class EmuCoreRunner {
       this._nextFrameTime = now + this._baseFrameMs / this.speed;
     } else {
       const frameMs = this._baseFrameMs / this.speed;
+      // Same SUSPEND/RESUME + STALL CLAMP as the synchronous path: a huge performance.now() jump
+      // is discarded (anchor snapped to the clamp boundary), never replayed.
+      this._clampOverdue(now);
       let ran = 0;
       // Same HARD catch-up clamp as the synchronous path (death-spiral fix): at most
       // MAX_CATCHUP_FRAMES awaited retro_run per tick, then FRAME-SKIP by re-anchoring the
@@ -1163,11 +1254,17 @@ export class EmuCoreRunner {
   /**
    * The catalog id of the active core ('realtime' | 'accuracy' | 'performance'), or null.
    * READ-ONLY metadata used to select the correct per-core WRAM offset map. Grants nothing.
+   * CACHED by corePath: the HUD reads this twice per emulated frame, and the catalog lookup
+   * (a closure + a scan) has no business running 120x/sec for a value that changes only on a
+   * core swap.
    */
   get activeCoreId() {
     if (!this.corePath) return null;
+    if (this._coreIdCachePath === this.corePath) return this._coreIdCache;
     const entry = CORE_CATALOG.find((c) => c.path === this.corePath);
-    return entry ? entry.id : null;
+    this._coreIdCachePath = this.corePath;
+    this._coreIdCache = entry ? entry.id : null;
+    return this._coreIdCache;
   }
 
   // ------------------------------------------------------------------ frame ticks

@@ -10,7 +10,12 @@
 
 'use strict';
 
-const CACHE_VERSION = 'tas-studio-v23';
+// v24: the FPS-decay fix. piano-roll.js (windowed/recycled grid - the O(frame) per-frame DOM
+// rebuild is gone), emu-core-runner.js (iOS suspend/resume overdue clamp + resetClockAnchor),
+// tas-engine.js (zero-allocation rAF scheduling + resume re-anchor listeners), app.js (cached
+// banner node) and styles.css (.pr-spacer) all changed, so returning users MUST get the new
+// files instead of the service worker's cached v23 copies.
+const CACHE_VERSION = 'tas-studio-v24';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell (always precached). These are the files this feature ships. The emulator now
