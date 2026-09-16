@@ -18,7 +18,13 @@
 //   (e) NO worker is created and the engine exposes no worker handle / no worker primitives;
 //   (f) safety invariants: no memory-write/poke/inject/cheat method, exact ROM_PATH, graceful
 //       disabled state on a missing core/ROM, no file picker;
-//   (g) videoPath reports a main-* label (main-webgl2 here via the mock GL canvas).
+//   (g) videoPath reports a main-* label (main-webgl2 here via the mock GL canvas);
+//   (i) THE BLINDFOLD TEST (no-present diagnostic): OFF by default (unchanged behaviour); ON
+//       performs ZERO texSubImage2D/texImage2D/drawArrays (and ZERO putImageData on the 2D
+//       last-resort path) across many rAF turns while retro_run STILL advances ~1 frame per
+//       rAF at 1x, the framebuffer DECODE still runs, onFrame still fires and the real
+//       FpsMeter still reports a rate; the toggle flips at runtime (ON->OFF->ON) with the
+//       banner fields following; and the ?blindfold=1 / ?noPresent=1 URL parser is unit-tested.
 //
 // Run: node tools/engine-smoke.mjs
 import assert from 'node:assert';
@@ -422,6 +428,279 @@ await checkAsync('(h) ASYNCIFY free-running: EXACTLY one present per engine rAF 
   assert.ok(ashared.maxInFlight <= 1, `fast-forward keeps at most one suspension outstanding (maxInFlight=${ashared.maxInFlight})`);
 
   asyncEngine.pause();
+});
+
+// ======================================================================================
+// (i) THE BLINDFOLD TEST (no-present diagnostic mode).
+//
+// Blindfold mode must skip ONLY the per-frame GPU upload+draw. It is the whole point of the
+// diagnostic that NOTHING else changes: if the decode, the accumulator cadence, or the frame
+// emission also stopped, a "FPS holds at 60" result would exonerate innocent code. So this
+// block proves, against the REAL engine + REAL runner + REAL resolver + a mock GL canvas:
+//   (i0) blindfold defaults OFF (a fresh load behaves exactly as today);
+//   (i-b) OFF: exactly ONE present per rAF turn, as today;
+//   (i-a) ON: ZERO texSubImage2D / texImage2D / drawArrays across many rAF turns, while
+//         retro_run still advances ~1 frame per rAF at 1x, onFrame still fires, and the real
+//         FpsMeter still reports a non-zero rate;
+//   (i-c) ON: the framebuffer DECODE still runs (the onVideoFrame sink still fires and the
+//         reused RGBA buffer is still written) - proving ONLY upload+draw were skipped - and
+//         the pending-frame stash is cleared every turn so nothing accumulates;
+//   (i-d) the toggle flips at RUNTIME (ON -> OFF -> ON), notifies status, and the banner
+//         fields (videoPath suffix + present) follow;
+//   (i-e) the 2D last-resort path is blindfolded too (ZERO putImageData);
+//   (i-f) the URL parser selects blindfold at boot for ?blindfold=1 and the ?noPresent=1 alias.
+// ======================================================================================
+
+// --- URL-param parser (pure; no browser needed) ---
+check('(i-f) URL parser: ?blindfold=1 and the ?noPresent=1 alias select blindfold at boot', () => {
+  const p = mod.parseBlindfoldParam;
+  assert.strictEqual(typeof p, 'function', 'parseBlindfoldParam is exported');
+  for (const s of [
+    '?blindfold=1',
+    'blindfold=1',
+    '?blindfold=true',
+    '?blindfold=on',
+    '?blindfold=yes',
+    '?blindfold',
+    '?noPresent=1',
+    '?noPresent',
+    '?nopresent=true',
+    '?no-present=1',
+    '?BLINDFOLD=1',
+    '?core=realtime&blindfold=1',
+    '?blindfold=1&speed=2',
+  ]) {
+    assert.strictEqual(p(s), true, `blindfold ON for ${JSON.stringify(s)}`);
+  }
+  for (const s of [
+    '',
+    '?',
+    '?blindfold=0',
+    '?blindfold=false',
+    '?blindfold=off',
+    '?blindfold=no',
+    '?noPresent=0',
+    '?speed=2',
+    '?foo=blindfold',
+    undefined,
+    null,
+    123,
+  ]) {
+    assert.strictEqual(p(s), false, `blindfold OFF for ${JSON.stringify(s)}`);
+  }
+});
+
+check('(i-f) a ?blindfold=1 / ?noPresent=1 boot URL actually selects blindfold on a NEW engine', () => {
+  const { TASEngine } = mod;
+  const savedLoc = globalThis.location;
+  try {
+    // A fresh engine constructed under a blindfolded URL boots with the diagnostic already ON.
+    globalThis.location = { search: '?blindfold=1' };
+    assert.strictEqual(new TASEngine().isBlindfold(), true, '?blindfold=1 boots blindfolded');
+    globalThis.location = { search: '?core=realtime&noPresent=1' };
+    assert.strictEqual(new TASEngine().isBlindfold(), true, '?noPresent=1 alias boots blindfolded');
+    // ...and a plain URL (or an explicit =0) boots exactly as today.
+    globalThis.location = { search: '' };
+    assert.strictEqual(new TASEngine().isBlindfold(), false, 'a plain URL boots with blindfold OFF');
+    globalThis.location = { search: '?blindfold=0' };
+    assert.strictEqual(new TASEngine().isBlindfold(), false, '?blindfold=0 boots with blindfold OFF');
+  } finally {
+    globalThis.location = savedLoc;
+  }
+});
+
+// --- Blindfold fixture: a FRESH engine on a mock GL canvas, with the decode instrumented ---
+const { TASEngine: TASEngineClass } = mod;
+const { FpsMeter } = await import('../fps-meter.js');
+const bEngine = new TASEngineClass();
+const bgpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+const bcanvas = makeGLCanvas({ gpu: bgpu });
+const bshared = installEngineMockRunner(bEngine);
+// Instrument the engine's `_pendingFrame` stash. The runner assigns it from its onVideoFrame
+// sink AFTER decoding the core framebuffer into the reused RGBA buffer, so counting assignments
+// proves the DECODE still ran while blindfolded, and reading it back proves the stash is cleared.
+const decode = { count: 0, lastRgba: null, store: null };
+Object.defineProperty(bEngine, '_pendingFrame', {
+  configurable: true,
+  get() {
+    return decode.store;
+  },
+  set(v) {
+    if (v) {
+      decode.count += 1;
+      decode.lastRgba = v.rgba;
+    }
+    decode.store = v;
+  },
+});
+let bFrames = 0;
+const bMeter = new FpsMeter(1000);
+const bStatuses = [];
+bEngine.attach({
+  canvas: bcanvas,
+  noticeEl: {
+    hidden: true,
+    appendChild() {},
+    set innerHTML(_v) {},
+    get innerHTML() {
+      return '';
+    },
+  },
+});
+bEngine.onFrame(() => {
+  bFrames += 1;
+  bMeter.tick(fake.now());
+});
+bEngine.onStatus((snap) => bStatuses.push(snap));
+await checkAsync('(i) blindfold fixture: fresh engine boots on the mock GL canvas', async () => {
+  const ret = await bEngine.init({ corePaths: ['cores/snes9x_libretro.js'] });
+  assert.ok(ret && ret.ok === true, 'fixture engine booted');
+  assert.strictEqual(bEngine.videoPath, 'main-webgl2', 'fixture presents via main-thread WebGL2');
+});
+
+check('(i0) blindfold DEFAULTS OFF on a fresh load (no URL param) + full toggle API present', () => {
+  assert.strictEqual(typeof bEngine.setBlindfold, 'function', 'setBlindfold() exists');
+  assert.strictEqual(typeof bEngine.isBlindfold, 'function', 'isBlindfold() exists');
+  assert.strictEqual(bEngine.isBlindfold(), false, 'blindfold is OFF by default');
+  assert.strictEqual(bEngine.blindfold, false, 'the blindfold property mirrors it');
+  const s = bEngine.statusSnapshot();
+  assert.strictEqual(s.blindfold, false, 'snapshot reports blindfold false');
+  assert.strictEqual(s.present, 'ON', 'snapshot reports Present: ON');
+  assert.strictEqual(s.videoPath, 'main-webgl2', 'videoPath carries NO blindfold suffix by default');
+});
+
+await checkAsync('(i-b) blindfold OFF (default): EXACTLY one present per rAF turn, as today', async () => {
+  bEngine.setSpeed(1);
+  fake.stepRaf(3); // settle the accumulator anchor
+  bshared.resolvedPerFrame.length = 0;
+  bgpu.texImage2D = 0;
+  bgpu.texSubImage2D = 0;
+  bgpu.drawArrays = 0;
+  const TURNS = 30;
+  const fired = fake.stepRaf(TURNS);
+  assert.strictEqual(fired, TURNS, `fired ${TURNS} rAF turns`);
+  assert.ok(bgpu.drawArrays <= TURNS, `at most ONE present per rAF turn (draws=${bgpu.drawArrays})`);
+  assert.ok(bgpu.drawArrays >= TURNS - 5, `a present on essentially every turn (draws=${bgpu.drawArrays})`);
+  assert.strictEqual(bgpu.texImage2D + bgpu.texSubImage2D, bgpu.drawArrays, 'one upload + one draw per present');
+  assert.strictEqual(bgpu.createTexture, 1, 'ONE texture for the session (presenter setup untouched)');
+});
+
+await checkAsync('(i-a) blindfold ON: ZERO texSubImage2D/texImage2D/drawArrays while retro_run + onFrame + FPS keep running', async () => {
+  const before = bStatuses.length;
+  assert.strictEqual(bEngine.setBlindfold(true), true, 'setBlindfold(true) returns the new state');
+  assert.strictEqual(bEngine.isBlindfold(), true, 'blindfold is ON');
+  assert.ok(bStatuses.length > before, 'flipping blindfold notified status subscribers (banner updates at once)');
+  fake.stepRaf(2); // let the mode take effect on the running loop
+  bshared.resolvedPerFrame.length = 0;
+  bgpu.texImage2D = 0;
+  bgpu.texSubImage2D = 0;
+  bgpu.drawArrays = 0;
+  decode.count = 0;
+  decode.lastRgba = null;
+  bFrames = 0;
+  bMeter.reset();
+
+  const TURNS = 45;
+  const fired = fake.stepRaf(TURNS);
+  assert.strictEqual(fired, TURNS, `fired ${TURNS} rAF turns while blindfolded`);
+
+  // THE ASSERTION: no GPU work at all across the whole window.
+  assert.strictEqual(bgpu.texSubImage2D, 0, `ZERO texSubImage2D while blindfolded (got ${bgpu.texSubImage2D})`);
+  assert.strictEqual(bgpu.texImage2D, 0, `ZERO texImage2D while blindfolded (got ${bgpu.texImage2D})`);
+  assert.strictEqual(bgpu.drawArrays, 0, `ZERO drawArrays while blindfolded (got ${bgpu.drawArrays})`);
+
+  // ...while EVERYTHING upstream still runs at exactly the same cadence.
+  const ran = bshared.resolvedPerFrame.length;
+  assert.ok(ran >= TURNS - 5 && ran <= TURNS + 1, `retro_run still advances ~1 frame per rAF at 1x (got ${ran}/${TURNS})`);
+  assert.ok(bFrames >= ran, `onFrame still fires for every advanced frame (onFrame=${bFrames}, frames=${ran})`);
+  assert.ok(bMeter.fps(fake.now()) > 0, 'the real rolling-window FpsMeter still reports a non-zero rate');
+  assert.strictEqual(bEngine.videoPath, 'main-webgl2', 'presenter/GL context untouched (only the per-frame draw is skipped)');
+  assert.ok(bEngine._gl, 'the GLPresenter still exists while blindfolded (setup deliberately unchanged)');
+});
+
+check('(i-c) blindfold ON: the framebuffer DECODE still ran (only upload+draw were skipped)', () => {
+  const ran = bshared.resolvedPerFrame.length;
+  assert.ok(decode.count >= ran, `onVideoFrame sink fired per advanced frame (decodes=${decode.count}, frames=${ran})`);
+  assert.ok(decode.lastRgba, 'a decoded RGBA buffer was stashed while blindfolded');
+  assert.ok(decode.lastRgba.length >= FB_W * FB_H * 4, 'the reused RGBA buffer is framebuffer-sized');
+  assert.ok(decode.lastRgba[0] > 200, `the decode WROTE pixels (red channel=${decode.lastRgba[0]} from the mock core)`);
+  assert.strictEqual(decode.lastRgba[3], 0xff, 'decoded alpha is opaque (real decode output, not a zeroed buffer)');
+  assert.strictEqual(decode.store, null, 'the pending frame is CLEARED every turn (nothing accumulates)');
+});
+
+check('(i-d) banner surface while blindfolded: videoPath suffix + explicit present field', () => {
+  const s = bEngine.statusSnapshot();
+  assert.strictEqual(s.blindfold, true, 'snapshot reports blindfold true');
+  assert.strictEqual(s.present, 'OFF (BLINDFOLD)', 'snapshot Present field reads OFF (BLINDFOLD)');
+  assert.strictEqual(s.videoPath, 'main-webgl2 (BLINDFOLD: no present)', 'videoPath is unmistakable while blindfolded');
+  assert.strictEqual(s.videoPathBase, 'main-webgl2', 'the raw path is still available');
+  const last = bStatuses[bStatuses.length - 1];
+  assert.strictEqual(last.blindfold, true, 'the LAST status pushed to subscribers reflects blindfold');
+});
+
+await checkAsync('(i-d) the toggle flips at RUNTIME: ON -> OFF resumes presenting, OFF -> ON stops it again', async () => {
+  // ON -> OFF: presenting resumes immediately, one present per turn, same single texture.
+  bEngine.setBlindfold(false);
+  assert.strictEqual(bEngine.isBlindfold(), false, 'blindfold flipped OFF at runtime');
+  assert.strictEqual(bEngine.statusSnapshot().present, 'ON', 'banner Present back to ON');
+  assert.strictEqual(bEngine.statusSnapshot().videoPath, 'main-webgl2', 'videoPath suffix removed');
+  fake.stepRaf(2);
+  bgpu.texImage2D = 0;
+  bgpu.texSubImage2D = 0;
+  bgpu.drawArrays = 0;
+  const TURNS = 20;
+  const fired = fake.stepRaf(TURNS);
+  assert.ok(bgpu.drawArrays >= 1, 'presenting RESUMED after flipping blindfold off');
+  assert.ok(bgpu.drawArrays <= fired, `still at most ONE present per rAF turn (draws=${bgpu.drawArrays} <= turns=${fired})`);
+  assert.strictEqual(bgpu.createTexture, 1, 'still ONE texture for the whole session (no presenter rebuild on flip)');
+
+  // OFF -> ON again: back to zero GPU work.
+  bEngine.blindfold = true; // exercise the property setter form too
+  assert.strictEqual(bEngine.isBlindfold(), true, 'the blindfold property setter turns it back ON');
+  fake.stepRaf(2);
+  bgpu.texImage2D = 0;
+  bgpu.texSubImage2D = 0;
+  bgpu.drawArrays = 0;
+  bshared.resolvedPerFrame.length = 0;
+  const fired2 = fake.stepRaf(20);
+  assert.strictEqual(fired2, 20, 'fired 20 more turns');
+  assert.strictEqual(bgpu.drawArrays, 0, 'ZERO presents again after flipping back ON');
+  assert.ok(bshared.resolvedPerFrame.length >= 15, `emulation still advancing after the second flip (${bshared.resolvedPerFrame.length} frames)`);
+  bEngine.pause();
+});
+
+await checkAsync('(i-e) blindfold ON blocks the 2D last-resort path too: ZERO putImageData', async () => {
+  const twoD = new TASEngineClass();
+  const canvas2d = make2DCanvas();
+  const shared2d = installEngineMockRunner(twoD);
+  twoD.attach({
+    canvas: canvas2d,
+    noticeEl: {
+      hidden: true,
+      appendChild() {},
+      set innerHTML(_v) {},
+      get innerHTML() {
+        return '';
+      },
+    },
+  });
+  assert.strictEqual(twoD.videoPath, 'main-2d', 'the 2D last-resort present path engaged');
+  const ret = await twoD.init({ corePaths: ['cores/snes9x_libretro.js'] });
+  assert.ok(ret && ret.ok === true, '2D-path engine booted');
+  // Baseline: presenting normally blits.
+  fake.stepRaf(5);
+  assert.ok(canvas2d.__blits.length >= 1, `2D path blits when NOT blindfolded (blits=${canvas2d.__blits.length})`);
+  // Blindfolded: zero blits, emulation still advancing.
+  twoD.setBlindfold(true);
+  fake.stepRaf(2);
+  canvas2d.__blits.length = 0;
+  shared2d.resolvedPerFrame.length = 0;
+  const fired = fake.stepRaf(25);
+  assert.strictEqual(fired, 25, 'fired 25 blindfolded turns on the 2D path');
+  assert.strictEqual(canvas2d.__blits.length, 0, `ZERO putImageData while blindfolded (got ${canvas2d.__blits.length})`);
+  assert.ok(shared2d.resolvedPerFrame.length >= 20, `retro_run still advanced (${shared2d.resolvedPerFrame.length} frames)`);
+  assert.strictEqual(twoD.statusSnapshot().videoPath, 'main-2d (BLINDFOLD: no present)', '2D banner label is explicit too');
+  twoD.pause();
 });
 
 fake.restore();

@@ -99,6 +99,15 @@ body {
 #debug-banner.debug-banner--error {
   border-color: var(--error);
 }
+/* BLINDFOLD (no-present) diagnostic ACTIVE: make the banner itself unmistakable so an FPS
+   number read off a phone video is never attributed to the wrong present mode. */
+#debug-banner.debug-banner--blindfold {
+  border-color: var(--warn);
+}
+#debug-banner .debug-banner__item--blindfold {
+  color: var(--warn);
+  font-weight: 700;
+}
 #debug-banner .debug-banner__item strong {
   color: var(--text);
 }
@@ -368,6 +377,33 @@ body {
   background: var(--panel-2);
   min-width: 84px;
   justify-content: center;
+}
+
+/* BLINDFOLD (no-present) diagnostic toggle. Sits next to the frame counter / FPS readout so
+   the phone-held user can flip it without a reload. Styled as a tappable pill (checkbox +
+   label are one hit target) and turns warning-colored while ACTIVE so a screen recording can
+   never confuse a blindfolded FPS number with a normal one. */
+#frame-controls .blindfold-group {
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+  cursor: pointer;
+  touch-action: manipulation;
+  user-select: none;
+}
+#frame-controls .blindfold-group input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  touch-action: manipulation;
+}
+#frame-controls .blindfold-group.is-active {
+  border-color: var(--warn);
+  color: var(--warn);
+  font-weight: 700;
 }
 
 /* Core selection dropdown (emulator accuracy choice, not a ROM/level picker). */

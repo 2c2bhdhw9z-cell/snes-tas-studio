@@ -102,6 +102,19 @@
           <span id="speed-value">1.0x</span>
         </div>
         <span id="frame-counter" class="speed-group">Frame: 0</span>
+        <!-- BLINDFOLD (no-present) DIAGNOSTIC toggle — DEFAULT OFF (unchecked), so a fresh load
+             behaves exactly as before. When checked, the engine keeps running the rAF loop,
+             retro_run, the framebuffer decode, the HUD and the FPS meter EXACTLY as normal but
+             skips the per-frame GPU upload+draw (no texSubImage2D / drawArrays / putImageData).
+             Flips live at runtime with no reload; also settable at boot with ?blindfold=1
+             (alias ?noPresent=1) or from the console via window.TASEngine.setBlindfold(true).
+             READ-ONLY diagnostic: it only suppresses drawing — it grants no emulation,
+             memory-write, cheat or level-select capability. -->
+        <label id="blindfold-group" class="speed-group blindfold-group" for="blindfold-toggle"
+               title="Diagnostic: run the emulator normally but skip the per-frame GPU upload/draw">
+          <input type="checkbox" id="blindfold-toggle" />
+          <span>Blindfold (no present)</span>
+        </label>
         <!-- Live FPS readout (rolling 1-second window of ACTUAL advanced frames). Prominent,
              easy to read on-device; updated ~2x/sec by app.js. READ-ONLY perf display: it
              observes frame messages and shows a rate, granting no emulation capability. -->

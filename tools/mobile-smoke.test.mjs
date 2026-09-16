@@ -11,6 +11,13 @@
 // mask AND that it reaches the engine, and it proves the OR-merge determinism directly against
 // the real InputResolver (the same resolver the engine uses) -- frame N = (log(N)|live)>>>0.
 //
+// It also asserts the BLINDFOLD (no-present) diagnostic's on-device control surface: the
+// #blindfold-toggle checkbox in #frame-controls (default OFF, labelled "Blindfold (no present)",
+// styled as a tappable pill), the app.js wiring that drives engine.setBlindfold() and mirrors
+// snap.blindfold/snap.present into the banner, the ?blindfold=1 / ?noPresent=1 boot parser, and
+// behaviorally that a frame advance with blindfold ON still runs retro_run but performs ZERO
+// GPU upload/draw.
+//
 // It also keeps all preserved-feature + safety assertions: #touch-controls low opacity,
 // gesture suppression in app.js, standalone display-mode CSS, viewport meta, no <input
 // type=file>, encodeURI ROM fetch (in emu-core-runner.js), pointerdown+click primary controls,
@@ -125,6 +132,38 @@ check('app.js sources FPS from a rolling-window FpsMeter', /new\s+FpsMeter\(/.te
 check('app.js ticks the FPS meter on each advanced frame (fpsMeter.tick)', /fpsMeter\.tick\(/.test(appSrc));
 check('app.js renders the FPS readout element (#fps-readout text)', /getElementById\(\s*['"]fps-readout['"]\s*\)/.test(appSrc));
 check('debug banner carries an FPS field', /mk\(\s*['"]fps['"]\s*,\s*['"]FPS['"]/.test(appSrc));
+
+// BLINDFOLD (no-present) DIAGNOSTIC — the on-device control surface. The user must be able to
+// flip it from a phone three ways (URL param, on-screen checkbox, programmatic setter) and read
+// the ACTIVE mode straight off a screen recording, so: markup + CSS + app.js wiring + the
+// engine's URL parser and banner fields are all asserted here.
+const engineSrc = fs.readFileSync(path.join(ROOT, 'tas-engine.js'), 'utf8');
+check('#blindfold-toggle checkbox exists in the markup', (() => {
+  const el = document.getElementById('blindfold-toggle');
+  return el && el.tagName === 'INPUT' && el.type === 'checkbox';
+})());
+check('#blindfold-toggle lives inside #frame-controls (thumb-reachable next to the frame controls)', (() => {
+  const fc = document.getElementById('frame-controls');
+  const el = document.getElementById('blindfold-toggle');
+  return fc && el && fc.contains(el);
+})());
+check('blindfold control is DEFAULT OFF (unchecked in the markup)', (() => {
+  const el = document.getElementById('blindfold-toggle');
+  return el && el.checked === false && !el.hasAttribute('checked');
+})());
+check('blindfold control is labelled "Blindfold (no present)"', /Blindfold \(no present\)/.test(html));
+check('blindfold control styled as a tappable pill (touch-action: manipulation)', /\.blindfold-group\s*\{[^}]*touch-action:\s*manipulation/s.test(css));
+check('blindfold control gets an ACTIVE highlight (.blindfold-group.is-active)', /\.blindfold-group\.is-active\s*\{/.test(css));
+check('debug banner has a highlighted BLINDFOLD state (.debug-banner--blindfold)', /\.debug-banner--blindfold\s*\{/.test(css));
+check('app.js wires the on-screen blindfold checkbox', /getElementById\(\s*['"]blindfold-toggle['"]\s*\)/.test(appSrc));
+check('app.js drives engine.setBlindfold() from the checkbox', /engine\.setBlindfold\(/.test(appSrc));
+check('app.js seeds/syncs the checkbox from engine.isBlindfold()', /engine\.isBlindfold\(\)/.test(appSrc));
+check('debug banner carries a Present (blindfold) field', /mk\(\s*['"]present['"]\s*,\s*['"]Present['"]/.test(appSrc));
+check('app.js mirrors snap.blindfold / snap.present into the banner', /snap\.blindfold/.test(appSrc) && /snap\.present/.test(appSrc));
+check('tas-engine.js parses ?blindfold at boot (with the noPresent alias)', /parseBlindfoldParam/.test(engineSrc) && /nopresent/.test(engineSrc));
+check('tas-engine.js exposes setBlindfold()/isBlindfold()', /setBlindfold\s*\(/.test(engineSrc) && /isBlindfold\s*\(/.test(engineSrc));
+check('tas-engine.js gates ONLY the present path on blindfold (early return in _present)', /_present\(rgba, width, height\)\s*\{\s*(?:\/\/[^\n]*\n\s*)*if \(this\._blindfold\) return;/.test(engineSrc));
+check('banner videoPath is suffixed while blindfolded (BLINDFOLD: no present)', /BLINDFOLD: no present/.test(engineSrc));
 // DOM-REUSE (steady-decay fix): the per-frame banner render must MUTATE cached text nodes,
 // not rebuild the banner every frame. renderBanner() runs up to 60x/sec (once per onFrame), so
 // a per-frame `innerHTML=''` + createElement x5 would churn ~300 nodes/sec + force full layout.
@@ -178,7 +217,9 @@ const engineMod = await import('../tas-engine.js');
 const engine = engineMod.default;
 window.TASEngine = engine;
 const shared = installEngineMockRunner(engine);
-engine.attach({ canvas: makeGLCanvas(), noticeEl: document.getElementById('notice') });
+// Count GPU calls so the BLINDFOLD (no-present) diagnostic can be verified behaviorally below.
+const gpu = { texImage2D: 0, texSubImage2D: 0, drawArrays: 0, createTexture: 0, createProgram: 0 };
+engine.attach({ canvas: makeGLCanvas({ gpu }), noticeEl: document.getElementById('notice') });
 check('engine created NO worker (single-thread; no worker handle)', typeof engine.worker === 'undefined' && typeof globalThis.Worker === 'undefined');
 check('engine presents on a MAIN-thread path (videoPath main-*)', /^main-/.test(engine.videoPath));
 
@@ -187,6 +228,38 @@ check('engine presents on a MAIN-thread path (videoPath main-*)', /^main-/.test(
 await engine.init({ corePaths: ['cores/snes9x_libretro.js'] });
 engine.pause();
 fake.stepRaf(2);
+
+// --- BLINDFOLD (no-present) behaviour on the device path: boot parser + live toggle ---
+check('parseBlindfoldParam is exported for the boot URL (?blindfold=1)', typeof engineMod.parseBlindfoldParam === 'function');
+check('?blindfold=1 selects blindfold at boot', engineMod.parseBlindfoldParam('?blindfold=1') === true);
+check('?noPresent=1 alias selects blindfold at boot', engineMod.parseBlindfoldParam('?noPresent=1') === true);
+check('a plain URL (no param) leaves blindfold OFF', engineMod.parseBlindfoldParam('') === false && engine.isBlindfold() === false);
+{
+  // Blindfold OFF (default): a frame advance presents exactly once (unchanged behaviour).
+  gpu.drawArrays = 0;
+  shared.resolvedPerFrame.length = 0;
+  {
+    const r = engine.frameAdvance();
+    if (r && typeof r.then === 'function') await r;
+  }
+  check('blindfold OFF: frame advance presents exactly once', gpu.drawArrays === 1 && shared.resolvedPerFrame.length === 1);
+  // Blindfold ON: the SAME frame advance still runs retro_run but performs NO GPU work.
+  engine.setBlindfold(true);
+  gpu.drawArrays = 0;
+  gpu.texSubImage2D = 0;
+  gpu.texImage2D = 0;
+  shared.resolvedPerFrame.length = 0;
+  {
+    const r = engine.frameAdvance();
+    if (r && typeof r.then === 'function') await r;
+  }
+  check('blindfold ON: retro_run still advances the frame', shared.resolvedPerFrame.length === 1);
+  check('blindfold ON: ZERO GPU upload/draw for that frame', gpu.drawArrays === 0 && gpu.texSubImage2D === 0 && gpu.texImage2D === 0);
+  check('blindfold ON: banner reports Present: OFF (BLINDFOLD)', engine.statusSnapshot().present === 'OFF (BLINDFOLD)');
+  check('blindfold ON: banner videoPath is suffixed', /\(BLINDFOLD: no present\)$/.test(engine.statusSnapshot().videoPath));
+  engine.setBlindfold(false);
+  check('blindfold OFF again: banner reports Present: ON', engine.statusSnapshot().present === 'ON');
+}
 
 const { TASStudio } = await import('../piano-roll.js');
 const { LiveInput, GAMEPAD_STANDARD_MAP } = await import('../live-input.js');

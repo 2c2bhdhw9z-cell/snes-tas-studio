@@ -17,6 +17,12 @@
 //      ROM fetch status, and a window.onerror / unhandledrejection listener that prints
 //      uncaught JS/WASM exceptions on screen so mobile errors are visible without a
 //      desktop console.
+//   5) The BLINDFOLD (no-present) diagnostic toggle: an on-screen checkbox in #frame-controls
+//      that flips engine.setBlindfold() live (no reload), kept in sync with the engine's boot
+//      state (?blindfold=1 / ?noPresent=1) and with programmatic
+//      window.TASEngine.setBlindfold() calls, plus a banner "Present: ON | OFF (BLINDFOLD)"
+//      field (and the ' (BLINDFOLD: no present)' videoPath suffix) so a phone screen recording
+//      always states which present mode produced the FPS number next to it.
 //
 // It is loaded as a deferred ES module (<script type="module" src="app.js">). memory-watch.js
 // and piano-roll.js still self-wire on DOMContentLoaded via window.TASEngine, so module load
@@ -65,7 +71,9 @@ const bannerState = {
   engine: 'Init', // Engine lifecycle: Init | GameLoaded | RunLoop Active | Stopped
   frame: 0, // live frame number (advances one per retro_run)
   fps: 0, // live measured FPS over a rolling 1-second window (see FpsMeter)
-  video: 'none', // ACTIVE present path: main-webgl2|main-webgl1|main-2d (single main-thread present)
+  video: 'none', // ACTIVE present path: main-webgl2|main-webgl1|main-2d (+ BLINDFOLD suffix)
+  present: 'ON', // per-frame GPU upload+draw: 'ON' | 'OFF (BLINDFOLD)' — see the blindfold note
+  blindfold: false, // whether the BLINDFOLD (no-present) diagnostic is currently active
   errors: [], // captured uncaught errors (most-recent last, capped)
 };
 const MAX_BANNER_ERRORS = 5;
@@ -103,7 +111,18 @@ const bannerDom = {
   el: null, // the #debug-banner container the skeleton was built into
   values: null, // { core, rom, engine, fps, video, err } -> the Text node holding each value
   items: null, // { err } -> the wrapper span (for the per-error class toggle)
-  last: { core: null, rom: null, engine: null, fps: null, video: null, err: null, hasError: null, errItem: null },
+  last: {
+    core: null,
+    rom: null,
+    engine: null,
+    fps: null,
+    video: null,
+    present: null,
+    err: null,
+    hasError: null,
+    errItem: null,
+    blindfold: null,
+  },
 };
 
 function buildBannerSkeleton(el) {
@@ -127,11 +146,26 @@ function buildBannerSkeleton(el) {
   mk('engine', 'Engine');
   mk('fps', 'FPS');
   mk('video', 'Video');
+  // BLINDFOLD DIAGNOSTIC readout: the per-frame GPU upload+draw state. Reads 'ON' normally and
+  // 'OFF (BLINDFOLD)' when the blindfold test is active, so a phone screen recording always
+  // says which mode produced the FPS number sitting right next to it.
+  mk('present', 'Present');
   mk('err', 'Err');
   bannerDom.el = el;
   bannerDom.values = values;
   bannerDom.items = items;
-  bannerDom.last = { core: null, rom: null, engine: null, fps: null, video: null, err: null, hasError: null, errItem: null };
+  bannerDom.last = {
+    core: null,
+    rom: null,
+    engine: null,
+    fps: null,
+    video: null,
+    present: null,
+    err: null,
+    hasError: null,
+    errItem: null,
+    blindfold: null,
+  };
 }
 
 // Update a cached Text node only when its value changed (avoids needless layout invalidation).
@@ -168,7 +202,18 @@ function renderBanner() {
   // ACTIVE video present path (so the device can report which renderer engaged). This is the
   // diagnostic that tells us which main-thread renderer (main-webgl2/main-webgl1/main-2d) engaged.
   setBannerText('video', bannerState.video);
+  // Per-frame present state (the blindfold diagnostic). The engine's snapshot ALSO suffixes
+  // videoPath with ' (BLINDFOLD: no present)', so the mode is stated twice and unmissably.
+  setBannerText('present', bannerState.present);
   setBannerText('err', errLine);
+
+  // Highlight the whole banner + the Present field while blindfolded (cached-node class toggle,
+  // only on change — no per-frame layout churn).
+  if (bannerDom.last.blindfold !== bannerState.blindfold) {
+    el.classList.toggle('debug-banner--blindfold', bannerState.blindfold);
+    bannerDom.items.present.classList.toggle('debug-banner__item--blindfold', bannerState.blindfold);
+    bannerDom.last.blindfold = bannerState.blindfold;
+  }
 
   // Toggle the error class on the Err item only when it changes.
   const errItem = bannerState.errors.length > 0;
@@ -176,6 +221,43 @@ function renderBanner() {
     bannerDom.items.err.classList.toggle('debug-banner__item--err', errItem);
     bannerDom.last.errItem = errItem;
   }
+}
+
+// --------------------------------------------------------------------- blindfold toggle
+//
+// THE BLINDFOLD TEST (diagnostic, DEFAULT OFF). The engine can run the rAF loop, retro_run, the
+// framebuffer decode, the HUD and the FPS meter EXACTLY as normal while skipping ONLY the
+// per-frame GPU upload+draw (no texSubImage2D / drawArrays / putImageData). If FPS still decays
+// with drawing skipped, the WASM core is the leak; if it holds at 60, the WebGL present path is.
+// Three ways in, all landing on engine.setBlindfold(): the URL (?blindfold=1, alias
+// ?noPresent=1 — parsed by tas-engine.js at construction), this on-screen checkbox (live, no
+// reload), and window.TASEngine.setBlindfold(true|false) from a console. This control only
+// suppresses DRAWING — it grants no emulation, memory-write, cheat or level-select capability.
+
+/** Reflect the engine's blindfold state onto the checkbox + its label styling (cached nodes). */
+function syncBlindfoldControl(on) {
+  if (typeof document === 'undefined') return;
+  const box = document.getElementById('blindfold-toggle');
+  if (box && box.checked !== !!on) box.checked = !!on;
+  const group = document.getElementById('blindfold-group');
+  if (group) group.classList.toggle('is-active', !!on);
+}
+
+/** Wire the on-screen checkbox to the engine (idempotent; safe if the element is absent). */
+function wireBlindfoldControl() {
+  const box = typeof document !== 'undefined' ? document.getElementById('blindfold-toggle') : null;
+  if (!box || box.dataset.wired === '1') {
+    syncBlindfoldControl(engine.isBlindfold());
+    return;
+  }
+  box.dataset.wired = '1';
+  // Start from the engine's boot state so ?blindfold=1 arrives pre-checked.
+  syncBlindfoldControl(engine.isBlindfold());
+  box.addEventListener('change', () => {
+    engine.setBlindfold(!!box.checked);
+    // setBlindfold notifies status, which re-renders the banner and re-syncs this control.
+    syncBlindfoldControl(engine.isBlindfold());
+  });
 }
 
 function recordError(message) {
@@ -210,6 +292,13 @@ engine.onStatus((snap) => {
   if (typeof snap.engineStatus === 'string') bannerState.engine = snap.engineStatus;
   if (typeof snap.frame === 'number') bannerState.frame = snap.frame;
   if (typeof snap.videoPath === 'string') bannerState.video = snap.videoPath;
+  // BLINDFOLD diagnostic state (per-frame upload+draw ON/OFF), mirrored into the banner and
+  // reflected back onto the on-screen checkbox so all three toggle routes stay in sync.
+  if (typeof snap.present === 'string') bannerState.present = snap.present;
+  if (typeof snap.blindfold === 'boolean') {
+    bannerState.blindfold = snap.blindfold;
+    syncBlindfoldControl(snap.blindfold);
+  }
   renderBanner();
 });
 
@@ -240,6 +329,10 @@ window.addEventListener('DOMContentLoaded', () => {
   // as last resort) and records the video path. No worker is created and the canvas is never
   // transferred anywhere; the emulator runs on the main thread in the engine's rAF loop.
   engine.attach({ canvas, noticeEl });
+
+  // BLINDFOLD (no-present) diagnostic checkbox — wired AFTER attach so the control reflects the
+  // engine's boot state (?blindfold=1 / ?noPresent=1 arrives already checked). DEFAULT OFF.
+  wireBlindfoldControl();
 
   // Frame counter readout. The full toolbar wiring (play/pause, frame advance, speed
   // slider, fast-forward, save/load) lives in piano-roll.js (TASStudio).

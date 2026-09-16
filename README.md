@@ -429,6 +429,44 @@ they must be checked on the actual hardware:
   no core shipped). See `cores/README.md` / `cores/build.json`. snes9x-in-worker remains the
   real-time default; confirming this on the device is the final check.
 
+### The BLINDFOLD test (`?blindfold=1`) — is it the WASM core, or Apple's WebGL?
+
+The monotonic 60 → 8 FPS decay on the physical device has now survived the elimination of the JS
+heap, the WASM heap, native transferable memory, GPU command-queue flooding, OffscreenCanvas and
+the **entire Web Worker + postMessage bridge** (The Great Reversal). Two suspects remain:
+
+1. the `snes9x.wasm` core leaking/fragmenting on every `retro_run`, or
+2. iOS Safari leaking natively inside `gl.texSubImage2D` / main-thread WebGL presentation.
+
+**Blindfold mode** separates them. It runs the rAF loop, input resolution, `retro_run` (same
+accumulator, same bounded catch-up), the framebuffer **decode** into the reused RGBA buffer, the
+HUD reads, `onFrame` emission and the FPS meter **exactly as normal**, and skips **only** the
+per-frame GPU upload+draw: `tas-engine.js`'s single present choke point `_present()` returns
+before any `texSubImage2D`, `drawArrays` or `putImageData`. Presenter/GL-context **setup is
+deliberately unchanged**, so the only variable between the two runs is the per-frame GPU work.
+
+Three ways to drive it (default **OFF** — a fresh load behaves exactly as before):
+
+| Route | How |
+| --- | --- |
+| URL at boot | `…/index.html?blindfold=1` (alias `?noPresent=1`; bare `?blindfold` also works) |
+| On screen | the **“Blindfold (no present)”** checkbox in the frame-controls toolbar, next to the FPS readout — flips live, no reload |
+| Programmatic | `window.TASEngine.setBlindfold(true \| false)`, read back with `isBlindfold()` or the `blindfold` property |
+
+The debug banner states the active mode twice, so a phone screen recording can never attribute an
+FPS number to the wrong mode: **`Present: ON`** with `Video: main-webgl2` normally, and
+**`Present: OFF (BLINDFOLD)`** with `Video: main-webgl2 (BLINDFOLD: no present)` while
+blindfolded (banner + toggle turn warning-colored).
+
+**Reading the result on-device** (watch the FPS field for ≥45 s):
+
+- FPS **still decays to ~8** → the drawing was never the problem: the **snes9x WASM core** is
+  leaking/fragmenting per `retro_run`. Next step: swap cores.
+- FPS **holds at 60** → emulation is innocent: **Apple's WebGL present path** is leaking. Next
+  step: find a non-WebGL present path.
+
+The screen stays frozen while blindfolded — that is expected; the FPS counter is the signal.
+
 ## Dev tooling / tests
 
 ```sh

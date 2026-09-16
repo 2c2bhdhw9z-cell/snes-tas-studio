@@ -50,6 +50,7 @@
 //   setSpeed(mult) fastForward(on) setCore(path) saveState() loadState(bytes,{frame})
 //   onFrame(cb) onStatus(cb) onStateLoaded(cb) getMemoryView() sendLiveMask(mask)
 //   sendInputEdit(edit) statusSnapshot() (includes videoPath)
+//   plus the blindfold diagnostic: setBlindfold(on) isBlindfold() and a `blindfold` property
 //   plus synced fields: currentFrame paused status coreStatus romStatus romBytes engineStatus
 //   speed activeCoreId. Exported ROM_PATH + JOYPAD + re-exported EmuCoreRunner + SMB1_HUD_ADDR.
 //
@@ -64,6 +65,30 @@
 // piano-roll.js sends scripted edits via sendInputEdit() and streams the live controller/touch
 // mask via sendLiveMask(); the runner resolves (log.getMask(frame) | liveMask) >>> 0 at the
 // instant retro_run pulls input for the frame it is about to run.
+//
+// BLINDFOLD MODE (the "blindfold test" diagnostic, DEFAULT OFF):
+// The FPS decay has survived the removal of the JS heap, the WASM heap, transferable memory,
+// OffscreenCanvas and the ENTIRE Web Worker bridge. Two suspects remain: (1) the snes9x WASM
+// core leaking/fragmenting per retro_run, or (2) iOS Safari leaking natively inside
+// gl.texSubImage2D / main-thread WebGL presentation. Blindfold mode isolates them by running
+// EVERYTHING as normal - the rAF loop, input resolution, retro_run at the same cadence with the
+// same accumulator + bounded catch-up, the framebuffer DECODE into the reused RGBA buffer, HUD
+// reads, onFrame emission and the FPS meter - while performing NO GPU/canvas work at all: the
+// SINGLE choke point _present() early-returns before any texSubImage2D / drawArrays /
+// putImageData call. Interpretation on device: FPS still decays to ~8 => the WASM core is the
+// leak (swap cores next); FPS holds at 60 => Apple's WebGL/present path is the leak (find a
+// non-WebGL present path).
+//
+// DELIBERATE CHOICE: presenter SETUP is left completely UNCHANGED (attach() still creates the
+// GL context, texture, program and quad exactly as today, and videoPath still reports the real
+// context label). Only the PER-FRAME upload+draw is skipped, so the ONE variable between the
+// two runs is the per-frame GPU work - not context creation, not decode, not pacing.
+// Blindfold is OFF on a fresh load unless it is explicitly requested, and can be driven three
+// ways: the URL (?blindfold=1, alias ?noPresent=1), the on-screen "Blindfold (no present)"
+// checkbox in #frame-controls, or window.TASEngine.setBlindfold(true|false) / isBlindfold().
+// The active mode is surfaced in the status snapshot (videoPath gains a
+// ' (BLINDFOLD: no present)' suffix, plus explicit `blindfold` / `present` fields) so the
+// on-screen debug banner makes it unmistakable which mode produced a given FPS number.
 //
 // GRACEFUL DEGRADATION: a missing core/ROM renders a notice + disabled state and never throws,
 // never opens a file picker. HARD RULES: memory is STRICTLY READ-ONLY (read accessors only, no
@@ -98,6 +123,64 @@ export const JOYPAD = Object.freeze({
   L: 10,
   R: 11,
 });
+
+/**
+ * Parse the BLINDFOLD (no-present) diagnostic flag out of a URL query string. Pure + exported
+ * so it can be unit-tested without a browser.
+ *
+ * Accepted (case-insensitive keys): `blindfold` and its alias `noPresent`/`nopresent`.
+ *   ?blindfold=1 | =true | =on | =yes | bare ?blindfold  -> true
+ *   ?blindfold=0 | =false | =off | =no | absent          -> false (the DEFAULT)
+ * A bare key with no '=' counts as ON so a phone-typed `?blindfold` works.
+ *
+ * @param {string} search a location.search style string (with or without the leading '?')
+ * @returns {boolean} whether blindfold mode was requested at boot
+ */
+export function parseBlindfoldParam(search) {
+  if (typeof search !== 'string' || !search) return false;
+  const q = search.charAt(0) === '?' ? search.slice(1) : search;
+  if (!q) return false;
+  let on = false;
+  for (const part of q.split('&')) {
+    if (!part) continue;
+    const eq = part.indexOf('=');
+    const rawKey = eq === -1 ? part : part.slice(0, eq);
+    let key;
+    try {
+      key = decodeURIComponent(rawKey).trim().toLowerCase();
+    } catch (_err) {
+      key = rawKey.trim().toLowerCase();
+    }
+    if (key !== 'blindfold' && key !== 'nopresent' && key !== 'no-present') continue;
+    if (eq === -1) {
+      on = true; // bare ?blindfold
+      continue;
+    }
+    let val;
+    try {
+      val = decodeURIComponent(part.slice(eq + 1)).trim().toLowerCase();
+    } catch (_err) {
+      val = part.slice(eq + 1).trim().toLowerCase();
+    }
+    // An explicit falsy value turns it OFF (so ?blindfold=0 behaves as today).
+    on = !(val === '0' || val === 'false' || val === 'off' || val === 'no');
+  }
+  return on;
+}
+
+/** Read the boot-time blindfold flag from the current location, if any. Never throws. */
+function readBlindfoldFromLocation() {
+  try {
+    const loc =
+      (typeof window !== 'undefined' && window.location) ||
+      (typeof globalThis !== 'undefined' && globalThis.location) ||
+      null;
+    if (!loc || typeof loc.search !== 'string') return false;
+    return parseBlindfoldParam(loc.search);
+  } catch (_err) {
+    return false;
+  }
+}
 
 /**
  * The main-thread, single-threaded TAS engine. A single instance is created and exposed as
@@ -145,8 +228,18 @@ class TASEngine {
     this._pendingFrame = null;
 
     // The active video present path string, surfaced in the status snapshot for the debug
-    // banner: 'main-webgl2' | 'main-webgl1' | 'main-2d' | 'none'.
+    // banner: 'main-webgl2' | 'main-webgl1' | 'main-2d' | 'none'. This always reports the REAL
+    // present path the presenter set up, even while blindfold mode suppresses the per-frame
+    // upload+draw (setup is deliberately unchanged - see the BLINDFOLD note in the header).
     this.videoPath = 'none';
+
+    // BLINDFOLD (no-present) DIAGNOSTIC MODE. DEFAULT OFF: a fresh load behaves exactly as
+    // before. When ON, _present() early-returns before ANY GL/2D call, so no texSubImage2D, no
+    // drawArrays and no putImageData happens - while the rAF loop, input resolution, retro_run
+    // cadence, framebuffer DECODE, HUD reads, onFrame emission and the FPS meter all run
+    // completely unchanged. Requested at boot via ?blindfold=1 (alias ?noPresent=1), toggled
+    // live from the on-screen checkbox, or set programmatically via setBlindfold().
+    this._blindfold = readBlindfoldFromLocation();
 
     // rAF loop state (the engine owns exactly ONE requestAnimationFrame loop).
     this._rafHandle = 0;
@@ -295,8 +388,17 @@ class TASEngine {
    * Present one decoded RGBA frame on the MAIN THREAD. PRIMARY: upload into the single WebGL
    * texture and draw (texSubImage2D + drawArrays - the iOS-native-leak fix). LAST RESORT: 2D
    * putImageData (only when WebGL was unavailable on this canvas).
+   *
+   * BLINDFOLD GATE: this is the SINGLE choke point for ALL GPU/canvas work, so gating here is
+   * enough to skip the ENTIRE upload+draw while leaving every other stage of the frame intact.
+   * The caller (_presentPending) has already consumed + cleared the stashed frame, so nothing
+   * accumulates while blindfolded. Note what is deliberately NOT skipped: the GL context /
+   * texture / program / quad are still created in attach() exactly as normal, so the only
+   * variable between a blindfolded run and a normal run is the per-frame upload+draw.
    */
   _present(rgba, width, height) {
+    // BLINDFOLD: skip ONLY the per-frame upload+draw. Return BEFORE touching any GL or 2D API.
+    if (this._blindfold) return;
     if (!rgba || !width || !height) return;
     if (this._gl) {
       try {
@@ -376,6 +478,45 @@ class TASEngine {
     this._notifyStatus();
   }
 
+  // --------------------------------------------------------- blindfold (no-present) mode
+
+  /**
+   * Turn the BLINDFOLD (no-present) diagnostic on/off AT RUNTIME - no reload required, safe to
+   * call while the loop is running and while paused. When ON, the per-frame upload+draw is
+   * skipped inside _present(); EVERYTHING else (rAF loop, input resolution, retro_run cadence
+   * + accumulator + bounded catch-up, framebuffer decode into the reused RGBA buffer, HUD
+   * reads, onFrame emission, the FPS meter) keeps running exactly as normal. The presenter and
+   * its GL context are left untouched so flipping back ON resumes drawing immediately.
+   * @param {boolean} on
+   * @returns {boolean} the resulting blindfold state
+   */
+  setBlindfold(on) {
+    const next = !!on;
+    if (this._blindfold === next) return this._blindfold;
+    this._blindfold = next;
+    // Drop any frame stashed but not yet presented so a mode flip never draws a stale frame
+    // and nothing accumulates across the transition.
+    this._pendingFrame = null;
+    // Make the new mode visible in the debug banner immediately (the user reads this off a
+    // phone video, so the mode must never lag the FPS number it explains).
+    this._notifyStatus();
+    return this._blindfold;
+  }
+
+  /** Whether the BLINDFOLD (no-present) diagnostic is currently active. */
+  isBlindfold() {
+    return !!this._blindfold;
+  }
+
+  /** Convenience property mirror of isBlindfold()/setBlindfold() for console/DevTools use. */
+  get blindfold() {
+    return !!this._blindfold;
+  }
+
+  set blindfold(on) {
+    this.setBlindfold(on);
+  }
+
   /** Render a non-blocking notice. Appends a line; never throws. */
   showNotice(message, level = 'warn') {
     try {
@@ -426,6 +567,7 @@ class TASEngine {
   }
 
   statusSnapshot() {
+    const blindfold = !!this._blindfold;
     return {
       status: this.status,
       coreStatus: this.coreStatus,
@@ -433,7 +575,14 @@ class TASEngine {
       romBytes: this.romBytes,
       engineStatus: this.engineStatus,
       frame: this.currentFrame,
-      videoPath: this.videoPath,
+      // The REAL present path, with an UNMISTAKABLE suffix while blindfolded so an FPS number
+      // read off a phone video can never be attributed to the wrong mode.
+      videoPath: blindfold ? `${this.videoPath} (BLINDFOLD: no present)` : this.videoPath,
+      // The raw path (no suffix) for consumers that want the plain label.
+      videoPathBase: this.videoPath,
+      blindfold,
+      // Explicit banner-ready present state: 'ON' normally, 'OFF (BLINDFOLD)' while skipping.
+      present: blindfold ? 'OFF (BLINDFOLD)' : 'ON',
     };
   }
 

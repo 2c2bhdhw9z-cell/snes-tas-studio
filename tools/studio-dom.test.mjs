@@ -20,6 +20,10 @@
 //   - core-select maps to setCore (in-process teardown+reinit); three cores incl. snes9x
 //     default; no file picker
 //   - the engine created NO worker (single-thread)
+//   - the BLINDFOLD (no-present) diagnostic: the #blindfold-toggle checkbox exists in
+//     #frame-controls, is DEFAULT OFF, and flipping engine.setBlindfold() at runtime stops ALL
+//     per-frame GPU work (zero texSubImage2D/drawArrays) while retro_run keeps advancing, with
+//     the status snapshot's videoPath suffix + Present field reflecting the active mode
 //
 // Run from tools/: node studio-dom.test.mjs   (requires jsdom installed here)
 import fs from 'node:fs';
@@ -147,6 +151,52 @@ check('#fps-readout is inside #frame-controls', (() => {
   return fc && fps && fc.contains(fps);
 })());
 check('#fps-readout initial text is a plain FPS label', /FPS:\s*0/.test((document.getElementById('fps-readout') || {}).textContent || ''));
+
+// --- BLINDFOLD (no-present) diagnostic control + engine API ---
+// The on-screen toggle lets a phone-held user run the blindfold test (rAF loop + retro_run +
+// decode + HUD + FPS as normal, but NO per-frame GPU upload/draw) without a reload. It must be
+// present in the toolbar, DEFAULT OFF (so a fresh load behaves exactly as before), and it must
+// be a checkbox — never a file picker.
+{
+  const box = document.getElementById('blindfold-toggle');
+  const fc = document.getElementById('frame-controls');
+  check('#blindfold-toggle control exists', !!box);
+  check('#blindfold-toggle is a checkbox (not a file/ROM picker)', box && box.tagName === 'INPUT' && box.type === 'checkbox');
+  check('#blindfold-toggle lives inside #frame-controls (near the frame controls)', !!(fc && box && fc.contains(box)));
+  check('#blindfold-toggle is UNCHECKED by default (blindfold OFF on a fresh load)', box && box.checked === false);
+  const group = document.getElementById('blindfold-group');
+  check('blindfold control is labelled "Blindfold (no present)"', !!group && /Blindfold \(no present\)/.test(group.textContent || ''));
+  check('blindfold label is wired to the checkbox (for=blindfold-toggle)', !!group && group.getAttribute('for') === 'blindfold-toggle');
+}
+check('engine exposes setBlindfold()/isBlindfold()', typeof engine.setBlindfold === 'function' && typeof engine.isBlindfold === 'function');
+check('engine blindfold defaults OFF (no ?blindfold URL param)', engine.isBlindfold() === false);
+check('status snapshot reports Present: ON and a suffix-free videoPath by default',
+  engine.statusSnapshot().present === 'ON' && !/BLINDFOLD/.test(engine.statusSnapshot().videoPath));
+{
+  // Runtime flip: the banner surface must make the active mode unmistakable, and the per-frame
+  // GPU work must stop while the engine keeps running.
+  engine.setBlindfold(true);
+  const snap = engine.statusSnapshot();
+  check('blindfold ON: snapshot videoPath is suffixed "(BLINDFOLD: no present)"', /\(BLINDFOLD: no present\)$/.test(snap.videoPath));
+  check('blindfold ON: snapshot present field reads OFF (BLINDFOLD)', snap.present === 'OFF (BLINDFOLD)');
+  check('blindfold ON: videoPathBase still reports the REAL present path', /^main-/.test(snap.videoPathBase));
+  // Drive the real loop and prove zero GPU calls, then flip back off.
+  engine.play();
+  gpu.texSubImage2D = 0;
+  gpu.texImage2D = 0;
+  gpu.drawArrays = 0;
+  shared.resolvedPerFrame.length = 0;
+  fake.stepRaf(20);
+  check('blindfold ON: ZERO GL uploads/draws over 20 rAF turns', gpu.texSubImage2D === 0 && gpu.texImage2D === 0 && gpu.drawArrays === 0);
+  check('blindfold ON: emulation still advanced (retro_run kept running)', shared.resolvedPerFrame.length >= 12);
+  engine.setBlindfold(false);
+  check('blindfold OFF again: snapshot present field back to ON', engine.statusSnapshot().present === 'ON');
+  gpu.drawArrays = 0;
+  fake.stepRaf(10);
+  check('blindfold OFF again: presenting resumed (draws > 0, still <= turns)', gpu.drawArrays > 0 && gpu.drawArrays <= 10);
+  engine.pause();
+  fake.stepRaf(2);
+}
 
 // Speed slider drives engine.setSpeed (clamped) directly.
 speed.value = '1.5';
