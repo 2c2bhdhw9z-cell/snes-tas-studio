@@ -64,6 +64,37 @@ globalThis.document = document;
 globalThis.HTMLCanvasElement = window.HTMLCanvasElement;
 globalThis.fetch = async () => ({ ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) });
 
+// A CONTROLLABLE matchMedia for '(orientation: landscape)'. jsdom's own matchMedia always
+// reports matches:false and never fires 'change', so without this the ORIENTATION-dependent
+// half of the TAS Grid drawer (overlay-only inert/aria-hidden + focus moves, and the
+// rotate-while-open reset) could not be exercised at all. Installed BEFORE TASStudio.init() so
+// wireTasGridDrawer() subscribes to this one.
+const mediaState = { landscape: false, listeners: new Set() };
+window.matchMedia = (query) => {
+  const orientationQuery = /orientation:\s*landscape/.test(String(query));
+  return {
+    media: String(query),
+    get matches() {
+      return orientationQuery ? mediaState.landscape : false;
+    },
+    addEventListener: (type, fn) => {
+      if (type === 'change') mediaState.listeners.add(fn);
+    },
+    removeEventListener: (type, fn) => {
+      if (type === 'change') mediaState.listeners.delete(fn);
+    },
+    addListener: (fn) => mediaState.listeners.add(fn),
+    removeListener: (fn) => mediaState.listeners.delete(fn),
+    dispatchEvent: () => true,
+  };
+};
+/** Flip the reported orientation and notify subscribers, exactly as a real rotation would. */
+function setOrientation(landscape) {
+  mediaState.landscape = !!landscape;
+  const ev = { matches: mediaState.landscape, media: '(orientation: landscape)' };
+  for (const fn of Array.from(mediaState.listeners)) fn(ev);
+}
+
 // Install the CONTROLLABLE fake rAF (on globalThis AND window) BEFORE importing the engine.
 const fake = installFakeRaf();
 
@@ -280,6 +311,244 @@ await new Promise((r) => setTimeout(r, 0));
 check('load truncates the mirror log after the loaded frame (re-record)', !studio.log.isSet(5, 'B'));
 check('load truncates the engine in-process log after the loaded frame',
   engine._resolver.getFrameInputMask(5, 0) === 0);
+
+// =========================================================================================
+// --- THE LANDSCAPE "TAS GRID" DRAWER ---
+//
+// In landscape the piano roll was the LAST item in the single scrolling #sidebar column, so on a
+// short phone viewport the toolbar + Live HUD + save-state tree consumed the whole visible height
+// and the timeline sat far below the fold. It is now a slide-out fixed overlay driven by
+// #btn-tas-grid.
+//
+// THE CRITICAL CONSTRAINT is DOM PRESERVATION: the roll is virtualized (a fixed pool of 240
+// recycled rows with cached row/cell refs, and offsetHeight/clientHeight reads that drive the
+// spacers + scroll-following), so hiding it must NOT unmount it, re-parent it or display:none it.
+// Hiding is a CSS transform; these checks prove the node identity, the descendant element count,
+// the recycled row pool, the cached cell refs AND the per-frame frame-tracker all survive
+// arbitrary toggling. (The CSS side of that proof - transform-based hiding, no display:none rule
+// anywhere, the reduced-motion branch, the portrait pass-through - lives in mobile-smoke.)
+// =========================================================================================
+{
+  const drawer = document.getElementById('tas-grid-drawer');
+  const toggle = document.getElementById('btn-tas-grid');
+  const closeBtn = document.getElementById('btn-tas-grid-close');
+  const backdrop = document.getElementById('tas-grid-backdrop');
+  const roll = document.getElementById('piano-roll');
+
+  // -- structure + a11y contract -----------------------------------------------------------
+  check('#tas-grid-drawer wrapper exists in the STATIC markup', !!drawer);
+  check('#piano-roll is parented INSIDE the drawer (once, at parse time)', !!roll && roll.parentElement === drawer);
+  check('the drawer still lives inside #sidebar (so portrait keeps the roll in the stacked flow)',
+    !!drawer && document.getElementById('sidebar').contains(drawer));
+  check('#btn-tas-grid is a real <button type="button">',
+    !!toggle && toggle.tagName === 'BUTTON' && toggle.type === 'button');
+  check('#btn-tas-grid is labelled "TAS Grid"', !!toggle && /TAS Grid/.test(toggle.textContent || ''));
+  check('#btn-tas-grid has aria-controls pointing at the drawer',
+    !!toggle && toggle.getAttribute('aria-controls') === 'tas-grid-drawer');
+  check('#btn-tas-grid starts collapsed (aria-expanded="false")',
+    !!toggle && toggle.getAttribute('aria-expanded') === 'false');
+  check('#btn-tas-grid is NOT inside #debug-banner (app.js rewrites the banner children)',
+    !!toggle && !document.getElementById('debug-banner').contains(toggle));
+  check('#btn-tas-grid-close is a real <button type="button"> with an accessible label',
+    !!closeBtn && closeBtn.tagName === 'BUTTON' && closeBtn.type === 'button' &&
+      !!(closeBtn.getAttribute('aria-label') || '').trim());
+  check('the ✕ close button lives inside the drawer', !!closeBtn && drawer.contains(closeBtn));
+  check('#tas-grid-backdrop exists (tap-outside-to-dismiss target)', !!backdrop);
+  check('TASStudio exposes the PUBLIC re-measure hooks refreshLayout()/onDrawerShown()',
+    typeof studio.refreshLayout === 'function' && typeof studio.onDrawerShown === 'function');
+  check('the drawer starts CLOSED (class + data-open + state)',
+    studio.isTasGridOpen() === false && drawer.dataset.open === 'false' && !drawer.classList.contains('is-open'));
+
+  // -- toggling flips aria-expanded AND an open class/attribute -----------------------------
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  check('toggle click OPENS: is-open class + data-open="true" + aria-expanded="true"',
+    studio.isTasGridOpen() === true && drawer.classList.contains('is-open') &&
+      drawer.dataset.open === 'true' && toggle.getAttribute('aria-expanded') === 'true');
+  check('opening marks the backdrop visible (.is-open)', backdrop.classList.contains('is-open'));
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  check('toggle click again CLOSES it (open -> close on the same button)',
+    studio.isTasGridOpen() === false && !drawer.classList.contains('is-open') &&
+      drawer.dataset.open === 'false' && toggle.getAttribute('aria-expanded') === 'false');
+  check('closing clears the backdrop', !backdrop.classList.contains('is-open'));
+
+  // -- every dismissal path keeps aria-expanded in sync ------------------------------------
+  studio.openTasGrid();
+  check('openTasGrid() opens programmatically', studio.isTasGridOpen() === true && toggle.getAttribute('aria-expanded') === 'true');
+  closeBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  check('the ✕ close button dismisses (aria-expanded back to false)',
+    studio.isTasGridOpen() === false && toggle.getAttribute('aria-expanded') === 'false');
+
+  studio.openTasGrid();
+  backdrop.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  check('tap-outside (backdrop click) dismisses',
+    studio.isTasGridOpen() === false && toggle.getAttribute('aria-expanded') === 'false' &&
+      !backdrop.classList.contains('is-open'));
+
+  studio.openTasGrid();
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('Escape dismisses',
+    studio.isTasGridOpen() === false && toggle.getAttribute('aria-expanded') === 'false');
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('Escape while already closed is a harmless no-op',
+    studio.isTasGridOpen() === false && toggle.getAttribute('aria-expanded') === 'false');
+
+  // -- the open path re-measures + re-syncs through the PUBLIC hook -------------------------
+  let refreshCalls = 0;
+  const rawRefresh = studio.refreshLayout.bind(studio);
+  studio.refreshLayout = function refreshLayoutSpy(...args) {
+    refreshCalls += 1;
+    return rawRefresh(...args);
+  };
+  let measureCalls = 0;
+  const rawMeasure = studio._measureMetrics.bind(studio);
+  studio._measureMetrics = function measureMetricsSpy(...args) {
+    measureCalls += 1;
+    return rawMeasure(...args);
+  };
+  {
+    const before = refreshCalls;
+    studio.openTasGrid();
+    check('opening the drawer runs the PUBLIC re-measure hook exactly once', refreshCalls === before + 1);
+    check('the open-time refresh re-MEASURES the grid geometry (_measureMetrics)', measureCalls >= 1);
+    studio.closeTasGrid();
+  }
+  delete studio._measureMetrics;
+
+  // -- DOM PRESERVATION across many toggles ------------------------------------------------
+  const rollNode = roll;
+  const elementsBefore = roll.getElementsByTagName('*').length;
+  const poolBefore = studio._rows;
+  const firstRowBefore = studio._rows[0];
+  const firstCellsBefore = firstRowBefore.__cells;
+  const rawCreateElement = document.createElement.bind(document);
+  let createCalls = 0;
+  document.createElement = function createElementSpy(tag, opts) {
+    createCalls += 1;
+    return rawCreateElement(tag, opts);
+  };
+  for (let i = 0; i < 4; i++) {
+    studio.openTasGrid();
+    studio.closeTasGrid();
+  }
+  document.createElement = rawCreateElement;
+  check('closed->open->closed x4: #piano-roll is the SAME node (never unmounted or rebuilt)',
+    document.getElementById('piano-roll') === rollNode);
+  check('closed->open->closed x4: #piano-roll was never re-parented (same drawer parent)',
+    rollNode.parentElement === drawer);
+  check('closed->open->closed x4: descendant element COUNT is unchanged',
+    roll.getElementsByTagName('*').length === elementsBefore);
+  check('closed->open->closed x4: ZERO createElement calls (nothing rebuilt)', createCalls === 0);
+  check('closed->open->closed x4: the recycled row pool is the same object identity',
+    studio._rows === poolBefore && studio._rows[0] === firstRowBefore);
+  check('closed->open->closed x4: cached row/cell refs survive (row.__cells / row.__frameCell)',
+    firstRowBefore.__cells === firstCellsBefore && firstCellsBefore.length === 12 && !!firstRowBefore.__frameCell);
+  check('closed->open->closed x4: the drawer never got an inline display style',
+    !/display/.test(drawer.getAttribute('style') || '') && !/display/.test(rollNode.getAttribute('style') || ''));
+
+  // -- the FRAME TRACKER keeps working while the drawer is CLOSED --------------------------
+  // This is the payoff of transform-based hiding: the row pool and its cached refs are live, so
+  // the O(1) per-frame highlight keeps tracking the playhead even when nothing is on screen.
+  check('drawer is CLOSED for the frame-tracker check', studio.isTasGridOpen() === false);
+  {
+    const frameBefore = engine.currentFrame;
+    let creates = 0;
+    document.createElement = function createElementSpy2(tag, opts) {
+      creates += 1;
+      return rawCreateElement(tag, opts);
+    };
+    for (let i = 0; i < 5; i++) {
+      const r = engine.frameAdvance();
+      if (r && typeof r.then === 'function') await r;
+    }
+    document.createElement = rawCreateElement;
+    check('closed drawer: the engine still advanced 5 frames', engine.currentFrame === frameBefore + 5);
+    check('closed drawer: the current-frame highlight MOVED with the engine',
+      studio._currentRow === engine.currentFrame && studio._currentRow === frameBefore + 5);
+    check('closed drawer: the highlight is on the CACHED row for the live frame',
+      !!studio._currentRowEl && studio._currentRowEl.__frame === engine.currentFrame &&
+        studio._currentRowEl.classList.contains('pr-row--current'));
+    check('closed drawer: exactly ONE row carries the highlight',
+      document.querySelectorAll('#piano-roll .pr-row--current').length === 1);
+    check('closed drawer: the frame path still created ZERO elements', creates === 0);
+    check('closed drawer: the element count is STILL unchanged',
+      roll.getElementsByTagName('*').length === elementsBefore);
+  }
+
+  // -- and it keeps tracking after REOPENING ----------------------------------------------
+  {
+    const before = refreshCalls;
+    studio.openTasGrid();
+    check('reopening runs the re-measure hook again', refreshCalls === before + 1);
+    const frameBefore = engine.currentFrame;
+    for (let i = 0; i < 3; i++) {
+      const r = engine.frameAdvance();
+      if (r && typeof r.then === 'function') await r;
+    }
+    check('reopened drawer: the highlight tracks the live frame again',
+      studio._currentRow === engine.currentFrame && engine.currentFrame === frameBefore + 3 &&
+        studio._currentRowEl.__frame === engine.currentFrame);
+    check('reopened drawer: still the SAME node and element count',
+      document.getElementById('piano-roll') === rollNode && roll.getElementsByTagName('*').length === elementsBefore);
+    studio.closeTasGrid();
+  }
+
+  // -- cell clicks still edit the log while the drawer is OPEN ----------------------------
+  {
+    studio.openTasGrid();
+    const frame = engine.currentFrame + 4;
+    const cell = document.querySelector(`#piano-roll .pr-cell--btn[data-frame="${frame}"][data-col="X"]`);
+    check('open drawer: a windowed cell is still addressable', !!cell);
+    cell.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('open drawer: clicking a cell still toggles the local mirror log', studio.log.isSet(frame, 'X'));
+    check('open drawer: the edit still reached the engine in-process log (X = bit 9)',
+      engine._resolver.getFrameInputMask(frame, 0) === ((1 << 9) >>> 0));
+    cell.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    check('open drawer: a second click clears it everywhere',
+      !studio.log.isSet(frame, 'X') && engine._resolver.getFrameInputMask(frame, 0) === 0);
+    studio.closeTasGrid();
+  }
+
+  // -- ORIENTATION: overlay-only a11y state, and a rotate-while-open reset -----------------
+  setOrientation(true); // now landscape: the drawer IS an overlay
+  check('landscape + closed: the panel is marked inert + aria-hidden (layout metrics untouched)',
+    drawer.getAttribute('aria-hidden') === 'true' && drawer.inert === true);
+  studio.openTasGrid();
+  check('landscape + open: aria-hidden/inert are cleared',
+    !drawer.hasAttribute('aria-hidden') && drawer.inert === false);
+  check('landscape + open: focus moves into the panel (the ✕)', document.activeElement === closeBtn);
+  check('landscape + open: metrics reads are unaffected by hiding (offsetHeight is not forced to 0 by a display:none)',
+    typeof rollNode.offsetHeight === 'number');
+  setOrientation(false); // ROTATE TO PORTRAIT WHILE OPEN
+  check('rotating to portrait RESETS the drawer to closed (no stuck fixed overlay)',
+    studio.isTasGridOpen() === false && !drawer.classList.contains('is-open') && drawer.dataset.open === 'false');
+  check('rotating to portrait keeps aria-expanded honest', toggle.getAttribute('aria-expanded') === 'false');
+  check('portrait: the INLINE timeline is never inert/aria-hidden',
+    !drawer.hasAttribute('aria-hidden') && drawer.inert === false);
+  check('portrait: #piano-roll is still the same node in the same parent (no re-parenting on rotate)',
+    document.getElementById('piano-roll') === rollNode && rollNode.parentElement === drawer);
+  check('portrait: element count still unchanged after a rotation',
+    roll.getElementsByTagName('*').length === elementsBefore);
+  setOrientation(true);
+  check('rotating back to landscape leaves it CLOSED (no surprise reopen)', studio.isTasGridOpen() === false);
+  setOrientation(false);
+
+  // -- teardown removes the listeners the drawer added -------------------------------------
+  {
+    const refreshAtDestroy = refreshCalls;
+    check('TASStudio exposes destroy()', typeof studio.destroy === 'function');
+    studio.destroy();
+    setOrientation(true);
+    setOrientation(false);
+    check('destroy() removed the orientation-change listener (no further refreshes)',
+      refreshCalls === refreshAtDestroy);
+    studio.openTasGrid();
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    check('destroy() removed the Escape handler too', studio.isTasGridOpen() === true);
+    studio.closeTasGrid();
+    check('the timeline node SURVIVED teardown untouched',
+      document.getElementById('piano-roll') === rollNode && roll.getElementsByTagName('*').length === elementsBefore);
+  }
+}
 
 // --- Core selection dropdown maps to setCore (in-process teardown + reinit) ---
 const coreSelect = document.getElementById('core-select');

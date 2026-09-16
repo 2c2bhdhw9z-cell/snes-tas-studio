@@ -196,11 +196,215 @@ check('standalone: #frame-controls buttons/save-state nodes get pointer-events:a
 check('standalone: #speed slider gets pointer-events:auto + pan-x', /#speed[\s\S]*?pointer-events:\s*auto/s.test(standaloneBlock) && /#speed[\s\S]*?touch-action:\s*pan-x/s.test(standaloneBlock));
 check('standalone: #frame-controls raised above the stage (z-index)', /#frame-controls\s*\{[^}]*z-index:/s.test(standaloneBlock));
 
+// =========================================================================================
+// THE LANDSCAPE "TAS GRID" DRAWER — markup + the CSS proof that hiding is TRANSFORM-based.
+//
+// The bug: in landscape #app is a 2-pane grid ("stage sidebar") and #sidebar is ONE independent
+// scroll column holding #frame-controls, #side (Live HUD + save-state tree) and — last — the
+// piano roll, all forced to natural height. On a short landscape phone the toolbar + HUD + tree
+// consume the entire visible height, so a 240-row grid at height:auto ends up far BELOW THE FOLD
+// and the user never sees the timeline. The fix presents it as a slide-out fixed overlay.
+//
+// The piano roll is VIRTUALIZED: a fixed pool of 240 recycled rows, cached row/cell refs, and
+// offsetHeight/clientHeight reads (_measureMetrics) that drive both the scroll-extent spacers and
+// the throttled scrollTop playhead-following. So `display: none` is forbidden — on the drawer OR
+// any ancestor — because it makes those metrics read 0 and silently kills scroll-following. These
+// checks are the CSS-side regression proof: the closed state is a TRANSFORM, and no rule anywhere
+// sets display:none on the drawer or the roll. (The behavioural/DOM-identity proof lives in
+// studio-dom.test.mjs.)
+// =========================================================================================
+
+/**
+ * Split the stylesheet into { selector, body } rules. Comments are stripped first, and @media
+ * wrappers are skipped naturally (their own "selector" never matches a brace-free body), so the
+ * inner rules of every media block are included in the scan.
+ */
+function cssRules(src) {
+  const noComments = src.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [];
+  const re = /([^{}]+)\{([^{}]*)\}/g;
+  let m;
+  while ((m = re.exec(noComments)) !== null) {
+    const sel = m[1].trim();
+    if (!sel || sel.startsWith('@')) continue;
+    rules.push({ sel, body: m[2] });
+  }
+  return rules;
+}
+const ALL_RULES = cssRules(css);
+const portraitBlock = (css.match(/@media\s*\(orientation:\s*portrait\)\s*\{([\s\S]*?)\n\}/) || [])[1] || '';
+const landscapeBlock = (css.match(/@media\s*\(orientation:\s*landscape\)\s*\{([\s\S]*?)\n\}/) || [])[1] || '';
+const reducedMotionBlock =
+  (css.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/) || [])[1] || '';
+
+// --- markup: the toggle, the drawer wrapper, the ✕, the backdrop ---
+{
+  const topbar = document.getElementById('topbar');
+  const banner = document.getElementById('debug-banner');
+  const toggle = document.getElementById('btn-tas-grid');
+  const drawer = document.getElementById('tas-grid-drawer');
+  const closeBtn = document.getElementById('btn-tas-grid-close');
+  const backdrop = document.getElementById('tas-grid-backdrop');
+  const roll = document.getElementById('piano-roll');
+  check('#btn-tas-grid toggle exists and is a real <button type="button">',
+    !!toggle && toggle.tagName === 'BUTTON' && toggle.type === 'button');
+  check('#btn-tas-grid is labelled "TAS Grid" (glyph + text)',
+    !!toggle && /TAS Grid/.test(toggle.textContent || '') && /▦/.test(toggle.textContent || ''));
+  check('#btn-tas-grid declares aria-expanded="false" + aria-controls="tas-grid-drawer"',
+    !!toggle && toggle.getAttribute('aria-expanded') === 'false' &&
+      toggle.getAttribute('aria-controls') === 'tas-grid-drawer');
+  check('#btn-tas-grid sits in the TOP-RIGHT top bar, aligned with #debug-banner',
+    !!topbar && !!toggle && !!banner && topbar.contains(banner) && topbar.contains(toggle) &&
+      Array.from(topbar.children).indexOf(toggle) > Array.from(topbar.children).indexOf(banner));
+  check('#btn-tas-grid is NOT inside #debug-banner (app.js rewrites the banner children)',
+    !!banner && !!toggle && !banner.contains(toggle));
+  check('the debug banner still carries its diagnostics fields untouched',
+    !!banner && banner.querySelectorAll('.debug-banner__item').length >= 3);
+  check('the toolbar controls are untouched by the new toggle',
+    !!document.getElementById('core-select') && !!document.getElementById('blindfold-toggle') &&
+      !!document.getElementById('fps-readout') && !!document.getElementById('btn-frame-advance'));
+  check('#tas-grid-drawer wrapper exists (STATIC markup, so the roll is parented once)', !!drawer);
+  check('#piano-roll is a direct child of #tas-grid-drawer', !!roll && roll.parentElement === drawer);
+  check('the drawer lives inside #sidebar (portrait keeps the roll in the stacked flow)',
+    !!drawer && document.getElementById('sidebar').contains(drawer));
+  check('#btn-tas-grid-close exists inside the drawer with an accessible label',
+    !!closeBtn && closeBtn.tagName === 'BUTTON' && closeBtn.type === 'button' &&
+      drawer.contains(closeBtn) && !!(closeBtn.getAttribute('aria-label') || '').trim());
+  check('#tas-grid-backdrop exists (dimmed tap-to-dismiss scrim)', !!backdrop);
+  check('the drawer markup carries no inline display/visibility style (CSS owns presentation)',
+    !!drawer && !/display|visibility/.test(drawer.getAttribute('style') || ''));
+}
+
+// --- THE CSS PROOF: hidden by TRANSFORM, never display:none ---
+{
+  const drawerRules = ALL_RULES.filter((r) => r.sel.split(',').some((s) => s.trim() === '#tas-grid-drawer'));
+  const closedRule = drawerRules.find((r) => /position:\s*fixed/.test(r.body));
+  const openRule = ALL_RULES.find((r) => /#tas-grid-drawer\.is-open/.test(r.sel) && /transform/.test(r.body));
+  check('landscape: the drawer is a position:fixed overlay', !!closedRule);
+  check('CLOSED state hides the drawer with a TRANSFORM (translateX(100%))',
+    !!closedRule && /transform:\s*translateX\(100%\)/.test(closedRule.body));
+  check('CLOSED state keeps the layout boxes alive (visibility:hidden + pointer-events:none)',
+    !!closedRule && /visibility:\s*hidden/.test(closedRule.body) && /pointer-events:\s*none/.test(closedRule.body));
+  check('CLOSED state does NOT use display:none (metrics would read 0)',
+    !!closedRule && !/display:\s*none/.test(closedRule.body));
+  check('OPEN state slides it in with a transform (translateX(0))',
+    !!openRule && /transform:\s*translateX\(0\)/.test(openRule.body));
+  check('OPEN state restores hit-testing (visibility:visible + pointer-events:auto)',
+    !!openRule && /visibility:\s*visible/.test(openRule.body) && /pointer-events:\s*auto/.test(openRule.body));
+
+  // NOT ONE rule anywhere in the stylesheet may display:none the drawer or the timeline.
+  const offenders = ALL_RULES.filter(
+    (r) =>
+      r.sel.split(',').some((s) => /#tas-grid-drawer\b/.test(s) || /#piano-roll\b/.test(s)) &&
+      /display:\s*none/.test(r.body)
+  ).map((r) => r.sel.replace(/\s+/g, ' '));
+  check(
+    `NO CSS rule sets display:none on the drawer or #piano-roll${offenders.length ? ' -> ' + offenders.join(' | ') : ''}`,
+    offenders.length === 0
+  );
+  // ...nor by collapsing it to zero height (which would zero out offsetHeight just like
+  // display:none). `min-height: 0` is a flexbox necessity and is deliberately not matched here.
+  check('the drawer is never hidden by a zero height/max-height either',
+    !ALL_RULES.some(
+      (r) =>
+        r.sel.split(',').some((s) => /#tas-grid-drawer\b/.test(s) || /#piano-roll\b/.test(s)) &&
+        /(?:^|[;\s])(?:max-height|height):\s*0(?:px|%)?\s*(?:;|$)/.test(r.body)
+    ));
+
+  // Transition: transform ONLY, short, and no layout-animating property.
+  const transition = ((closedRule || { body: '' }).body.match(/transition:\s*([^;]+);/) || [])[1] || '';
+  check('the drawer transition animates TRANSFORM only (no layout-animating properties)',
+    /transform/.test(transition) && !/\b(width|height|top|left|right|bottom|margin|padding|inset)\b/.test(transition));
+  check('the drawer transition is short (~180-220ms)', (() => {
+    const ms = Number((transition.match(/transform\s+(\d+)ms/) || [])[1]);
+    return ms >= 180 && ms <= 220;
+  })());
+
+  // Sizing / notch / stacking / touch.
+  check('landscape: the drawer is a full-height RIGHT panel (top+bottom+right, sane width)',
+    /#tas-grid-drawer\s*\{[^}]*top:\s*0/s.test(landscapeBlock) &&
+      /#tas-grid-drawer\s*\{[^}]*bottom:\s*0/s.test(landscapeBlock) &&
+      /#tas-grid-drawer\s*\{[^}]*right:\s*0/s.test(landscapeBlock) &&
+      /#tas-grid-drawer\s*\{[^}]*width:\s*min\(520px,\s*92vw\)/s.test(landscapeBlock));
+  check('landscape: the drawer respects the notch/home indicator (env(safe-area-inset-*))',
+    /#tas-grid-drawer\s*\{[^}]*env\(safe-area-inset-top/s.test(landscapeBlock) &&
+      /#tas-grid-drawer\s*\{[^}]*env\(safe-area-inset-right/s.test(landscapeBlock) &&
+      /#tas-grid-drawer\s*\{[^}]*env\(safe-area-inset-bottom/s.test(landscapeBlock));
+  check('landscape: the timeline scrolls INSIDE the panel (real clientHeight for the metrics)',
+    /#tas-grid-drawer\s*>\s*#piano-roll\s*\{[^}]*overflow:\s*auto/s.test(landscapeBlock) &&
+      /#tas-grid-drawer\s*>\s*#piano-roll\s*\{[^}]*min-height:\s*0/s.test(landscapeBlock));
+  check('landscape: the drawer keeps single-finger panning (touch-action: pan-*, not none)',
+    /#tas-grid-drawer\s*\{[^}]*touch-action:\s*pan/s.test(landscapeBlock));
+  check('#tas-grid-backdrop is a dimmed full-viewport fixed scrim',
+    /#tas-grid-backdrop\s*\{[^}]*position:\s*fixed/s.test(css) &&
+      /#tas-grid-backdrop\s*\{[^}]*inset:\s*0/s.test(css) &&
+      /#tas-grid-backdrop\s*\{[^}]*background:\s*rgba/s.test(css));
+  check('stacking is sane: drawer above backdrop, backdrop above the stage/toolbar', (() => {
+    const drawerZ = Number((landscapeBlock.match(/#tas-grid-drawer\s*\{[^}]*z-index:\s*(\d+)/s) || [])[1]);
+    const backdropZ = Number((css.match(/#tas-grid-backdrop\s*\{[^}]*z-index:\s*(\d+)/s) || [])[1]);
+    const toolbarZ = Number((standaloneBlock.match(/#frame-controls\s*\{[^}]*z-index:\s*(\d+)/s) || [])[1]);
+    return drawerZ > backdropZ && backdropZ > toolbarZ;
+  })());
+}
+
+// --- reduced motion: instant show/hide ---
+check('CSS has a prefers-reduced-motion: reduce branch', /@media\s*\(prefers-reduced-motion:\s*reduce\)/.test(css));
+check('reduced motion disables the drawer + backdrop slide transition (instant show/hide)',
+  /#tas-grid-drawer/.test(reducedMotionBlock) && /#tas-grid-backdrop/.test(reducedMotionBlock) &&
+    /transition:\s*none/.test(reducedMotionBlock));
+
+// --- PORTRAIT MUST NOT REGRESS: the roll stays inline, the wrapper is a pass-through ---
+check('portrait: the drawer wrapper is a plain in-flow pass-through (position:static, transform:none)',
+  /#sidebar\s*>\s*#tas-grid-drawer\s*\{[^}]*position:\s*static/s.test(portraitBlock) &&
+    /#sidebar\s*>\s*#tas-grid-drawer\s*\{[^}]*transform:\s*none/s.test(portraitBlock));
+check('portrait: nothing is fixed-positioned (no stuck overlay after a rotation)',
+  !/position:\s*fixed/.test(portraitBlock));
+check('portrait: #piano-roll keeps its own inner scroll in the stacked flow',
+  /#sidebar\s*>\s*#tas-grid-drawer\s*>\s*#piano-roll\s*\{[^}]*max-height:\s*40vh/s.test(portraitBlock) &&
+    /#sidebar\s*>\s*#tas-grid-drawer\s*>\s*#piano-roll\s*\{[^}]*overflow:\s*auto/s.test(portraitBlock));
+check('portrait: the landscape-only toggle + backdrop are hidden (harmless in portrait)',
+  /#btn-tas-grid,\s*#tas-grid-backdrop\s*\{[^}]*display:\s*none/s.test(portraitBlock));
+check('the drawer chrome (header/✕) is landscape-only, hidden by class NOT by the drawer id',
+  /\.tas-grid-drawer__head\s*\{\s*display:\s*none/s.test(css) &&
+    /\.tas-grid-drawer__head\s*\{[^}]*display:\s*flex/s.test(landscapeBlock));
+
+// --- standalone (installed PWA): the drawer controls stay tappable ---
+check('standalone: #btn-tas-grid / ✕ get pointer-events:auto + touch-action:manipulation',
+  /#btn-tas-grid,\s*#btn-tas-grid-close\s*\{[^}]*pointer-events:\s*auto/s.test(standaloneBlock) &&
+    /#btn-tas-grid,\s*#btn-tas-grid-close\s*\{[^}]*touch-action:\s*manipulation/s.test(standaloneBlock));
+check('standalone: only the OPEN drawer/backdrop get pointer-events:auto (closed must not hit-test)',
+  /#tas-grid-drawer\.is-open,\s*#tas-grid-backdrop\.is-open\s*\{[^}]*pointer-events:\s*auto/s.test(standaloneBlock) &&
+    !/#tas-grid-drawer\s*\{[^}]*pointer-events:\s*auto/s.test(standaloneBlock));
+
+// --- app.js: the drawer is exempt from the multi-finger gesture guard ---
+check('app.js exempts the TAS Grid drawer from the multi-finger gesture guard',
+  /tas-grid-drawer/.test(appSrc) && /isInsideTimeline/.test(appSrc));
+
 // Primary controls in piano-roll.js listen for BOTH pointerdown AND click.
 const pianoSrc = fs.readFileSync(path.join(ROOT, 'piano-roll.js'), 'utf8');
 check('piano-roll binds pointerdown on primary controls', /addEventListener\(\s*['"]pointerdown['"]/.test(pianoSrc));
 check('piano-roll still binds click on primary controls', /addEventListener\(\s*['"]click['"]/.test(pianoSrc));
 check('piano-roll guards against pointerdown+click double-fire', /handledByPointer/.test(pianoSrc));
+
+// TAS Grid drawer, JS side: event-driven only, a PUBLIC re-measure hook, and never a
+// display:none / re-parent of the virtualized timeline.
+check('piano-roll.js wires the TAS Grid drawer (wireTasGridDrawer)', /wireTasGridDrawer\s*\(/.test(pianoSrc));
+check('piano-roll.js exposes the PUBLIC re-measure hooks refreshLayout()/onDrawerShown()',
+  /\brefreshLayout\s*\(\)\s*\{/.test(pianoSrc) && /\bonDrawerShown\s*\(\)\s*\{/.test(pianoSrc));
+check('the open path re-measures the geometry then re-syncs the window',
+  /_measureMetrics\(\);[\s\S]{0,240}renderPianoRoll\(\)/.test(pianoSrc));
+check('the drawer toggle binds pointerdown+click (tappable in the installed PWA)',
+  /function\s+bindTap\s*\(/.test(pianoSrc) && /bindTap\(\s*this\.drawerToggleEl/.test(pianoSrc));
+check('piano-roll.js dismisses on Escape', /['"]Escape['"]/.test(pianoSrc));
+check('piano-roll.js tracks orientation with matchMedia((orientation: landscape))',
+  /matchMedia\(\s*['"]\(orientation:\s*landscape\)['"]\s*\)/.test(pianoSrc));
+check('piano-roll.js removes the orientation listener on teardown (destroy)',
+  /destroy\s*\(\)\s*\{/.test(pianoSrc) && /removeEventListener\(\s*['"]change['"]/.test(pianoSrc));
+check('piano-roll.js NEVER hides anything with an inline display style', !/\.style\.display\s*=/.test(pianoSrc));
+check('piano-roll.js never re-parents #piano-roll at runtime',
+  !/(appendChild|append|insertBefore|replaceChild)\(\s*(this\.)?pianoRoll/.test(pianoSrc));
+check('the drawer adds NO work to the per-frame path (_onEngineFrame stays drawer-free)',
+  !/_onEngineFrame\(frame\)\s*\{[\s\S]{0,700}?(TasGrid|drawer|refreshLayout)/.test(pianoSrc));
 
 const liveSrc = fs.readFileSync(path.join(ROOT, 'live-input.js'), 'utf8');
 check('gamepad polling (getGamepads) present', /navigator\.getGamepads/.test(liveSrc));

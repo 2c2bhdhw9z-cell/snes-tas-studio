@@ -12,7 +12,9 @@
 //      never a file picker). snes9x's ~1.2ms retro_run fits the 16.6ms frame budget, so the
 //      single main-thread rAF loop never blocks DOM/touch.
 //   3) iOS Safari bounce/pinch gesture suppression (gesturestart/change/end + multi-touch
-//      pinch touchmove preventDefault, while leaving #piano-roll scrolling intact).
+//      pinch touchmove preventDefault, while leaving #piano-roll scrolling intact — including
+//      when the roll is presented inside the landscape #tas-grid-drawer overlay, which is
+//      exempted from the multi-finger guard alongside the roll itself).
 //   4) The always-visible on-screen debug banner (#debug-banner): live WASM core status,
 //      ROM fetch status, and a window.onerror / unhandledrejection listener that prints
 //      uncaught JS/WASM exceptions on screen so mobile errors are visible without a
@@ -447,6 +449,21 @@ document.addEventListener('gesturestart', suppressGesture, { passive: false });
 document.addEventListener('gesturechange', suppressGesture, { passive: false });
 document.addEventListener('gestureend', suppressGesture, { passive: false });
 
+// The scrollable timeline and its landscape TAS Grid drawer are the ONE region where a
+// multi-finger move must not be swallowed (a second finger landing on the panel while the user
+// flicks the timeline would otherwise cancel the scroll). Both nodes are static markup, so the
+// lookups are cached after the first multi-touch move; they are never resolved per frame.
+let timelineEl = null;
+let tasGridDrawerEl = null;
+function isInsideTimeline(target) {
+  if (!target) return false;
+  if (!timelineEl) timelineEl = document.getElementById('piano-roll');
+  if (!tasGridDrawerEl) tasGridDrawerEl = document.getElementById('tas-grid-drawer');
+  if (timelineEl && timelineEl.contains(target)) return true;
+  if (tasGridDrawerEl && tasGridDrawerEl.contains(target)) return true;
+  return false;
+}
+
 document.addEventListener(
   'touchmove',
   (e) => {
@@ -455,17 +472,12 @@ document.addEventListener(
       e.preventDefault();
       return;
     }
-    // Multi-finger move = pinch/zoom. Allow it only inside the scrollable piano roll so
-    // single-finger scrolling of the timeline still works everywhere else. Single-finger
-    // moves (touches.length <= 1) are never prevented, so control taps/slider drags work.
+    // Multi-finger move = pinch/zoom. Allow it only inside the scrollable piano roll (and the
+    // TAS Grid drawer that wraps it in landscape) so single-finger scrolling of the timeline
+    // still works everywhere else. Single-finger moves (touches.length <= 1) are never
+    // prevented, so control taps/slider drags work.
     if (e.touches && e.touches.length > 1) {
-      const target = e.target;
-      const pianoRollEl = document.getElementById('piano-roll');
-      const insidePianoRoll =
-        pianoRollEl && target && typeof target.closest === 'function'
-          ? pianoRollEl.contains(target)
-          : false;
-      if (!insidePianoRoll) e.preventDefault();
+      if (!isInsideTimeline(e.target)) e.preventDefault();
     }
   },
   { passive: false }

@@ -17,6 +17,13 @@
 //      input-log snapshot; Load restores the state, restores the local mirror snapshot, sends
 //      truncateAfter through engine.sendInputEdit, and the engine's onStateLoaded hook
 //      truncates the mirror so re-recording holds on every load.
+//   5. The LANDSCAPE "TAS Grid" drawer: in landscape the piano roll was the LAST item in the
+//      single scrolling #sidebar column, so on a short phone viewport the toolbar + Live HUD +
+//      save-state tree ate the whole visible height and the timeline sat far below the fold -
+//      effectively invisible. wireTasGridDrawer() turns it into a slide-out right-hand overlay
+//      driven by #btn-tas-grid, dismissable four ways (the toggle, the ✕, a backdrop tap and
+//      Escape), with aria-expanded kept in sync on every path. The roll is NEVER unmounted or
+//      display:none'd for this - see the DOM-PRESERVATION note below.
 //
 // The whole UI stays functional with no core/ROM present: cells toggle, controls exist,
 // and save/load simply operate on the local mirror log (engine commands no-op gracefully).
@@ -72,6 +79,22 @@
 //     feels like the whole movie and manual scrolling can browse outside the live window.
 // Invariant to preserve: the per-frame path must stay O(1) with ZERO element creation and ZERO
 // DOM queries. tools/pianoroll-perf.test.mjs is the regression proof.
+//
+// ------------------------------------------------------------------------------------------
+// DOM PRESERVATION (the TAS Grid drawer). The landscape drawer hides the timeline with a CSS
+// TRANSFORM (translateX) plus visibility/pointer-events - never display:none, never an unmount,
+// never a re-parent. Reasons, all consequences of the windowed grid above:
+//   * display:none (or a zero-height ancestor) makes offsetHeight/clientHeight read 0, so
+//     _measureMetrics() would record rowHeight/viewportHeight = 0, which silently disables
+//     scroll-following and degrades the spacer/window math. A transform does not affect layout
+//     metrics at all, and visibility:hidden keeps the layout boxes intact.
+//   * The row pool, the cached row/cell references (row.__cells / row.__frameCell) and the
+//     scroll position must survive hiding, so #piano-roll is parented into #tas-grid-drawer ONCE
+//     in index.html's static markup and is never moved again. Nothing here touches the roll's
+//     DOM on a toggle: only classes/attributes on the drawer, the backdrop and the toggle.
+//   * If the grid was first built while the panel was off-screen, refreshLayout() re-measures
+//     and re-syncs on OPEN, so the geometry is always honest by the time the user sees it.
+// The toggle path is EVENT-DRIVEN ONLY. It adds no per-frame work of any kind.
 // ==========================================================================================
 
 'use strict';
@@ -113,6 +136,36 @@ const LOOKBEHIND = 60;
 // (~10x/sec at 60fps) instead of a scrollIntoView on every single frame.
 const SCROLL_FOLLOW_EVERY = 6;
 
+/**
+ * Bind an activation handler that fires on BOTH 'pointerdown' and 'click' without ever
+ * double-firing. In an installed iOS PWA (standalone display mode) the synthetic 'click' after
+ * a tap can be delayed or suppressed, so a click-only binding leaves a control feeling dead; we
+ * act on pointerdown and then swallow the synthetic click from the same tap. Mouse/keyboard
+ * activation (no preceding pointerdown) still works. Same guard pattern as the toolbar's
+ * bindPrimary in wireFrameControls, hoisted here so the drawer controls can share it.
+ * @param {HTMLElement|null} el
+ * @param {() => void} action
+ */
+function bindTap(el, action) {
+  if (!el) return;
+  let handledByPointer = false;
+  el.addEventListener('pointerdown', (ev) => {
+    if (ev && typeof ev.button === 'number' && ev.button !== 0) return;
+    handledByPointer = true;
+    action();
+    setTimeout(() => {
+      handledByPointer = false;
+    }, 500);
+  });
+  el.addEventListener('click', () => {
+    if (handledByPointer) {
+      handledByPointer = false;
+      return;
+    }
+    action();
+  });
+}
+
 export class TASStudio {
   /**
    * @param {object} engine the TAS engine (window.TASEngine / default export).
@@ -139,6 +192,21 @@ export class TASStudio {
     this.frameControlsEl = els.frameControls || null;
     this.savestateTreeEl = els.savestateTree || null;
     this.touchControlsEl = els.touchControls || null;
+
+    // ---------------- TAS Grid drawer (landscape slide-out) ----------------
+    // Resolved from the document in wireTasGridDrawer() when not injected here. The drawer is
+    // STATIC MARKUP: #piano-roll already lives inside #tas-grid-drawer, so nothing is ever
+    // re-parented at runtime.
+    this.drawerEl = els.drawer || null;
+    this.drawerToggleEl = els.drawerToggle || null;
+    this.drawerCloseEl = els.drawerClose || null;
+    this.drawerBackdropEl = els.drawerBackdrop || null;
+    this._drawerOpen = false;
+    this._drawerWired = false;
+    this._drawerKeydownTarget = null;
+    this._onDrawerKeydown = null;
+    this._landscapeMq = null;
+    this._onOrientationChange = null;
 
     // Save-state tree: nodes keyed by id, with parent references forming the branch tree.
     this._stateNodes = new Map();
@@ -177,6 +245,9 @@ export class TASStudio {
     // Back-compat mirror of the old field name (number of rendered row elements). It is now a
     // CONSTANT (the window size), not a function of the frame counter.
     this._renderedRows = 0;
+
+    // Set by destroy(); stops the self-re-arming live-mask stream from queueing another turn.
+    this._destroyed = false;
   }
 
   /** Wire everything up. Safe to call once the DOM is ready. */
@@ -187,6 +258,7 @@ export class TASStudio {
     this.renderPianoRoll();
     this.wireFrameControls();
     this.renderStateTree();
+    this.wireTasGridDrawer();
 
     // Refresh the current-frame highlight (and recycle the window) as emulation advances.
     if (typeof this.engine.onFrame === 'function') {
@@ -215,6 +287,7 @@ export class TASStudio {
 
   /** One live-input poll turn. Re-arms itself with the SAME callback reference. */
   _pollLiveMask() {
+    if (this._destroyed) return; // destroy() was called between turns: stop re-arming
     try {
       this.live.poll();
       const mask = this.live.getMask() >>> 0;
@@ -640,6 +713,240 @@ export class TASStudio {
     return this.engine && typeof this.engine.currentFrame === 'number' ? this.engine.currentFrame : 0;
   }
 
+  /**
+   * PUBLIC: re-measure the grid's geometry and re-sync the window. Call this whenever the piano
+   * roll's BOX changes shape without the log changing - the landscape TAS Grid drawer opening,
+   * an orientation change, a resize.
+   *
+   * Why it exists: _measureMetrics() reads offsetHeight/clientHeight, and if the grid happened
+   * to be built while the drawer was off-screen in a context that could not report geometry, the
+   * cached rowHeight/viewportHeight may be stale or 0 - which disables scroll-following and
+   * degrades the spacer math. Re-measuring FIRST and then re-windowing gives _syncScrollExtent a
+   * real row height to work with, and the final follow call snaps the playhead into view so the
+   * user sees the current frame the moment the panel appears.
+   *
+   * EVENT-DRIVEN ONLY. This must never be called from the per-frame path: it does bounded
+   * O(WINDOW_ROWS) work (a window re-label + cell re-sync), which is fine on a tap and forbidden
+   * 60 times a second.
+   */
+  refreshLayout() {
+    if (!this.pianoRollEl) return this;
+    if (!this._gridBuilt) {
+      this.renderPianoRoll(); // builds + measures + syncs
+      return this;
+    }
+    this._measureMetrics(); // honest row/header/viewport geometry now that we have a box
+    this.renderPianoRoll(); // re-window + re-sync cells + move highlight + scroll extent
+    // Let the playhead snap into view immediately rather than waiting out the follow throttle.
+    this._followCountdown = 0;
+    this._followCurrentRow(this._currentFrame());
+    return this;
+  }
+
+  /** Alias of refreshLayout() that reads better at the drawer call site. */
+  onDrawerShown() {
+    return this.refreshLayout();
+  }
+
+  // ----------------------------------------------------------------- TAS Grid drawer
+
+  /**
+   * Wire the landscape slide-out "TAS Grid" drawer: #btn-tas-grid toggles it, #btn-tas-grid-close
+   * and a tap on #tas-grid-backdrop and Escape all dismiss it, and aria-expanded is kept in sync
+   * on every one of those paths.
+   *
+   * The elements are STATIC MARKUP (index.html) - #piano-roll is already inside
+   * #tas-grid-drawer, so this method never creates, moves or removes a single node. Presentation
+   * is entirely CSS: in landscape the drawer is a position:fixed panel hidden with
+   * `transform: translateX(100%)` + visibility/pointer-events, and in portrait it is a
+   * transparent in-flow pass-through (the roll stays in the stacked layout, untouched).
+   */
+  wireTasGridDrawer(els = {}) {
+    if (this._drawerWired) return this;
+    const doc = this.pianoRollEl
+      ? this.pianoRollEl.ownerDocument
+      : typeof document !== 'undefined'
+        ? document
+        : null;
+    if (!doc) return this;
+    const $ = (id) => doc.getElementById(id);
+    this.drawerEl = els.drawer || this.drawerEl || $('tas-grid-drawer');
+    this.drawerToggleEl = els.drawerToggle || this.drawerToggleEl || $('btn-tas-grid');
+    this.drawerCloseEl = els.drawerClose || this.drawerCloseEl || $('btn-tas-grid-close');
+    this.drawerBackdropEl = els.drawerBackdrop || this.drawerBackdropEl || $('tas-grid-backdrop');
+    if (!this.drawerEl) return this; // no drawer markup (e.g. an older shell): nothing to wire
+    this._drawerWired = true;
+
+    // DISMISSAL PATHS. All four land on the same state setter, so aria-expanded, the open class
+    // and the backdrop can never drift apart.
+    bindTap(this.drawerToggleEl, () => this.toggleTasGrid());
+    bindTap(this.drawerCloseEl, () => this.closeTasGrid());
+    bindTap(this.drawerBackdropEl, () => this.closeTasGrid());
+
+    this._onDrawerKeydown = (ev) => {
+      if (!this._drawerOpen) return;
+      const key = ev && (ev.key || ev.code);
+      if (key === 'Escape' || key === 'Esc') this.closeTasGrid();
+    };
+    this._drawerKeydownTarget = doc;
+    doc.addEventListener('keydown', this._onDrawerKeydown);
+
+    // ORIENTATION CHANGES. Rotating must never leave a stuck fixed overlay or a
+    // hidden-but-transformed timeline: the CSS already neutralises the overlay in portrait, and
+    // here we also reset the state to CLOSED and re-measure, because the roll's box just changed
+    // shape in both directions of the rotation.
+    const mm =
+      typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+        ? window.matchMedia('(orientation: landscape)')
+        : null;
+    this._landscapeMq = mm;
+    if (mm) {
+      this._onOrientationChange = () => {
+        this._setDrawerOpen(false, { focus: false });
+        this.refreshLayout();
+      };
+      if (typeof mm.addEventListener === 'function') {
+        mm.addEventListener('change', this._onOrientationChange);
+      } else if (typeof mm.addListener === 'function') {
+        mm.addListener(this._onOrientationChange); // legacy Safari
+      }
+    }
+
+    this._applyDrawerState();
+    return this;
+  }
+
+  /** True when the drawer is currently PRESENTED as an overlay (landscape). */
+  _isDrawerOverlay() {
+    const mm = this._landscapeMq;
+    return !!(mm && mm.matches);
+  }
+
+  /** Is the TAS Grid drawer open? */
+  isTasGridOpen() {
+    return !!this._drawerOpen;
+  }
+
+  openTasGrid() {
+    return this._setDrawerOpen(true);
+  }
+
+  closeTasGrid() {
+    return this._setDrawerOpen(false);
+  }
+
+  toggleTasGrid() {
+    return this._setDrawerOpen(!this._drawerOpen);
+  }
+
+  /**
+   * The ONE place drawer state changes. Flips the state flag, reflects it onto the DOM, and on
+   * OPEN re-measures/re-syncs the grid (see refreshLayout) so the row height, scroll extent and
+   * playhead position are correct the moment the panel becomes visible.
+   * @param {boolean} open
+   * @param {{focus?:boolean}} [opts]
+   */
+  _setDrawerOpen(open, opts = {}) {
+    const next = !!open;
+    const changed = next !== this._drawerOpen;
+    this._drawerOpen = next;
+    this._applyDrawerState();
+    if (next) this.refreshLayout();
+    // Move focus with the panel, but only when it is actually an overlay (in portrait the grid
+    // is inline and nothing appeared or disappeared, so stealing focus would be wrong).
+    if (changed && opts.focus !== false && this._isDrawerOverlay()) {
+      this._focusEl(next ? this.drawerCloseEl : this.drawerToggleEl);
+    }
+    return this._drawerOpen;
+  }
+
+  /** Reflect the drawer state onto the DOM (class + data attribute + aria + backdrop). */
+  _applyDrawerState() {
+    const open = !!this._drawerOpen;
+    const drawer = this.drawerEl;
+    if (drawer) {
+      drawer.classList.toggle('is-open', open);
+      drawer.dataset.open = open ? 'true' : 'false';
+      // Being HIDDEN is a landscape-only condition. In portrait the grid is inline and fully
+      // interactive, so it must never be marked inert/aria-hidden there.
+      const hidden = !open && this._isDrawerOverlay();
+      if (hidden) {
+        drawer.setAttribute('aria-hidden', 'true');
+        // `inert` keeps a closed panel out of the tab order and out of hit-testing. It affects
+        // interaction ONLY - it does not create a layout box change, so offsetHeight/clientHeight
+        // (and therefore the virtualized grid's metrics) are untouched. Unsupported browsers just
+        // get an inert expando, which is harmless.
+        try {
+          drawer.inert = true;
+        } catch (_err) {
+          /* ignore */
+        }
+      } else {
+        drawer.removeAttribute('aria-hidden');
+        try {
+          drawer.inert = false;
+        } catch (_err) {
+          /* ignore */
+        }
+      }
+    }
+    if (this.drawerBackdropEl) this.drawerBackdropEl.classList.toggle('is-open', open);
+    if (this.drawerToggleEl) {
+      this.drawerToggleEl.setAttribute('aria-expanded', open ? 'true' : 'false');
+      this.drawerToggleEl.classList.toggle('is-active', open);
+    }
+  }
+
+  _focusEl(el) {
+    if (!el || typeof el.focus !== 'function') return;
+    try {
+      el.focus({ preventScroll: true });
+    } catch (_err) {
+      try {
+        el.focus();
+      } catch (_err2) {
+        /* focus is a nicety; never let it break the UI */
+      }
+    }
+  }
+
+  /**
+   * Tear down the listeners this studio owns (the live-mask animation-frame stream, the drawer's
+   * Escape handler and the orientation-change listener). Nothing in the app calls this - the
+   * studio lives for the page's lifetime - but it exists so a host/harness that creates a studio
+   * can dispose of it without leaving listeners behind.
+   */
+  destroy() {
+    this._destroyed = true;
+    if (this._liveRafId != null) {
+      const id = this._liveRafId;
+      this._liveRafId = null;
+      try {
+        if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id);
+        else if (typeof clearTimeout === 'function') clearTimeout(id);
+      } catch (_err) {
+        /* ignore */
+      }
+    }
+    if (this._drawerKeydownTarget && this._onDrawerKeydown) {
+      this._drawerKeydownTarget.removeEventListener('keydown', this._onDrawerKeydown);
+      this._drawerKeydownTarget = null;
+      this._onDrawerKeydown = null;
+    }
+    const mm = this._landscapeMq;
+    if (mm && this._onOrientationChange) {
+      if (typeof mm.removeEventListener === 'function') {
+        mm.removeEventListener('change', this._onOrientationChange);
+      } else if (typeof mm.removeListener === 'function') {
+        mm.removeListener(this._onOrientationChange);
+      }
+    }
+    this._landscapeMq = null;
+    this._onOrientationChange = null;
+    this._drawerWired = false;
+    return this;
+  }
+
   // ----------------------------------------------------------------- frame controls
 
   wireFrameControls() {
@@ -876,6 +1183,9 @@ export class TASStudio {
 }
 
 // Auto-wire alongside the engine singleton when loaded as a module in the browser.
+// (The TAS Grid drawer elements - #tas-grid-drawer / #btn-tas-grid / #btn-tas-grid-close /
+// #tas-grid-backdrop - are resolved from the document by wireTasGridDrawer(), the same way
+// wireFrameControls() resolves the toolbar controls, so they need no wiring here.)
 if (typeof window !== 'undefined') {
   window.addEventListener('DOMContentLoaded', () => {
     try {

@@ -340,6 +340,40 @@ These are hard product rules, enforced by construction, not just by policy:
   without one clobbering the other, and the determinism contract holds without a synchronous
   per-frame pull across the boundary.
 
+## The landscape "TAS Grid" drawer (and why it must never be `display: none`)
+
+In landscape the app is a 2-pane grid (`"stage sidebar"`), and `#sidebar` is **one** independent
+scroll column holding `#frame-controls`, `#side` (Live HUD + save-state tree) and — last — the
+piano roll, all at natural height. On a short landscape phone the toolbar + HUD + save-state tree
+consume the entire visible height, so a 240-row timeline at `height: auto` ended up far **below
+the fold**: not `display:none`, just permanently unseen.
+
+Fix: `#btn-tas-grid` (top-right, next to the diagnostics banner) slides the timeline out as a
+**fixed right-hand panel** (`min(520px, 92vw)`, full height, `env(safe-area-inset-*)` aware) over
+a dimmed backdrop. Dismiss with the toggle again, the ✕ inside the panel, a tap on the backdrop,
+or **Escape**; `aria-expanded` is kept in sync on every path. `prefers-reduced-motion: reduce`
+drops the 200ms slide. In **portrait** nothing changes: `#tas-grid-drawer` is a transparent
+in-flow pass-through and the roll stays inline in the stacked layout, so a rotation can never
+leave a stuck overlay (a `matchMedia('(orientation: landscape)')` listener also resets the state).
+
+**Hard constraint for anyone touching this.** The piano roll is virtualized: a fixed pool of 240
+recycled rows, cached row/cell references, and `offsetHeight`/`clientHeight` reads that drive both
+the scroll-extent spacers and the throttled `scrollTop` playhead-following. So the drawer hides
+the roll with a **CSS transform** (`translateX(100%)`) plus `visibility`/`pointer-events` — never
+`display: none`, never an unmount, never a re-parent:
+
+- `display: none` (or a zero-height ancestor) makes those metric reads return **0**, which
+  silently disables scroll-following and degrades the window/spacer math. A transform does not
+  affect layout metrics at all, and `visibility: hidden` keeps the layout boxes alive.
+- `#piano-roll` is parented into `#tas-grid-drawer` **once**, in `index.html`'s static markup.
+  Toggling touches only classes/attributes on the drawer, the backdrop and the toggle.
+- Opening calls the public `TASStudio.refreshLayout()` (alias `onDrawerShown()`), which
+  re-measures and re-syncs the window so the geometry is honest before the user sees it.
+- The toggle is **event-driven only** — it adds no per-frame work.
+  `tools/pianoroll-perf.test.mjs` still proves 0 `createElement` / 0 DOM queries / 0
+  `scrollIntoView` per frame, and `tools/studio-dom.test.mjs` proves the roll's node identity and
+  descendant element count survive repeated toggling while the frame tracker keeps running.
+
 ## Running locally
 
 ```sh

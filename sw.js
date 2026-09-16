@@ -20,7 +20,15 @@
 // files changed bytes under the SAME filenames, and a third bsnes profile
 // (bsnes_mercury_balanced_libretro) was added. Returning devices must refetch them
 // instead of serving the v24 copies out of cache.
-const CACHE_VERSION = 'tas-studio-v25';
+// v26: the LANDSCAPE "TAS Grid" drawer. In landscape the piano roll was the last item in the
+// single scrolling #sidebar column, so on a short phone viewport it sat far below the fold and
+// was effectively invisible; it is now a slide-out fixed overlay. index.html (the #topbar +
+// #btn-tas-grid toggle, the #tas-grid-drawer wrapper around #piano-roll, the #tas-grid-backdrop),
+// styles.css (the transform-based drawer/backdrop rules + a prefers-reduced-motion branch),
+// piano-roll.js (wireTasGridDrawer/refreshLayout) and app.js (the drawer is exempt from the
+// multi-finger gesture guard) all changed, so returning users MUST get the new files instead of
+// the service worker's cached v25 copies.
+const CACHE_VERSION = 'tas-studio-v26';
 const CACHE_NAME = `${CACHE_VERSION}`;
 
 // Core app shell (always precached). These are the files this feature ships. The emulator now

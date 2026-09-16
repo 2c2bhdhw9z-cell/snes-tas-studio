@@ -26,13 +26,39 @@
   </head>
   <body>
     <div id="app">
-      <!-- Always-visible on-screen debug banner: live WASM core status, ROM fetch status,
-           and uncaught JS/WASM errors (via window.onerror in app.js). Positioned at the very
-           top so mobile errors are visible without a desktop console. Populated by app.js. -->
-      <div id="debug-banner" role="status" aria-live="polite" aria-label="Diagnostics">
-        <span class="debug-banner__item"><strong>Core: </strong>Idle</span>
-        <span class="debug-banner__item"><strong>ROM: </strong>Idle</span>
-        <span class="debug-banner__item"><strong>Err: </strong>none</span>
+      <!-- Top bar: the diagnostics banner plus the discrete top-RIGHT "TAS Grid" drawer toggle.
+           The toggle deliberately lives OUTSIDE #debug-banner: app.js rebuilds the banner's
+           children once (buildBannerSkeleton does el.innerHTML = ''), so a button placed inside
+           the banner would be destroyed on the first status update. Keeping it as a sibling in
+           this flex row leaves every banner field (Core/ROM/Engine/FPS/Video/Present/Err)
+           exactly as it was and simply aligns the button to the banner's right edge. -->
+      <div id="topbar">
+        <!-- Always-visible on-screen debug banner: live WASM core status, ROM fetch status,
+             and uncaught JS/WASM errors (via window.onerror in app.js). Positioned at the very
+             top so mobile errors are visible without a desktop console. Populated by app.js. -->
+        <div id="debug-banner" role="status" aria-live="polite" aria-label="Diagnostics">
+          <span class="debug-banner__item"><strong>Core: </strong>Idle</span>
+          <span class="debug-banner__item"><strong>ROM: </strong>Idle</span>
+          <span class="debug-banner__item"><strong>Err: </strong>none</span>
+        </div>
+        <!-- LANDSCAPE "TAS Grid" drawer toggle. In landscape the piano roll used to be the LAST
+             item in the single scrolling #sidebar column, so on a short phone viewport the
+             toolbar + Live HUD + save-state tree consumed the whole visible height and the
+             timeline sat far below the fold (invisible in practice). This button slides the
+             timeline out as a fixed right-hand overlay instead. Hidden in portrait (where the
+             roll is already inline in the stacked layout). aria-expanded is kept in sync by
+             piano-roll.js across EVERY dismissal path (toggle, ✕, backdrop tap, Escape). -->
+        <button
+          type="button"
+          id="btn-tas-grid"
+          class="tas-grid-toggle"
+          aria-expanded="false"
+          aria-controls="tas-grid-drawer"
+          title="Show/hide the per-frame TAS input grid (landscape)"
+        >
+          <span class="tas-grid-toggle__glyph" aria-hidden="true">▦</span>
+          <span class="tas-grid-toggle__label">TAS Grid</span>
+        </button>
       </div>
 
       <!-- Graceful notices: 'ROM missing' / 'core missing' render here. -->
@@ -136,12 +162,44 @@
         </div>
       </aside>
 
-      <!-- Piano-roll timeline (populated in FEAT-002). -->
-      <div id="piano-roll" aria-label="Per-frame input timeline">
-        <div class="piano-roll__empty">Piano-roll input editor loads with the ROM.</div>
+      <!-- TAS Grid drawer: the STATIC wrapper that owns the piano roll in BOTH orientations.
+           It exists in the markup so #piano-roll is parented ONCE, at parse time, and is NEVER
+           re-parented, unmounted or display:none'd at runtime — the virtualized grid caches row
+           and cell references and measures offsetHeight/clientHeight, and a display:none (or
+           zero-height) ancestor would make those metrics read 0 and silently break the
+           scroll-extent + playhead-following math. Hiding is therefore done purely with a CSS
+           transform (see #tas-grid-drawer in styles.css).
+             PORTRAIT: this wrapper is a transparent in-flow pass-through, so the roll stays
+                       exactly where it was in the stacked #sidebar column.
+             LANDSCAPE: it becomes a position:fixed slide-out panel on the right. -->
+      <div id="tas-grid-drawer" class="tas-grid-drawer" aria-label="TAS Grid" data-open="false">
+        <!-- Drawer chrome: hidden by default (the .tas-grid-drawer__head base rule) and shown
+             only in landscape, so in portrait the timeline is simply inline with no panel
+             header. Hiding the HEADER is safe — it is not the piano roll and carries no
+             measured geometry. -->
+        <div class="tas-grid-drawer__head">
+          <h2 class="tas-grid-drawer__title">TAS Grid</h2>
+          <button
+            type="button"
+            id="btn-tas-grid-close"
+            class="tas-grid-drawer__close"
+            aria-label="Close the TAS Grid"
+            title="Close the TAS Grid"
+          >
+            ✕
+          </button>
+        </div>
+        <!-- Piano-roll timeline (populated in FEAT-002). -->
+        <div id="piano-roll" aria-label="Per-frame input timeline">
+          <div class="piano-roll__empty">Piano-roll input editor loads with the ROM.</div>
+        </div>
       </div>
       </div>
       <!-- /#sidebar -->
+
+      <!-- Dimmed backdrop behind the open drawer; tapping it dismisses (see piano-roll.js).
+           position:fixed, so it never participates in #app's grid; display:none in portrait. -->
+      <div id="tas-grid-backdrop" class="tas-grid-backdrop" aria-hidden="true"></div>
     </div>
 
     <!-- Engine + Studio UI + HUD as ES modules. Order does not matter for modules (deferred). -->

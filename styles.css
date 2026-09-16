@@ -75,6 +75,63 @@ body {
   touch-action: pan-y;
 }
 
+/* Top bar: the diagnostics banner + the discrete top-right "TAS Grid" toggle, side by side in
+   the grid's `banner` row. The banner keeps ALL of its own styling (including its safe-area
+   top pad); it just becomes a flex child that takes the remaining width, so none of its fields
+   (Core/ROM/Engine/FPS/Video/Present/Err) move or shrink out of existence. */
+#topbar {
+  grid-area: banner;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 0;
+}
+#topbar > #debug-banner {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The "TAS Grid" drawer toggle (landscape). Discrete: a small grid glyph + label, styled like
+   the banner itself so it reads as chrome rather than a primary control. It is a real
+   <button type="button"> with aria-expanded/aria-controls (see index.html). The safe-area
+   compensation mirrors #debug-banner's so the two stay visually aligned under the notch. */
+#btn-tas-grid {
+  flex: 0 0 auto;
+  align-self: stretch;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  padding-top: calc(6px + env(safe-area-inset-top));
+  margin-top: calc(-1 * env(safe-area-inset-top));
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  /* The root sets touch-action:none to kill iOS zoom/bounce; this control must stay tappable. */
+  touch-action: manipulation;
+  pointer-events: auto;
+}
+#btn-tas-grid:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+/* OPEN state (aria-expanded is the single source of truth, mirrored by .is-active). */
+#btn-tas-grid[aria-expanded="true"],
+#btn-tas-grid.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+#btn-tas-grid .tas-grid-toggle__glyph {
+  font-size: 13px;
+  line-height: 1;
+}
+
 /* Always-visible on-screen debug banner (populated by app.js). Sits at the very top and
    respects the notch via a safe-area top pad so it is never hidden behind the status bar. */
 #debug-banner {
@@ -536,6 +593,83 @@ body {
   font-weight: 700;
 }
 
+/* ------------------------------------------------------------------ TAS Grid drawer
+
+   #tas-grid-drawer is the STATIC wrapper around #piano-roll (see index.html). The roll is
+   parented into it ONCE at parse time and is NEVER re-parented, unmounted or display:none'd.
+
+   *** WHY HIDING IS TRANSFORM-BASED ***
+   piano-roll.js keeps a FIXED pool of 240 recycled row elements and measures row/header/
+   viewport geometry with offsetHeight/clientHeight (_measureMetrics) to drive the scroll-extent
+   spacers and the throttled scrollTop playhead-following. `display: none` — on the drawer OR on
+   any ancestor — makes those reads return 0, which silently disables scroll-following and
+   degrades the window/spacer math. A CSS transform does not affect layout metrics at all, and
+   `visibility: hidden` keeps the layout boxes (so the metrics stay honest) while stopping the
+   closed panel from hit-testing. That is exactly why the closed state below is
+   `transform: translateX(100%)` + visibility/pointer-events and NEVER `display: none`.
+
+   BASE (and PORTRAIT): a transparent in-flow pass-through — the roll behaves exactly as it did
+   when it was a direct child of #sidebar. The overlay behaviour is added ONLY in landscape. */
+#tas-grid-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  min-height: 0;
+  /* No box of its own in pass-through mode. */
+  background: none;
+  border: 0;
+  padding: 0;
+}
+/* Drawer chrome exists only for the landscape overlay (the portrait layout shows the roll
+   inline, with no panel header). Hiding the HEADER is fine — it is not the piano roll and
+   carries no measured geometry. */
+.tas-grid-drawer__head {
+  display: none;
+}
+.tas-grid-drawer__title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0;
+}
+.tas-grid-drawer__close {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 14px;
+  line-height: 1.2;
+  cursor: pointer;
+  touch-action: manipulation;
+  pointer-events: auto;
+}
+.tas-grid-drawer__close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Dimmed backdrop behind the open drawer (tap to dismiss). Fixed + inset:0, so it never
+   participates in #app's grid. Opacity-only transition (no layout properties). */
+#tas-grid-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  background: rgba(4, 7, 12, 0.55);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 200ms ease, visibility 0s linear 200ms;
+}
+#tas-grid-backdrop.is-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 200ms ease, visibility 0s linear 0s;
+}
+
 /* ------------------------------------------------------------------ responsive layout
 
    The layout is driven by ORIENTATION (not just max-width) because iOS landscape phones can
@@ -572,9 +706,35 @@ body {
     height: 100%;
     max-height: 100%;
   }
+  /* PORTRAIT MUST NOT REGRESS. The drawer wrapper is a pure pass-through here: a plain in-flow
+     block with no box, no fixed positioning and no transform, so #piano-roll stays in the
+     normal stacked flow exactly as before. These declarations are also a hard guarantee that a
+     stale `.is-open` class left over from a rotation can never produce a stuck overlay or a
+     translated-off-screen timeline in portrait (the overlay rules live in the landscape query
+     only, and this more specific rule out-ranks them regardless). */
+  #sidebar > #tas-grid-drawer {
+    position: static;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+    flex: 0 0 auto;
+    width: auto;
+    z-index: auto;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+    gap: 0;
+    transition: none;
+  }
+  /* No drawer chrome and no backdrop/toggle in portrait: the timeline is simply inline. */
+  #btn-tas-grid,
+  #tas-grid-backdrop {
+    display: none;
+  }
   /* In portrait the tools stack under the canvas; the piano roll keeps an inner scroll so a
      long timeline does not push everything off-screen. */
-  #sidebar > #piano-roll {
+  #sidebar > #tas-grid-drawer > #piano-roll {
     max-height: 40vh;
     overflow: auto;
   }
@@ -628,18 +788,84 @@ body {
   /* The #sidebar itself is the single independent scroll area (base rule sets overflow-y:
      auto + flex column). In landscape the tools inside stack at natural height and scroll
      together; none imposes its own inner scroll or max-height, so scrolling them never
-     steals width from or shrinks the canvas. */
+     steals width from or shrinks the canvas. The piano roll is NO LONGER one of them: it now
+     lives in the fixed TAS Grid drawer below, which is exactly what stops it being pushed
+     below the fold of this scroll column. */
   #sidebar > #frame-controls,
-  #sidebar > #side,
-  #sidebar > #piano-roll {
+  #sidebar > #side {
     flex: 0 0 auto;
     max-height: none;
     height: auto;
     overflow: visible;
   }
-  /* Long input timelines can still scroll horizontally within the sidebar. */
-  #sidebar > #piano-roll {
-    overflow-x: auto;
+
+  /* ---------------- THE TAS GRID DRAWER (landscape slide-out) ----------------
+
+     Slides in from the RIGHT (translateX) rather than up from the bottom: a landscape phone is
+     short-and-wide (~956x440), while the grid itself is tall-and-narrow (54px frame column +
+     12 x 34px button columns = 462px wide, arbitrarily many 22px rows). Height is the scarce
+     axis, and rows are what a piano roll is for, so a FULL-HEIGHT right panel shows roughly
+     twice as many frames as a 60svh bottom sheet while still fitting all 12 button columns
+     with no horizontal scrolling. It also keeps the left of the canvas visible beside it,
+     matches the existing mental model (tools live on the right in landscape) and stays clear of
+     the bottom home-indicator swipe area that a bottom sheet's handle would fight. */
+  #tas-grid-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(520px, 92vw);
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    border-radius: 10px 0 0 10px;
+    box-shadow: -14px 0 30px rgba(0, 0, 0, 0.45);
+    /* Respect the notch / home indicator on both sides of a rotated phone. The horizontal pad is
+       deliberately slim: the grid needs 462px (54px frame column + 12 x 34px), and even in the
+       worst rotation (safe-area-inset-right = 44px) this leaves 520 - 4 - 44 - 4 = 468px, so all
+       13 columns fit with no horizontal scrolling. The roll keeps overflow:auto regardless. */
+    padding: calc(6px + env(safe-area-inset-top)) calc(4px + env(safe-area-inset-right))
+      calc(6px + env(safe-area-inset-bottom)) 4px;
+    /* CLOSED: slid off-screen by a TRANSFORM. NEVER display:none — see the note above the base
+       #tas-grid-drawer rule: display:none (or a zero-height ancestor) makes the virtualized
+       grid's offsetHeight/clientHeight reads return 0. visibility + pointer-events keep the
+       layout boxes (and therefore the metrics) intact while preventing stray hit-testing. */
+    transform: translateX(100%);
+    visibility: hidden;
+    pointer-events: none;
+    /* transform only (composited, no layout-animating properties); visibility is stepped so it
+       flips after the slide-out finishes. */
+    transition: transform 200ms ease, visibility 0s linear 200ms;
+    /* The root sets touch-action:none; keep single-finger vertical panning of the timeline. */
+    touch-action: pan-y;
+    overscroll-behavior: contain;
+  }
+  /* OPEN. */
+  #tas-grid-drawer.is-open {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+    transition: transform 200ms ease, visibility 0s linear 0s;
+  }
+  /* Drawer chrome: title + the ✕ close button. */
+  .tas-grid-drawer__head {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  /* The roll FILLS the panel and scrolls INSIDE it, so clientHeight is a real viewport height
+     and the playhead-following math has honest geometry to work with. */
+  #tas-grid-drawer > #piano-roll {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+    max-height: none;
+    overflow: auto;
   }
 }
 
@@ -654,6 +880,20 @@ body {
   /* The canvas is bound by height on short screens; 8:7 + max-height keeps it fitted. */
   #screen {
     max-height: 100%;
+  }
+}
+
+/* ------------------------------------------------------------------ reduced motion
+
+   This is a frame-perfect tool: some users will want no animation at all. With
+   prefers-reduced-motion: reduce the drawer and its backdrop show/hide INSTANTLY (the
+   transform/visibility/opacity end states are unchanged — only the transition is dropped). */
+@media (prefers-reduced-motion: reduce) {
+  #tas-grid-drawer,
+  #tas-grid-drawer.is-open,
+  #tas-grid-backdrop,
+  #tas-grid-backdrop.is-open {
+    transition: none;
   }
 }
 
@@ -706,5 +946,18 @@ body {
   #piano-roll {
     pointer-events: auto;
     touch-action: pan-x pan-y;
+  }
+
+  /* TAS Grid drawer controls must stay tappable in the installed PWA. NOTE: pointer-events is
+     granted to the OPEN drawer/backdrop only — the closed drawer must keep
+     pointer-events:none so an off-screen panel never hit-tests over the stage. */
+  #btn-tas-grid,
+  #btn-tas-grid-close {
+    pointer-events: auto;
+    touch-action: manipulation;
+  }
+  #tas-grid-drawer.is-open,
+  #tas-grid-backdrop.is-open {
+    pointer-events: auto;
   }
 }
