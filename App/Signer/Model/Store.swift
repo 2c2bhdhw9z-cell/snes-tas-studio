@@ -11,18 +11,14 @@ final class Store: ObservableObject {
     @Published var sources: [Source] = []
     @Published var selectedCertificateID: UUID?
 
-    let root: URL
-    var certificatesDir: URL { root.appendingPathComponent("Certificates") }
-    var appsDir: URL { root.appendingPathComponent("Apps") }
-    var importsDir: URL { root.appendingPathComponent("Imports") }
-    var tweaksDir: URL { root.appendingPathComponent("Tweaks") }
+    var root: URL { Paths.root }
+    var certificatesDir: URL { Paths.certificates }
+    var appsDir: URL { Paths.apps }
+    var importsDir: URL { Paths.imports }
+    var tweaksDir: URL { Paths.tweaks }
 
     private init() {
-        root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Signer")
-        for dir in [certificatesDir, appsDir, importsDir, tweaksDir] {
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        }
+        Paths.createAll()
         load()
     }
 

@@ -68,7 +68,7 @@ final class UDIDReader: ObservableObject {
             let isPost = text.hasPrefix("POST")
             // Keep reading a POST until the body has arrived.
             if isPost, !complete, !all.contains(Data("</plist>".utf8)) {
-                self.receive(conn, buffer: all)
+                Task { @MainActor in self.receive(conn, buffer: all) }
                 return
             }
             Task { @MainActor in self.respond(request: text, body: all, on: conn) }

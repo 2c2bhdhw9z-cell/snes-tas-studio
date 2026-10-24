@@ -7,7 +7,7 @@ struct CertificatesView: View {
     @EnvironmentObject var store: Store
     @State private var showAdd = false
     @State private var checking = false
-    @State private var error: String?
+    @State private var errorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -50,9 +50,9 @@ struct CertificatesView: View {
                 Button { showAdd = true } label: { Label("Add", systemImage: "plus") }
             }
             .sheet(isPresented: $showAdd) { AddCertificateView() }
-            .alert("That did not work", isPresented: .constant(error != nil)) {
-                Button("OK") { error = nil }
-            } message: { Text(error ?? "") }
+            .alert("That did not work", isPresented: .constant(errorMessage != nil)) {
+                Button("OK") { errorMessage = nil }
+            } message: { Text(errorMessage ?? "") }
         }
     }
 
@@ -76,7 +76,7 @@ struct CertificatesView: View {
                 }()
                 store.certificates[index].lastChecked = answer.checkedAt
             } catch {
-                error = (error as? SignKitError)?.description ?? error.localizedDescription
+                errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
             }
         }
         store.save()
@@ -180,7 +180,7 @@ struct AddCertificateView: View {
     @State private var profile: URL?
     @State private var password = ""
     @State private var nickname = ""
-    @State private var error: String?
+    @State private var errorMessage: String?
     @State private var picking: Picking?
 
     enum Picking: Identifiable { case p12, profile; var id: Int { self == .p12 ? 0 : 1 } }
@@ -246,8 +246,8 @@ struct AddCertificateView: View {
             dismiss()
         } catch let e as SignKitError {
             error = e.description
-        } catch {
-            error = error.localizedDescription
+        } catch let other {
+            error = other.localizedDescription
         }
     }
 }

@@ -19,19 +19,19 @@ public enum SignKitError: Error, CustomStringConvertible {
 }
 
 extension Data {
-    @inline(__always) func u8(_ o: Int) -> UInt8 { self[self.startIndex + o] }
+    @inline(__always) public func u8(_ o: Int) -> UInt8 { self[self.startIndex + o] }
 
-    func u16le(_ o: Int) -> UInt16 { UInt16(u8(o)) | UInt16(u8(o + 1)) << 8 }
-    func u32le(_ o: Int) -> UInt32 {
+    public func u16le(_ o: Int) -> UInt16 { UInt16(u8(o)) | UInt16(u8(o + 1)) << 8 }
+    public func u32le(_ o: Int) -> UInt32 {
         UInt32(u8(o)) | UInt32(u8(o + 1)) << 8 | UInt32(u8(o + 2)) << 16 | UInt32(u8(o + 3)) << 24
     }
-    func u64le(_ o: Int) -> UInt64 { UInt64(u32le(o)) | UInt64(u32le(o + 4)) << 32 }
-    func u32be(_ o: Int) -> UInt32 {
+    public func u64le(_ o: Int) -> UInt64 { UInt64(u32le(o)) | UInt64(u32le(o + 4)) << 32 }
+    public func u32be(_ o: Int) -> UInt32 {
         UInt32(u8(o)) << 24 | UInt32(u8(o + 1)) << 16 | UInt32(u8(o + 2)) << 8 | UInt32(u8(o + 3))
     }
-    func u64be(_ o: Int) -> UInt64 { UInt64(u32be(o)) << 32 | UInt64(u32be(o + 4)) }
+    public func u64be(_ o: Int) -> UInt64 { UInt64(u32be(o)) << 32 | UInt64(u32be(o + 4)) }
 
-    func sub(_ o: Int, _ n: Int) -> Data {
+    public func sub(_ o: Int, _ n: Int) -> Data {
         let s = startIndex + o
         return Data(self[s..<(s + n)])
     }
@@ -54,7 +54,7 @@ extension Data {
 
     public var hex: String { map { String(format: "%02x", $0) }.joined() }
 
-    init?(hex: String) {
+    public init?(hex: String) {
         var d = Data()
         var it = hex.makeIterator()
         while let a = it.next() {
@@ -65,7 +65,7 @@ extension Data {
     }
 
     /// Finds the first occurrence of `needle` starting at `from`.
-    func find(_ needle: Data, from: Int = 0) -> Int? {
+    public func find(_ needle: Data, from: Int = 0) -> Int? {
         guard needle.count > 0, count >= needle.count else { return nil }
         return range(of: needle, in: (startIndex + from)..<endIndex).map { $0.lowerBound - startIndex }
     }

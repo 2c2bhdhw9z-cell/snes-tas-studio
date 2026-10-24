@@ -1,6 +1,24 @@
 import Foundation
 import SignKit
 
+/// Where the app keeps its files. Plain functions so any part of the app can use them.
+enum Paths {
+    static var root: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Signer")
+    }
+    static var certificates: URL { root.appendingPathComponent("Certificates") }
+    static var apps: URL { root.appendingPathComponent("Apps") }
+    static var imports: URL { root.appendingPathComponent("Imports") }
+    static var tweaks: URL { root.appendingPathComponent("Tweaks") }
+
+    static func createAll() {
+        for dir in [certificates, apps, imports, tweaks] {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+    }
+}
+
 /// A certificate the user imported, as shown on the Certificates screen.
 struct StoredCertificate: Codable, Identifiable, Hashable {
     var id: UUID
@@ -66,12 +84,10 @@ struct LibraryApp: Codable, Identifiable, Hashable {
     var bytes: Int
     var iconFileName: String?
 
-    var fileURL: URL {
-        Store.shared.appsDir.appendingPathComponent(fileName)
-    }
+    var fileURL: URL { Paths.apps.appendingPathComponent(fileName) }
 
     var iconURL: URL? {
-        iconFileName.map { Store.shared.appsDir.appendingPathComponent($0) }
+        iconFileName.map { Paths.apps.appendingPathComponent($0) }
     }
 
     var sizeText: String {
