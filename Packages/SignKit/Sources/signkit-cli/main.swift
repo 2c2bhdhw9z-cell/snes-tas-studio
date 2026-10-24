@@ -40,6 +40,33 @@ case "zip":
         bytes += d.count
     }
     print("checksums verified: \(checked) files, \(bytes) bytes")
+case "sign":
+    // sign <macho> <p12> <password> <identifier> <out> [entitlements.plist]
+    guard args.count >= 6 else {
+        print("usage: signkit-cli sign <macho> <p12> <password> <identifier> <out> [entitlements.plist]")
+        exit(2)
+    }
+    let p12 = try PKCS12(url: URL(fileURLWithPath: args[2]), password: args[3])
+    guard let key = p12.privateKey, let leaf = p12.identity else {
+        print("the .p12 has no usable certificate")
+        exit(1)
+    }
+    var ents: [String: Any]?
+    if args.count > 6 {
+        let d = try Data(contentsOf: URL(fileURLWithPath: args[6]))
+        ents = try PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any]
+    }
+    let signer = MachOSigner(key: key, chain: [leaf] + p12.certificates.filter { $0.der != leaf.der })
+    var opts = MachOSigner.Options(identifier: args[4], teamID: leaf.teamID, entitlements: ents)
+    opts.hashKind = .sha256
+    let input = try Data(contentsOf: URL(fileURLWithPath: args[1]))
+    let signed = try signer.sign(data: input, options: opts)
+    try signed.write(to: URL(fileURLWithPath: args[5]))
+    let file = try MachOFile(data: signed)
+    for s in file.slices {
+        print("signed \(s.archName): signature \(s.existingSignature?.count ?? 0) bytes, "
+              + "cdhash \(signer.cdhash(for: s)?.hex.prefix(40) ?? "-")")
+    }
 default:
     usage()
 }
