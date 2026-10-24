@@ -1,40 +1,42 @@
 # Plan: the new iOS app signer
 
 The old SNES TAS Studio project was cleared on 24 Oct 2026 (owner's request).
-Everything here is our own code, written from scratch. Other signers were studied
-(with REA, Ghidra and Rizin) only to learn what they do and how.
+Everything here is our own code, written from scratch. The other signers were taken
+apart with REA (Ghidra + Rizin) only to learn what they do — see `docs/RESEARCH.md`.
 
-## Decisions so far
-- Real iPhone app (SwiftUI). Built by GitHub Actions on a Mac runner, delivered as an `.ipa`.
-- Certificates: the owner's own `.p12` + `.mobileprovision`, and shared ones found online. Both.
-- Every feature the top signers have, plus more (list below).
-- Working names (easy to change later): app **"Signer"**, bundle ID `com.continuum.signer`.
+## Decisions taken so far (all changeable — say the word)
+- **Real iPhone app**, SwiftUI, built on GitHub and published as an `.ipa` release.
+- **Name "Signer"**, app ID `com.continuum.signer`, minimum iOS 16.
+- **Certificates:** your own `.p12` + `.mobileprovision`, and shared ones found online.
+- **Own engine** (`Packages/SignKit`), not zsign, which every other signer uses.
+- **Installing:** the phone serves the app itself; only a tiny details file (name, ID and a
+  link back to the phone) goes through a helper address, because iOS insists that one file
+  arrives over HTTPS. Default helper `https://api.palera.in/genPlist`, changeable in
+  Settings, with a fully-on-the-phone option for anyone who supplies a web certificate.
+- **No tracking.** ESign and GBox both carry Umeng/Bugly/Firebase. We carry nothing.
 
-## Parts
-1. **SignKit** (`Packages/SignKit`): our signing engine. ZIP read/write, Mach-O, code
-   signature (CodeDirectory SHA-1 + SHA-256, requirements, entitlements XML + DER, CMS),
-   `_CodeSignature/CodeResources`, nested apps/frameworks/extensions, PKCS#12 reader,
-   provisioning profile reader, X.509 reader, OCSP revocation check. Tested on Linux with
-   `swift test` and checked with an independent verifier (rcodesign).
-2. **App** (`App/`): Library, Sign, Install, Certificates, Sources, Downloads, Files, Settings.
-3. **Install**: local web server on the phone + `itms-services` link (how ESign, Feather and
-   KSign all do it), with a fallback page in Safari for iOS 26.5+ where the install waits.
-4. **Build**: `.github/workflows/build.yml` makes the `.ipa` and posts it as a GitHub release.
+## Done
+- Engine: zip (zip64, symlinks, permissions), Mach-O read/edit, code signing
+  (code directory, requirements, entitlements XML + DER, CMS), `CodeResources` matching
+  Apple's own output, `.p12` reader (AES / Triple-DES / RC2-40), provisioning profiles,
+  X.509, OCSP revocation checks, SHA-1/SHA-256/HMAC, RSA with Montgomery maths.
+  49 tests, run on Linux in CI. Output verified with an outside tool (rcodesign):
+  `signature_verifies: true` for the app and every framework inside it.
+- App: My apps, Sign, Sources, Certificates, Settings; local install server;
+  phone-ID reader; app modifications (name, ID, version, flags, remove extras, tweaks).
+- Build: GitHub Actions runs the engine tests, builds the `.ipa`, publishes a release.
 
-## Feature list (from studying ESign, GBox, Scarlet, Feather, KSign, VexSign, ForgeSign, SwiftIPA)
-- Sign + install on the phone, batch signing, re-sign/update all.
-- Change name, bundle ID, version, icon, minimum iOS, appearance; remove extensions,
-  Watch app, URL schemes, device limits; file sharing; ProMotion; Game Mode; iPad full screen.
-- Clones ("App Multi-Open" in ESign): many copies of one app with different IDs.
-- Tweaks: inject `.dylib`, `.deb`, `.framework`; remove injected libraries.
-- Certificates: import p12 + profile, password check, expiry countdown, revoked check
-  (OCSP, like ESign), entitlement and device list viewer.
-- Get the phone's UDID with no computer (ESign trick: a profile that sends the UDID back
-  to the app's own local server).
-- Sources: AltStore/SideStore/Feather format and ESign format, app browser, search, updates.
-- Downloads from links and from a built-in browser; Files manager; plist editor.
-- Apple ID sign-in to make certificates/profiles (GBox does this with Apple's developer
-  services API) — later stage.
+## Next, in order
+1. **Certificate checking on a timer** with a warning before it dies.
+2. **Batch signing** and "update all" for apps that came from a source.
+3. **Clones** — several copies of one app side by side (ESign's "App Multi-Open").
+4. **Files screen**: look inside an `.ipa`, edit an Info.plist, swap an icon.
+5. **ESign-format sources** (theirs are scrambled; Feather worked out how, we have not yet).
+6. **Apple account sign-in** to make certificates and profiles in the app (what GBox does).
+7. **Pairing-file install** (the way SideStore and Feather install without any helper).
 
-## Research notes
-See `docs/RESEARCH.md`.
+## Open questions for the owner
+- Do you want the app's name and icon changed from the placeholder "Signer"?
+- Shared certificates: should the app fetch a list from somewhere, or only take files
+  you import yourself?
+- Is the default helper address fine, or would you rather we host that bit ourselves?

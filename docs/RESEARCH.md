@@ -26,7 +26,12 @@ The difference between the apps is only *where that manifest lives*:
 |---|---|---|
 | Local web server on the phone with a real HTTPS certificate for a name that resolves to 127.0.0.1 | Feather (`*.backloop.dev`), Wax | Needs extra entitlements on iOS 18+; the shared certificate can be pulled |
 | Plain local server for the `.ipa` + a remote HTTPS server for the manifest | Feather fallback, ForgeSign (`api.palera.in`), SwiftIPA | Needs that remote site up; it sees your manifest |
-| Fully remote | ESign (`esign.yyyue.xyz`, `applep12.com`, `applejr.net`), GBox (`gbox.run/Public/gbox.plist`) | Their server, their rules |
+| Fully remote | the websites that hand out ESign and GBox themselves (`esign.yyyue.xyz`, `applep12.com`, `gbox.run/Public/gbox.plist`) | Their server, their rules |
+
+Correction to an earlier note: those remote addresses are how **ESign and GBox get
+installed onto the phone in the first place**, not how they install the apps you sign
+inside them. Inside, ESign's own code uses a local server (`http://localhost:%@`,
+`http://%@:%i/`) exactly as Feather does — the same shape we use.
 | Pairing file + VPN, install through `installd` over AFC, like a computer would | Feather's second method, SideStore | Needs a one-time setup on a computer |
 
 Feather's own notes confirm a further wrinkle: on newer iOS they have to open a
