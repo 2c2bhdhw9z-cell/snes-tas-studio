@@ -1,33 +1,7 @@
-# ROM files.
-#
-# NOTE: .sfc / .smc are intentionally NOT ignored. The repo owner has chosen to
-# commit the ROM (e.g. assets/Super Mario All-Stars (USA).sfc) directly via the
-# GitHub web UI so it deploys with the app to Netlify, and is accepting the
-# associated risk WHILE THE REPOSITORY IS PRIVATE.
-#
-# WARNING: committing a ROM writes it into git history permanently. If this repo
-# is ever made PUBLIC, every historical commit that contains the ROM becomes
-# public too, and removing it later requires a destructive history rewrite
-# (force-push). Keep this repo private for as long as the ROM is committed.
-#
-# .zip stays ignored to avoid accidentally committing large/unrelated archives;
-# it does not affect committing a raw .sfc/.smc ROM.
-assets/*.zip
-
-# NOTE: the from-source bsnes-mercury WASM cores (ASYNCIFY builds of both the
-# accuracy AND performance profiles — cores/bsnes_mercury_accuracy_libretro.js +
-# .wasm and cores/bsnes_mercury_performance_libretro.js + .wasm, plus core.json,
-# build.json, license.txt) are bundled and TRACKED so they deploy with the app
-# shell to Netlify. They are not ignored here on purpose.
-
-# OS / editor cruft
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/
+build/
+*.ipa
 .DS_Store
-Thumbs.db
-*.swp
-node_modules/
-
-# Emulator save-state blobs written by tools/hud-calibrate.mjs as a local
-# reproducibility cache. These are the harness's OWN serialized emulator state
-# (RAM/registers), not the ROM, but they are large binary artifacts and MUST NOT
-# be committed. Regenerated on demand by running the harness.
-*.state
