@@ -54,8 +54,7 @@ final class InstallServer: ObservableObject {
             let base: String
             switch route {
             case .localHTTPS(_, _, let host): base = "https://\(host):\(p)"
-            // (the helper only ever receives a link back to this phone)
-            case .remoteManifest: base = "http://127.0.0.1:\(p)"
+            case .helper: base = "http://127.0.0.1:\(p)"
             }
             manifest = InstallServer.manifest(ipaURL: "\(base)/app.ipa", bundleID: bundleID,
                                               version: version, title: title,
