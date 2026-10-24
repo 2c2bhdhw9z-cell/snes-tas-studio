@@ -1,0 +1,38 @@
+# XcodeGen spec — the Xcode project is generated from this, so there is no
+# .xcodeproj to fight with in git. CI runs: xcodegen && xcodebuild.
+name: Signer
+options:
+  bundleIdPrefix: com.continuum
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  SignKit:
+    path: ../Packages/SignKit
+
+targets:
+  Signer:
+    type: application
+    platform: iOS
+    sources:
+      - path: Signer
+    dependencies:
+      - package: SignKit
+        product: SignKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.continuum.signer
+        PRODUCT_NAME: Signer
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: Signer/Info.plist
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGN_IDENTITY: ""
+        ENABLE_BITCODE: NO
+        SWIFT_VERSION: "5.9"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: NO
+        GCC_OPTIMIZATION_LEVEL: s
+        SWIFT_OPTIMIZATION_LEVEL: "-O"
