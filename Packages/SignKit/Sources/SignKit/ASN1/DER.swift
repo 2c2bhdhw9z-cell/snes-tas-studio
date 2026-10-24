@@ -33,7 +33,7 @@ public struct DERNode {
             // BER indefinite length (some PKCS#12 files use it): scan to end-of-contents.
             let cs = o
             while true {
-                guard o + 2 <= d.count else { throw SignKitError.malformed("BER EOC missing") }
+                guard o + 2 <= d.count else { throw SignKitError.malformed("BER end-of-contents missing") }
                 if d.u8(o) == 0 && d.u8(o + 1) == 0 { break }
                 _ = try parse(d, &o)
             }
@@ -55,7 +55,7 @@ public struct DERNode {
 
     /// For BER constructed OCTET STRINGs (chunked), join all the pieces.
     public var octets: Data {
-        if tag == 0x24 || (isConstructed && tagNumber == 4) {
+        if isConstructed && tagNumber == 4 {
             return children.reduce(Data()) { $0 + $1.octets }
         }
         return content
@@ -79,9 +79,12 @@ public struct DERNode {
 
     public var string: String? {
         switch tag {
-        case 0x0c, 0x13, 0x16, 0x14, 0x1a: return String(data: content, encoding: .utf8) ?? String(data: content, encoding: .isoLatin1)
-        case 0x1e: return String(data: content, encoding: .utf16BigEndian)
-        default: return nil
+        case 0x0c, 0x13, 0x16, 0x14, 0x1a:
+            return String(data: content, encoding: .utf8) ?? String(data: content, encoding: .isoLatin1)
+        case 0x1e:
+            return String(data: content, encoding: .utf16BigEndian)
+        default:
+            return nil
         }
     }
 
@@ -98,6 +101,12 @@ public struct DERNode {
         return v
     }
 
+    /// BIT STRING payload without the leading "unused bits" byte.
+    public var bitString: Data {
+        guard tag == 0x03, content.count > 1 else { return content }
+        return Data(content.dropFirst())
+    }
+
     public var date: Date? {
         guard let s = String(data: content, encoding: .ascii) else { return nil }
         let f = DateFormatter()
@@ -105,6 +114,20 @@ public struct DERNode {
         f.timeZone = TimeZone(identifier: "UTC")
         f.dateFormat = tag == 0x17 ? "yyMMddHHmmss'Z'" : "yyyyMMddHHmmss'Z'"
         return f.date(from: s)
+    }
+
+    /// Depth-first search for the first node whose tag matches.
+    public func firstNode(tag wanted: UInt8) -> DERNode? {
+        if tag == wanted { return self }
+        for c in children { if let f = c.firstNode(tag: wanted) { return f } }
+        return nil
+    }
+
+    /// Depth-first search for a SEQUENCE whose first child is the given OID.
+    public func firstSequence(withOID wanted: String) -> DERNode? {
+        if tag == 0x30, let first = child(0), first.oid == wanted { return self }
+        for c in children { if let f = c.firstSequence(withOID: wanted) { return f } }
+        return nil
     }
 }
 
@@ -130,35 +153,52 @@ public indirect enum DER {
 
     public var encoded: Data {
         switch self {
-        case .raw(let d): return d
-        case .seq(let c): return DER.tlv(0x30, c.reduce(Data()) { $0 + $1.encoded })
+        case .raw(let d):
+            return d
+        case .seq(let c):
+            return DER.tlv(0x30, c.reduce(Data()) { $0 + $1.encoded })
         case .set(let c):
             // DER requires SET OF members sorted by their encodings.
-            let enc = c.map(\.encoded).sorted { a, b in a.lexicographicallyPrecedes(b) }
+            let enc = c.map(\.encoded).sorted { $0.lexicographicallyPrecedes($1) }
             return DER.tlv(0x31, enc.reduce(Data(), +))
-        case .oid(let s): return DER.tlv(0x06, DER.encodeOID(s))
+        case .oid(let s):
+            return DER.tlv(0x06, DER.encodeOID(s))
         case .int(let d):
             var v = Data(d.drop(while: { $0 == 0 }))
             if v.isEmpty { v = Data([0]) }
-            if v.first! & 0x80 != 0 { v.insert(0, at: 0) }
+            if v[v.startIndex] & 0x80 != 0 { v.insert(0, at: v.startIndex) }
             return DER.tlv(0x02, v)
         case .intValue(let i):
             var v = Data()
             var x = i
-            repeat { v.insert(UInt8(x & 0xff), at: 0); x >>= 8 } while x > 0
-            if v.first! & 0x80 != 0 { v.insert(0, at: 0) }
+            repeat {
+                v.insert(UInt8(x & 0xff), at: v.startIndex)
+                x >>= 8
+            } while x > 0
+            if v[v.startIndex] & 0x80 != 0 { v.insert(0, at: v.startIndex) }
             return DER.tlv(0x02, v)
-        case .octets(let d): return DER.tlv(0x04, d)
-        case .bits(let d): return DER.tlv(0x03, Data([0]) + d)
-        case .null: return Data([0x05, 0x00])
-        case .bool(let b): return Data([0x01, 0x01, b ? 0xff : 0x00])
-        case .utf8(let s): return DER.tlv(0x0c, Data(s.utf8))
-        case .printable(let s): return DER.tlv(0x13, Data(s.utf8))
-        case .ia5(let s): return DER.tlv(0x16, Data(s.utf8))
-        case .utcTime(let d): return DER.tlv(0x17, Data(DER.fmt(d, "yyMMddHHmmss'Z'").utf8))
-        case .genTime(let d): return DER.tlv(0x18, Data(DER.fmt(d, "yyyyMMddHHmmss'Z'").utf8))
-        case .tagged(let n, let c): return DER.tlv(0xa0 | n, c.reduce(Data()) { $0 + $1.encoded })
-        case .implicit(let n, let d): return DER.tlv(0x80 | n, d)
+        case .octets(let d):
+            return DER.tlv(0x04, d)
+        case .bits(let d):
+            return DER.tlv(0x03, Data([0]) + d)
+        case .null:
+            return Data([0x05, 0x00])
+        case .bool(let b):
+            return Data([0x01, 0x01, b ? 0xff : 0x00])
+        case .utf8(let s):
+            return DER.tlv(0x0c, Data(s.utf8))
+        case .printable(let s):
+            return DER.tlv(0x13, Data(s.utf8))
+        case .ia5(let s):
+            return DER.tlv(0x16, Data(s.utf8))
+        case .utcTime(let d):
+            return DER.tlv(0x17, Data(DER.fmt(d, "yyMMddHHmmss'Z'").utf8))
+        case .genTime(let d):
+            return DER.tlv(0x18, Data(DER.fmt(d, "yyyyMMddHHmmss'Z'").utf8))
+        case .tagged(let n, let c):
+            return DER.tlv(0xa0 | n, c.reduce(Data()) { $0 + $1.encoded })
+        case .implicit(let n, let d):
+            return DER.tlv(0x80 | n, d)
         }
     }
 
@@ -181,12 +221,13 @@ public indirect enum DER {
         if n < 0x80 { return Data([UInt8(n)]) }
         var b = Data()
         var x = n
-        while x > 0 { b.insert(UInt8(x & 0xff), at: 0); x >>= 8 }
+        while x > 0 { b.insert(UInt8(x & 0xff), at: b.startIndex); x >>= 8 }
         return Data([0x80 | UInt8(b.count)]) + b
     }
 
     static func encodeOID(_ s: String) -> Data {
         let p = s.split(separator: ".").compactMap { UInt64($0) }
+        guard p.count >= 2 else { return Data() }
         var d = Data([UInt8(p[0] * 40 + p[1])])
         for v in p.dropFirst(2) {
             var chunk = [UInt8(v & 0x7f)]
@@ -204,16 +245,16 @@ public enum OID {
     public static let sha1WithRSA = "1.2.840.113549.1.1.5"
     public static let sha1 = "1.3.14.3.2.26"
     public static let sha256 = "2.16.840.1.101.3.4.2.1"
-    public static let data = "1.2.840.113549.1.7.1"
-    public static let signedData = "1.2.840.113549.1.7.2"
-    public static let encryptedData = "1.2.840.113549.1.7.6"
+    public static let pkcs7Data = "1.2.840.113549.1.7.1"
+    public static let pkcs7SignedData = "1.2.840.113549.1.7.2"
+    public static let pkcs7EncryptedData = "1.2.840.113549.1.7.6"
     public static let contentType = "1.2.840.113549.1.9.3"
     public static let messageDigest = "1.2.840.113549.1.9.4"
     public static let signingTime = "1.2.840.113549.1.9.5"
     public static let friendlyName = "1.2.840.113549.1.9.20"
     public static let localKeyID = "1.2.840.113549.1.9.21"
-    public static let appleCDHashes = "1.2.840.113635.100.9.1"
-    public static let appleCDHashes2 = "1.2.840.113635.100.9.2"
+    public static let appleCDHashesPlist = "1.2.840.113635.100.9.1"
+    public static let appleCDHashes = "1.2.840.113635.100.9.2"
     public static let commonName = "2.5.4.3"
     public static let organization = "2.5.4.10"
     public static let orgUnit = "2.5.4.11"
@@ -222,7 +263,8 @@ public enum OID {
     public static let authorityInfoAccess = "1.3.6.1.5.5.7.1.1"
     public static let ocsp = "1.3.6.1.5.5.7.48.1"
     public static let ocspBasic = "1.3.6.1.5.5.7.48.1.1"
-    // PKCS#12
+    public static let ocspNonce = "1.3.6.1.5.5.7.48.1.2"
+    // PKCS#12 / PKCS#5
     public static let keyBag = "1.2.840.113549.1.12.10.1.1"
     public static let shroudedKeyBag = "1.2.840.113549.1.12.10.1.2"
     public static let certBag = "1.2.840.113549.1.12.10.1.3"
