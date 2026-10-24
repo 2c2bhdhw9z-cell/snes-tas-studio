@@ -1,0 +1,55 @@
+# Signer
+
+An iPhone app that signs other iPhone apps, on the phone, with no computer.
+
+Everything here is written from scratch. The signing engine is ours — not zsign,
+which every other on-device signer (ESign, GBox, Feather, KSign, VexSign, ProSign)
+runs underneath. See [docs/RESEARCH.md](docs/RESEARCH.md) for what the others do and
+how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is going.
+
+## What it does today
+
+- **Signs apps on the phone.** Its own engine: zip, Mach-O, code directory, requirements,
+  entitlements (both the old XML and the newer DER form), CMS signature, and the
+  `CodeResources` list that matches what Apple's own tool writes.
+- **Reads real certificate files.** `.p12` files including the old RC2-40 kind iOS itself
+  often refuses, with a plain reason when something is wrong instead of "unknown error".
+- **Says when a certificate is dead.** Asks Apple directly (OCSP), so a certificate that
+  has been switched off is caught even while its end date still looks fine.
+- **Changes apps while signing**: name, app ID, version, icon, minimum iOS, file sharing,
+  120 Hz, remove extras, remove the Watch app, add `.dylib`/`.deb` add-ons.
+- **Installs from the phone itself.** The app is served by the phone; nothing is uploaded.
+- **Reads the phone's own ID** with no computer.
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `Packages/SignKit` | The signing engine. Plain Swift, no third-party code. Tests run on Linux. |
+| `App` | The iPhone app (SwiftUI). The Xcode project is generated from `App/project.yml`. |
+| `tools/verify-signature.sh` | Checks a signed `.ipa` with an outside tool. |
+| `.github/workflows/build.yml` | Runs the engine tests, builds the `.ipa`, publishes it. |
+
+## Checking the engine
+
+```sh
+swift test --package-path Packages/SignKit          # 45 tests, runs on Linux
+Packages/SignKit/.build/debug/signkit-cli zip x.ipa # read any .ipa, verify every checksum
+signkit-cli sign-ipa in.ipa out.ipa cert.p12 pw     # sign end to end
+RCODESIGN=/path/to/rcodesign tools/verify-signature.sh out.ipa
+```
+
+The engine is not graded on its own homework: signed output is checked with
+[rcodesign](https://github.com/indygreg/apple-platform-rs), an unrelated tool, which
+reports `signature_verifies: true` for the app and every framework inside it.
+
+## Honest limits
+
+- Signing needs your own certificate (a `.p12`, usually with a `.mobileprovision`).
+  Free shared certificates work too, and die when Apple turns them off.
+- An app still locked by the App Store cannot be re-signed into a working app; you need a
+  decrypted copy. The app says so before wasting your time.
+- Installing needs one of two things set up: a web certificate for a local address, or a
+  helper address for the small details file. iOS insists that one file arrives over HTTPS.
+- On some recent iOS versions the install can sit at "Waiting…" until Signer is closed.
+  That is iOS, not us; the app tells you what to do.
