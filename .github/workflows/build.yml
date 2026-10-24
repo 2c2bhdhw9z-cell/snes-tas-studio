@@ -24,6 +24,8 @@ jobs:
   app:
     runs-on: macos-15
     needs: engine-tests
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -100,3 +102,4 @@ jobs:
             --title "Signer build ${{ github.run_number }}" \
             --notes "Unsigned build. Sign it with your own certificate, or install it with another signer." \
             || gh release upload "$TAG" App/Signer.ipa --clobber
+          echo "download: $(gh release view "$TAG" --json assets --jq '.assets[0].url')"
