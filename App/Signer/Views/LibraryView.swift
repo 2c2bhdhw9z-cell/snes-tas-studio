@@ -8,7 +8,7 @@ struct LibraryView: View {
     @EnvironmentObject var store: Store
     @State private var showImporter = false
     @State private var installing: LibraryApp?
-    @State private var error: String?
+    @State private var errorMessage: String?
 
     var body: some View {
         NavigationStack {
@@ -41,19 +41,19 @@ struct LibraryView: View {
                 case .success(let urls):
                     for url in urls {
                         do { _ = try SigningRunner.importIPA(url) }
-                        catch { self.error = friendly(error) }
+                        catch { self.errorMessage = friendly(error) }
                     }
                 case .failure(let e):
-                    self.error = e.localizedDescription
+                    self.errorMessage = e.localizedDescription
                 }
             }
             .sheet(item: $installing) { (app: LibraryApp) in
                 InstallView(app: app)
             }
-            .alert("That did not work", isPresented: .constant(error != nil)) {
-                Button("OK") { error = nil }
+            .alert("That did not work", isPresented: .constant(errorMessage != nil)) {
+                Button("OK") { errorMessage = nil }
             } message: {
-                Text(error ?? "")
+                Text(errorMessage ?? "")
             }
         }
     }

@@ -208,8 +208,8 @@ struct AddCertificateView: View {
                 Section("Name it (optional)") {
                     TextField("For example: work certificate", text: $nickname)
                 }
-                if let error {
-                    Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
+                if let errorMessage {
+                    Section { Label(errorMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
                 }
             }
             .navigationTitle("Add a certificate")
@@ -245,9 +245,9 @@ struct AddCertificateView: View {
                                             nickname: nickname.isEmpty ? nil : nickname)
             dismiss()
         } catch let e as SignKitError {
-            error = e.description
+            errorMessage = e.description
         } catch let other {
-            error = other.localizedDescription
+            errorMessage = other.localizedDescription
         }
     }
 }
