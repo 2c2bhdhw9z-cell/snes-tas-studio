@@ -23,6 +23,7 @@ targets:
         product: SignKit
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         PRODUCT_BUNDLE_IDENTIFIER: com.continuum.signer
         PRODUCT_NAME: Signer
         MARKETING_VERSION: "0.1"

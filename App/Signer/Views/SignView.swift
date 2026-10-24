@@ -6,6 +6,7 @@ import SignKit
 struct SignView: View {
     @EnvironmentObject var store: Store
     @StateObject private var runner = SigningRunner()
+    @AppStorage("compressOutput") private var compressOutput = true
 
     @State private var app: LibraryApp?
     @State private var info: IPAInfo?
@@ -220,6 +221,7 @@ struct SignView: View {
         options.removeExtensions = removeExtensions
         options.removeWatchApp = removeWatch
         options.injectLibraries = tweaks
+        options.compressOutput = compressOutput
         options.adhoc = store.selectedCertificate == nil
         await runner.run(ipa: app.fileURL, options: options, certificate: store.selectedCertificate)
     }
