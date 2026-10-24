@@ -8,13 +8,13 @@ final class SigningRunner: ObservableObject {
     @Published var fraction: Double = 0
     @Published var message = ""
     @Published var finished: SigningResult?
-    @Published var error: String?
+    @Published var errorMessage: String?
 
     func run(ipa: URL, options: SigningOptions, certificate: StoredCertificate?) async {
         isRunning = true
         fraction = 0
         message = "Getting ready"
-        error = nil
+        errorMessage = nil
         finished = nil
 
         let store = Store.shared
@@ -50,7 +50,7 @@ final class SigningRunner: ObservableObject {
             message = "Signed"
             fraction = 1
         } catch {
-            self.error = (error as? SignKitError)?.description ?? error.localizedDescription
+            errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
             message = "Stopped"
         }
         isRunning = false

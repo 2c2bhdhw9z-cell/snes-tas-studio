@@ -184,8 +184,8 @@ struct SignView: View {
                     Text("It is in My apps, ready to install.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-            } else if let error = runner.error {
-                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+            } else if let message = runner.errorMessage {
+                Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
             }
 
             Button {
