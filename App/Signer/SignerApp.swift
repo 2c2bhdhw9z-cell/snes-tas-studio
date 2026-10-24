@@ -20,7 +20,7 @@ struct RootView: View {
     @EnvironmentObject var store: Store
     @State private var tab = Tab.library
 
-    enum Tab: Hashable { case library, sign, certificates, settings }
+    enum Tab: Hashable { case library, sign, sources, certificates, settings }
 
     var body: some View {
         TabView(selection: $tab) {
@@ -31,6 +31,10 @@ struct RootView: View {
             SignView()
                 .tabItem { Label("Sign", systemImage: "signature") }
                 .tag(Tab.sign)
+
+            SourcesView()
+                .tabItem { Label("Sources", systemImage: "square.grid.2x2") }
+                .tag(Tab.sources)
 
             CertificatesView()
                 .tabItem { Label("Certificates", systemImage: "checkmark.seal") }
