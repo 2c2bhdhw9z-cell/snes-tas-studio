@@ -6,7 +6,7 @@ struct InstallView: View {
     @EnvironmentObject var store: Store
     @Environment(\.dismiss) var dismiss
     @StateObject private var server = InstallServer()
-    @AppStorage("installHelperURL") private var helperURL = ""
+    @AppStorage("installHelperURL") private var helperURL = InstallServer.defaultHelper
     @AppStorage("installLocalHTTPS") private var useLocalHTTPS = false
 
     let app: LibraryApp
@@ -94,12 +94,13 @@ struct InstallView: View {
                 + "Nothing is uploaded anywhere."
         }
         if helperURL.isEmpty {
-            return "iOS will only install an app when the small details file is served over a secure "
-                + "address. Add a helper address in Settings, or turn on local secure serving there. "
-                + "The app itself never leaves your phone either way."
+            return "No install method is set yet. Open Settings → Installing and either put back the "
+                + "helper address or turn on doing everything on this phone."
         }
-        return "The app is served from your phone. Only a tiny details file goes through your helper "
-            + "address, because iOS insists that one file comes over a secure link."
+        return "The app is served from your phone and installed straight from here. Only a tiny "
+            + "details file (the app's name, ID and where to fetch it) goes through the helper "
+            + "address, because iOS insists that one file arrives over a secure link. The app "
+            + "itself never leaves your phone."
     }
 
     var hint: String {
@@ -113,7 +114,7 @@ struct InstallView: View {
         if useLocalHTTPS, let p12 = localWebCertificate() {
             route = .localHTTPS(p12: p12.data, password: p12.password, host: p12.host)
         } else if let url = URL(string: helperURL), !helperURL.isEmpty {
-            route = .remoteManifest(url)
+            route = .helper(url)
         } else {
             server.stage = .failed("No install method is set up yet. Open Settings → Installing.")
             return

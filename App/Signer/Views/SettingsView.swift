@@ -6,7 +6,7 @@ import SignKit
 struct SettingsView: View {
     @EnvironmentObject var store: Store
     @StateObject private var udid = UDIDReader()
-    @AppStorage("installHelperURL") private var helperURL = ""
+    @AppStorage("installHelperURL") private var helperURL = InstallServer.defaultHelper
     @AppStorage("installLocalHTTPS") private var useLocalHTTPS = false
     @AppStorage("compressOutput") private var compressOutput = true
     @State private var showWebCertPicker = false
@@ -36,9 +36,11 @@ struct SettingsView: View {
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                         }
-                        Text("Only the small details file goes through this address. The app itself is "
-                             + "always served from your phone.")
+                        Text("Only the small details file goes through this address — the app's name, "
+                             + "its ID and a link back to this phone. The app itself is always served "
+                             + "from your phone. iOS insists that one file arrives over a secure link.")
                             .font(.caption).foregroundStyle(.secondary)
+                        Button("Put the usual address back") { helperURL = InstallServer.defaultHelper }
                     }
                 }
 

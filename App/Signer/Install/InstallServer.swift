@@ -9,6 +9,9 @@ import SignKit
 /// goes over the internet: the app never leaves the device.
 @MainActor
 final class InstallServer: ObservableObject {
+    /// The helper that serves the tiny details file over HTTPS. It only ever sees the
+    /// app's name, its ID and a link back to this phone.
+    static let defaultHelper = "https://api.palera.in/genPlist"
     enum Stage: Equatable {
         case idle
         case serving
@@ -34,9 +37,9 @@ final class InstallServer: ObservableObject {
         /// Everything local: the phone serves the manifest too. Needs a `.p12` web
         /// certificate for a name that points back at this phone (127.0.0.1).
         case localHTTPS(p12: Data, password: String, host: String)
-        /// The app is served locally; only the tiny manifest goes through a helper
-        /// site over HTTPS, because iOS insists on HTTPS for that one file.
-        case remoteManifest(URL)
+        /// The app is served from the phone; only the tiny details file comes from a
+        /// helper address over HTTPS, because iOS insists on HTTPS for that one file.
+        case helper(URL)
     }
 
     func start(ipa: URL, bundleID: String, version: String, title: String,
@@ -64,9 +67,10 @@ final class InstallServer: ObservableObject {
             switch route {
             case .localHTTPS:
                 manifestURL = "\(base)/manifest.plist"
-            case .remoteManifest(let helper):
-                // The helper only ever sees a link back to this phone, never the app.
-                manifestURL = try await upload(manifest: manifest!, to: helper)
+            case .helper(let helper):
+                // The helper is handed a link back to this phone; the app never leaves it.
+                manifestURL = try await helperManifestURL(helper, ipaURL: "\(base)/app.ipa",
+                                                          bundleID: bundleID, version: version, title: title)
             }
             let link = "itms-services://?action=download-manifest&url="
                 + manifestURL.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
@@ -96,7 +100,7 @@ final class InstallServer: ObservableObject {
         switch route {
         case .localHTTPS(let p12, let password, _):
             params = try InstallServer.tlsParameters(p12: p12, password: password)
-        case .remoteManifest:
+        case .helper:
             params = .tcp
         }
         params.allowLocalEndpointReuse = true
@@ -205,18 +209,30 @@ final class InstallServer: ObservableObject {
         #endif
     }
 
-    private func upload(manifest: Data, to helper: URL) async throws -> String {
-        var request = URLRequest(url: helper)
-        request.httpMethod = "POST"
-        request.setValue("application/xml", forHTTPHeaderField: "Content-Type")
-        request.httpBody = manifest
-        let (data, response) = try await URLSession.shared.upload(for: request, from: manifest)
-        guard let http = response as? HTTPURLResponse, http.statusCode / 100 == 2,
-              let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              text.hasPrefix("https://") else {
-            throw SignKitError.io("the helper site would not take the app details")
+    /// Builds the helper link that serves the details file, and checks it answers.
+    private func helperManifestURL(_ helper: URL, ipaURL: String, bundleID: String,
+                                   version: String, title: String) async throws -> String {
+        var components = URLComponents(url: helper, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "bundleid", value: bundleID),
+            URLQueryItem(name: "name", value: title),
+            URLQueryItem(name: "version", value: version.isEmpty ? "1.0" : version),
+            URLQueryItem(name: "fetchurl", value: ipaURL),
+        ]
+        guard let url = components?.url else {
+            throw SignKitError.io("that helper address does not look right")
         }
-        return text
+        // Make sure it answers before we hand the link to iOS, so a dead helper
+        // shows a clear message instead of a spinner that never finishes.
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              data.count > 100, String(data: data.prefix(200), encoding: .utf8)?.contains("plist") == true else {
+            throw SignKitError.io("the helper address did not answer properly, so iOS has nothing to read")
+        }
+        note("The helper is ready")
+        return url.absoluteString
     }
 
     @MainActor
