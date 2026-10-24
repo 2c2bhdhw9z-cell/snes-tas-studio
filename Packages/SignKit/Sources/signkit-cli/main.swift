@@ -67,6 +67,45 @@ case "sign":
         print("signed \(s.archName): signature \(s.existingSignature?.count ?? 0) bytes, "
               + "cdhash \(signer.cdhash(for: s)?.hex.prefix(40) ?? "-")")
     }
+case "sign-ipa":
+    // sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]
+    guard args.count >= 5 else {
+        print("usage: signkit-cli sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]")
+        exit(2)
+    }
+    var profileURL: URL?
+    if args.count > 5, !args[5].hasPrefix("--") { profileURL = URL(fileURLWithPath: args[5]) }
+    var options = SigningOptions()
+    var i = 5
+    while i < args.count {
+        switch args[i] {
+        case "--name": options.displayName = args[i + 1]; i += 1
+        case "--id": options.bundleID = args[i + 1]; i += 1
+        case "--no-compress": options.compressOutput = false
+        case "--inject": options.injectLibraries.append(URL(fileURLWithPath: args[i + 1])); i += 1
+        default: break
+        }
+        i += 1
+    }
+    let identity = try IPASigner.Identity.load(p12: URL(fileURLWithPath: args[3]),
+                                               password: args[4], profile: profileURL)
+    let job = IPASigner()
+    var lastMessage = ""
+    job.onProgress = { f, m in
+        if m != lastMessage, !m.isEmpty {
+            lastMessage = m
+            print(String(format: "  %3.0f%% %@", f * 100, m))
+        }
+    }
+    let result = try job.sign(ipa: URL(fileURLWithPath: args[1]), to: URL(fileURLWithPath: args[2]),
+                              identity: identity, options: options)
+    print("""
+    signed \(result.displayName) (\(result.bundleID)) version \(result.version)
+      out: \(result.outputURL.path)
+      size: \(result.bytes) bytes in \(String(format: "%.1f", result.duration))s
+      cdhash: \(result.cdhash.hex)
+    """)
+    for w in result.warnings { print("  warning: \(w)") }
 default:
     usage()
 }
