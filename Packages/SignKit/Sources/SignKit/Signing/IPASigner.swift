@@ -39,7 +39,7 @@ public final class IPASigner {
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: work) }
 
-        let inputSize = (try? fm.attributesOfItem(atPath: ipa.path)[.size] as? Int) ?? 0
+        let inputSize = fileSize(of: ipa)
         let freeSpace = (try? fm.attributesOfFileSystem(forPath: work.path)[.systemFreeSize] as? Int) ?? 0
 
         // 1. Open the zip and calculate the real peak space. A compressed 2 GB app

@@ -47,6 +47,48 @@ final class ZipTests: XCTestCase {
         XCTAssertTrue(byName["Payload/link"]?.isSymlink == true)
     }
 
+    /// An .ipa handed over as a link (a shortcut to the real file) reads exactly like the file:
+    /// the reader measures the file the link points to, not the few bytes of the link itself.
+    func testReadsAnIPAThroughALink() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let real = dir.appendingPathComponent("real.ipa")
+        let program = Data((0..<70_000).map { UInt8($0 % 13) })
+        let w = try ZipWriter(url: real)
+        try w.add(name: "Payload/App.app/App", data: program, mode: 0o755)
+        try w.add(name: "Payload/App.app/Info.plist", data: Data("x".utf8))
+        try w.finish()
+        let link = dir.appendingPathComponent("link.ipa")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        XCTAssertEqual(fileSize(of: link), fileSize(of: real))
+        let r = try ZipReader(url: link)
+        XCTAssertEqual(r.entries.count, 2)
+        let app = try XCTUnwrap(r.entries.first { $0.name == "Payload/App.app/App" })
+        XCTAssertEqual(try r.data(for: app), program)
+    }
+
+    /// A file packed through a link is stored with the bytes it points to, and its stored size
+    /// matches them (before, the size came from the link and the archive came out broken).
+    func testPacksAFileThroughALink() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let real = dir.appendingPathComponent("data.bin")
+        let bytes = Data((0..<100_000).map { UInt8($0 % 241) })
+        try bytes.write(to: real)
+        let link = dir.appendingPathComponent("data-link.bin")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+
+        let zipURL = dir.appendingPathComponent("out.zip")
+        let w = try ZipWriter(url: zipURL)
+        try w.addFile(name: "data.bin", url: link, mode: 0o644, compress: true)
+        try w.finish()
+        let r = try ZipReader(url: zipURL)
+        let e = try XCTUnwrap(r.entries.first)
+        XCTAssertEqual(e.uncompressedSize, bytes.count)
+        XCTAssertEqual(try r.data(for: e), bytes)
+    }
+
     func testExtractAndRepackKeepsPermissions() throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

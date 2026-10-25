@@ -29,7 +29,7 @@ public final class ZipReader {
             throw SignKitError.io("cannot open \(url.lastPathComponent)")
         }
         handle = h
-        size = Int((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int ?? 0) ?? 0)
+        size = fileSize(of: url)
         try readCentralDirectory()
     }
 
@@ -346,7 +346,8 @@ public final class ZipWriter {
             throw SignKitError.io("cannot read \(url.lastPathComponent)")
         }
         defer { try? handle.close() }
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        // The bytes the handle reads: a link is measured by what it points to.
+        let fileSize = SignKit.fileSize(of: url)
         let nameBytes = Data(name.utf8)
         let localOffset = offset
 

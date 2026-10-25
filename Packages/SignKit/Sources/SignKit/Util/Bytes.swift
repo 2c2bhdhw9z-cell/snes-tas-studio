@@ -1,5 +1,12 @@
 import Foundation
 
+/// The size of the file at `url`, in bytes, 0 if it cannot be read. A link (shortcut) to a
+/// file is followed: `attributesOfItem` alone describes the link itself, a few bytes long,
+/// so a linked `.ipa` used to read as "not a zip file".
+public func fileSize(of url: URL) -> Int {
+    (try? FileManager.default.attributesOfItem(atPath: url.resolvingSymlinksInPath().path)[.size] as? Int) ?? 0
+}
+
 public enum SignKitError: Error, CustomStringConvertible {
     case malformed(String)
     case unsupported(String)

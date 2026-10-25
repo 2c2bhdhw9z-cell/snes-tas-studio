@@ -13,108 +13,118 @@ func usage() -> Never {
 
 guard let cmd = args.first else { usage() }
 
-switch cmd {
-case "macho":
-    guard args.count == 2 else { usage() }
-    let url = URL(fileURLWithPath: args[1])
-    let data = try Data(contentsOf: url)
-    let file = try MachOFile(data: data)
-    print("fat: \(file.isFat)")
-    for s in file.slices {
-        print("arch \(s.archName): type=\(s.fileType) cmds=\(s.ncmds) minOS=\(s.minOS ?? "-") "
-              + "encrypted=\(s.isEncrypted) headerFree=\(s.headerPadding) signature=\(s.existingSignature?.count ?? 0)")
-        for d in s.dylibs { print("   links \(d)") }
-    }
-case "zip":
-    guard args.count == 2 else { usage() }
-    let r = try ZipReader(url: URL(fileURLWithPath: args[1]))
-    print("entries: \(r.entries.count)")
-    var checked = 0, bytes = 0
-    for e in r.entries where !e.isDirectory && !e.isSymlink {
-        let d = try r.data(for: e)
-        guard Zip.crc32(d) == e.crc32 else {
-            print("CHECKSUM MISMATCH: \(e.name)")
+/// Runs the command. A failure prints its reason and exits with 1, instead of a crash report.
+func run() throws {
+    switch cmd {
+    case "macho":
+        guard args.count == 2 else { usage() }
+        let url = URL(fileURLWithPath: args[1])
+        let data = try Data(contentsOf: url)
+        let file = try MachOFile(data: data)
+        print("fat: \(file.isFat)")
+        for s in file.slices {
+            print("arch \(s.archName): type=\(s.fileType) cmds=\(s.ncmds) minOS=\(s.minOS ?? "-") "
+                  + "encrypted=\(s.isEncrypted) headerFree=\(s.headerPadding) signature=\(s.existingSignature?.count ?? 0)")
+            for d in s.dylibs { print("   links \(d)") }
+        }
+    case "zip":
+        guard args.count == 2 else { usage() }
+        let r = try ZipReader(url: URL(fileURLWithPath: args[1]))
+        print("entries: \(r.entries.count)")
+        var checked = 0, bytes = 0
+        for e in r.entries where !e.isDirectory && !e.isSymlink {
+            let d = try r.data(for: e)
+            guard Zip.crc32(d) == e.crc32 else {
+                print("CHECKSUM MISMATCH: \(e.name)")
+                exit(1)
+            }
+            checked += 1
+            bytes += d.count
+        }
+        print("checksums verified: \(checked) files, \(bytes) bytes")
+    case "sign":
+        // sign <macho> <p12> <password> <identifier> <out> [entitlements.plist]
+        guard args.count >= 6 else {
+            print("usage: signkit-cli sign <macho> <p12> <password> <identifier> <out> [entitlements.plist]")
+            exit(2)
+        }
+        let p12 = try PKCS12(url: URL(fileURLWithPath: args[2]), password: args[3])
+        guard let key = p12.privateKey, let leaf = p12.identity else {
+            print("the .p12 has no usable certificate")
             exit(1)
         }
-        checked += 1
-        bytes += d.count
-    }
-    print("checksums verified: \(checked) files, \(bytes) bytes")
-case "sign":
-    // sign <macho> <p12> <password> <identifier> <out> [entitlements.plist]
-    guard args.count >= 6 else {
-        print("usage: signkit-cli sign <macho> <p12> <password> <identifier> <out> [entitlements.plist]")
-        exit(2)
-    }
-    let p12 = try PKCS12(url: URL(fileURLWithPath: args[2]), password: args[3])
-    guard let key = p12.privateKey, let leaf = p12.identity else {
-        print("the .p12 has no usable certificate")
-        exit(1)
-    }
-    var ents: [String: Any]?
-    if args.count > 6 {
-        let d = try Data(contentsOf: URL(fileURLWithPath: args[6]))
-        ents = try PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any]
-    }
-    let signer = MachOSigner(key: key, chain: [leaf] + p12.certificates.filter { $0.der != leaf.der })
-    var opts = MachOSigner.Options(identifier: args[4], teamID: leaf.teamID, entitlements: ents)
-    opts.hashKind = .sha256
-    let input = try Data(contentsOf: URL(fileURLWithPath: args[1]))
-    let signed = try signer.sign(data: input, options: opts)
-    try signed.write(to: URL(fileURLWithPath: args[5]))
-    let file = try MachOFile(data: signed)
-    for s in file.slices {
-        print("signed \(s.archName): signature \(s.existingSignature?.count ?? 0) bytes, "
-              + "cdhash \(signer.cdhash(for: s)?.hex.prefix(40) ?? "-")")
-    }
-case "sign-ipa":
-    // sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]
-    guard args.count >= 5 else {
-        print("usage: signkit-cli sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]")
-        exit(2)
-    }
-    var profileURL: URL?
-    if args.count > 5, !args[5].hasPrefix("--") { profileURL = URL(fileURLWithPath: args[5]) }
-    var options = SigningOptions()
-    var i = 5
-    while i < args.count {
-        switch args[i] {
-        case "--name": options.displayName = args[i + 1]; i += 1
-        case "--id": options.bundleID = args[i + 1]; i += 1
-        case "--no-compress": options.compressOutput = false
-        case "--inject": options.injectLibraries.append(URL(fileURLWithPath: args[i + 1])); i += 1
-        default: break
+        var ents: [String: Any]?
+        if args.count > 6 {
+            let d = try Data(contentsOf: URL(fileURLWithPath: args[6]))
+            ents = try PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any]
         }
-        i += 1
-    }
-    let identity = try IPASigner.Identity.load(p12: URL(fileURLWithPath: args[3]),
-                                               password: args[4], profile: profileURL)
-    let job = IPASigner()
-    var lastMessage = ""
-    job.onProgress = { f, m in
-        if m != lastMessage, !m.isEmpty {
-            lastMessage = m
-            print(String(format: "  %3.0f%% %@", f * 100, m))
+        let signer = MachOSigner(key: key, chain: [leaf] + p12.certificates.filter { $0.der != leaf.der })
+        var opts = MachOSigner.Options(identifier: args[4], teamID: leaf.teamID, entitlements: ents)
+        opts.hashKind = .sha256
+        let input = try Data(contentsOf: URL(fileURLWithPath: args[1]))
+        let signed = try signer.sign(data: input, options: opts)
+        try signed.write(to: URL(fileURLWithPath: args[5]))
+        let file = try MachOFile(data: signed)
+        for s in file.slices {
+            print("signed \(s.archName): signature \(s.existingSignature?.count ?? 0) bytes, "
+                  + "cdhash \(signer.cdhash(for: s)?.hex.prefix(40) ?? "-")")
         }
+    case "sign-ipa":
+        // sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]
+        guard args.count >= 5 else {
+            print("usage: signkit-cli sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]")
+            exit(2)
+        }
+        var profileURL: URL?
+        if args.count > 5, !args[5].hasPrefix("--") { profileURL = URL(fileURLWithPath: args[5]) }
+        var options = SigningOptions()
+        var i = 5
+        while i < args.count {
+            switch args[i] {
+            case "--name": options.displayName = args[i + 1]; i += 1
+            case "--id": options.bundleID = args[i + 1]; i += 1
+            case "--no-compress": options.compressOutput = false
+            case "--inject": options.injectLibraries.append(URL(fileURLWithPath: args[i + 1])); i += 1
+            default: break
+            }
+            i += 1
+        }
+        let identity = try IPASigner.Identity.load(p12: URL(fileURLWithPath: args[3]),
+                                                   password: args[4], profile: profileURL)
+        let job = IPASigner()
+        var lastMessage = ""
+        job.onProgress = { f, m in
+            if m != lastMessage, !m.isEmpty {
+                lastMessage = m
+                print(String(format: "  %3.0f%% %@", f * 100, m))
+            }
+        }
+        let result = try job.sign(ipa: URL(fileURLWithPath: args[1]), to: URL(fileURLWithPath: args[2]),
+                                  identity: identity, options: options)
+        print("""
+        signed \(result.displayName) (\(result.bundleID)) version \(result.version)
+          out: \(result.outputURL.path)
+          size: \(result.bytes) bytes in \(String(format: "%.1f", result.duration))s
+          cdhash: \(result.cdhash.hex)
+        """)
+        for w in result.warnings { print("  warning: \(w)") }
+    case "check":
+        // check <App.app> [profile.mobileprovision]   — look the app over the way the installer does
+        guard args.count >= 2 else { print("usage: signkit-cli check <App.app> [profile]"); exit(2) }
+        let profile = args.count > 2 ? try ProvisioningProfile(url: URL(fileURLWithPath: args[2])) : nil
+        let report = SignatureInspector.check(app: URL(fileURLWithPath: args[1]), profile: profile)
+        print("checked \(report.binariesChecked) program files and \(report.filesChecked) listed resources")
+        if report.isClean { print("CLEAN: nothing the installer would refuse") }
+        for p in report.problems { print("PROBLEM [\(p.kind.rawValue)] \(p)") }
+        exit(report.isClean ? 0 : 1)
+    default:
+        usage()
     }
-    let result = try job.sign(ipa: URL(fileURLWithPath: args[1]), to: URL(fileURLWithPath: args[2]),
-                              identity: identity, options: options)
-    print("""
-    signed \(result.displayName) (\(result.bundleID)) version \(result.version)
-      out: \(result.outputURL.path)
-      size: \(result.bytes) bytes in \(String(format: "%.1f", result.duration))s
-      cdhash: \(result.cdhash.hex)
-    """)
-    for w in result.warnings { print("  warning: \(w)") }
-case "check":
-    // check <App.app> [profile.mobileprovision]   — look the app over the way the installer does
-    guard args.count >= 2 else { print("usage: signkit-cli check <App.app> [profile]"); exit(2) }
-    let profile = args.count > 2 ? try ProvisioningProfile(url: URL(fileURLWithPath: args[2])) : nil
-    let report = SignatureInspector.check(app: URL(fileURLWithPath: args[1]), profile: profile)
-    print("checked \(report.binariesChecked) program files and \(report.filesChecked) listed resources")
-    if report.isClean { print("CLEAN: nothing the installer would refuse") }
-    for p in report.problems { print("PROBLEM [\(p.kind.rawValue)] \(p)") }
-    exit(report.isClean ? 0 : 1)
-default:
-    usage()
+}
+
+do {
+    try run()
+} catch {
+    FileHandle.standardError.write(Data("error: \(error)\n".utf8))
+    exit(1)
 }
