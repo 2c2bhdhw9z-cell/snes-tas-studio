@@ -7,14 +7,16 @@ final class Store: ObservableObject {
     static let shared = Store()
 
     @Published var certificates: [StoredCertificate] = []
+    @Published var profiles: [StoredProfile] = []
     @Published var library: [LibraryApp] = []
     @Published var sources: [Source] = []
     @Published var selectedCertificateID: UUID?
 
     var root: URL { Paths.root }
     var certificatesDir: URL { Paths.certificates }
+    var profilesDir: URL { Paths.profiles }
     var appsDir: URL { Paths.apps }
-    var importsDir: URL { Paths.imports }
+    var filesDir: URL { Paths.files }
     var tweaksDir: URL { Paths.tweaks }
 
     private init() {
@@ -28,6 +30,7 @@ final class Store: ObservableObject {
 
     struct State: Codable {
         var certificates: [StoredCertificate] = []
+        var profiles: [StoredProfile] = []
         var library: [LibraryApp] = []
         var sources: [Source] = []
         var selectedCertificateID: UUID?
@@ -37,13 +40,14 @@ final class Store: ObservableObject {
         guard let data = try? Data(contentsOf: stateURL),
               let state = try? JSONDecoder().decode(State.self, from: data) else { return }
         certificates = state.certificates
+        profiles = state.profiles
         library = state.library.filter { FileManager.default.fileExists(atPath: $0.fileURL.path) }
         sources = state.sources
         selectedCertificateID = state.selectedCertificateID ?? state.certificates.first?.id
     }
 
     func save() {
-        let state = State(certificates: certificates, library: library,
+        let state = State(certificates: certificates, profiles: profiles, library: library,
                           sources: sources, selectedCertificateID: selectedCertificateID)
         try? JSONEncoder().encode(state).write(to: stateURL)
     }
@@ -52,44 +56,81 @@ final class Store: ObservableObject {
         certificates.first { $0.id == selectedCertificateID } ?? certificates.first
     }
 
-    // MARK: - certificates
+    func profile(for cert: StoredCertificate) -> StoredProfile? {
+        if let id = cert.profileID, let found = profiles.first(where: { $0.id == id }) { return found }
+        return profiles.first { $0.certificateFingerprints.contains(cert.sha256) }
+    }
 
-    /// Imports a `.p12` (with its password) and an optional `.mobileprovision`.
-    func importCertificate(p12: URL, password: String, profile: URL?, nickname: String?) throws -> StoredCertificate {
-        let store = try PKCS12(url: p12, password: password)
-        guard let cert = store.identity, store.privateKey != nil else {
+    // MARK: - importing, one file at a time (the quick way)
+
+    /// Imports a `.p12`. Nothing else needed — just the password.
+    @discardableResult
+    func importCertificate(p12 url: URL, password: String) throws -> StoredCertificate {
+        let data = try Data(contentsOf: url)
+        let store = try PKCS12(data: data, password: password)
+        guard let cert = store.identity, store.privateKey != nil, store.isUsableForSigning else {
             throw SignKitError.crypto("that file has no certificate we can sign with")
         }
-        guard store.isUsableForSigning else {
-            throw SignKitError.crypto("the certificate and its key do not match")
-        }
-        let prof = try profile.map { try ProvisioningProfile(url: $0) }
-        if let prof, !prof.matches(certificate: cert) {
-            throw SignKitError.crypto("that profile was not made for this certificate")
+        // Already have it? Just update the password and keep going.
+        if let existing = certificates.firstIndex(where: { $0.sha256 == cert.sha256Fingerprint }) {
+            certificates[existing].password = password
+            save()
+            return certificates[existing]
         }
 
         let id = UUID()
         let dir = certificatesDir.appendingPathComponent(id.uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: p12, to: dir.appendingPathComponent("cert.p12"))
-        if let profile { try FileManager.default.copyItem(at: profile, to: dir.appendingPathComponent("profile.mobileprovision")) }
+        try data.write(to: dir.appendingPathComponent("cert.p12"))
 
-        let stored = StoredCertificate(
+        var stored = StoredCertificate(
             id: id,
-            nickname: nickname?.isEmpty == false ? nickname! : (cert.commonName.isEmpty ? "Certificate" : cert.commonName),
-            commonName: cert.commonName,
-            teamID: cert.teamID ?? prof?.teamID,
+            commonName: cert.commonName.isEmpty ? url.deletingPathExtension().lastPathComponent : cert.commonName,
+            teamID: cert.teamID,
             appleID: cert.appleID,
             expires: cert.notAfter,
-            profileExpires: prof?.expiry,
-            profileName: prof?.name,
-            deviceCount: prof?.isEnterprise == true ? nil : prof?.devices.count,
-            bundleIDPattern: prof?.bundleIDPattern,
             password: password,
             sha256: cert.sha256Fingerprint
         )
+        // Pair it with a profile already imported, if one matches.
+        if let match = profiles.first(where: { $0.certificateFingerprints.contains(stored.sha256) }) {
+            stored.profileID = match.id
+        }
         certificates.append(stored)
         if selectedCertificateID == nil { selectedCertificateID = stored.id }
+        save()
+        return stored
+    }
+
+    /// Imports a `.mobileprovision` on its own and pairs it with whatever certificate it belongs to.
+    @discardableResult
+    func importProfile(_ url: URL) throws -> StoredProfile {
+        let data = try Data(contentsOf: url)
+        let profile = try ProvisioningProfile(data: data)
+        let fingerprints = profile.certificates.map(\.sha256Fingerprint)
+
+        if let existing = profiles.firstIndex(where: { $0.name == profile.name
+            && $0.expires == profile.expiry && $0.teamID == profile.teamID }) {
+            return profiles[existing]
+        }
+
+        let id = UUID()
+        try data.write(to: profilesDir.appendingPathComponent("\(id.uuidString).mobileprovision"))
+        let stored = StoredProfile(
+            id: id,
+            name: profile.name ?? url.deletingPathExtension().lastPathComponent,
+            teamID: profile.teamID,
+            teamName: profile.teamName,
+            bundleIDPattern: profile.bundleIDPattern,
+            expires: profile.expiry,
+            deviceCount: profile.isEnterprise ? nil : profile.devices.count,
+            certificateFingerprints: fingerprints
+        )
+        profiles.append(stored)
+        // Pair with any certificate it was made for.
+        for index in certificates.indices where fingerprints.contains(certificates[index].sha256) {
+            certificates[index].profileID = stored.id
+        }
         save()
         return stored
     }
@@ -101,14 +142,31 @@ final class Store: ObservableObject {
         save()
     }
 
-    /// Loads the signing identity for a stored certificate.
+    func deleteProfile(_ profile: StoredProfile) {
+        try? FileManager.default.removeItem(
+            at: profilesDir.appendingPathComponent("\(profile.id.uuidString).mobileprovision"))
+        profiles.removeAll { $0.id == profile.id }
+        for index in certificates.indices where certificates[index].profileID == profile.id {
+            certificates[index].profileID = nil
+        }
+        save()
+    }
+
+    func p12URL(for cert: StoredCertificate) -> URL {
+        certificatesDir.appendingPathComponent(cert.id.uuidString).appendingPathComponent("cert.p12")
+    }
+
+    func profileURL(for profile: StoredProfile) -> URL {
+        profilesDir.appendingPathComponent("\(profile.id.uuidString).mobileprovision")
+    }
+
+    /// Loads the signing identity: the certificate plus its paired profile.
     func identity(for cert: StoredCertificate) throws -> IPASigner.Identity {
-        let dir = certificatesDir.appendingPathComponent(cert.id.uuidString)
-        let profileURL = dir.appendingPathComponent("profile.mobileprovision")
+        let paired = profile(for: cert)
         return try IPASigner.Identity.load(
-            p12: dir.appendingPathComponent("cert.p12"),
+            p12: p12URL(for: cert),
             password: cert.password,
-            profile: FileManager.default.fileExists(atPath: profileURL.path) ? profileURL : nil
+            profile: paired.map { profileURL(for: $0) }
         )
     }
 
@@ -122,6 +180,7 @@ final class Store: ObservableObject {
 
     func deleteApp(_ app: LibraryApp) {
         try? FileManager.default.removeItem(at: app.fileURL)
+        if let icon = app.iconURL { try? FileManager.default.removeItem(at: icon) }
         library.removeAll { $0.id == app.id }
         save()
     }

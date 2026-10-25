@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import UniformTypeIdentifiers
 import SignKit
 
@@ -6,7 +7,7 @@ import SignKit
 struct SignView: View {
     @EnvironmentObject var store: Store
     @StateObject private var runner = SigningRunner()
-    @AppStorage("compressOutput") private var compressOutput = true
+    @AppStorage("compressOutput") private var compressOutput = false
 
     @State private var app: LibraryApp?
     @State private var info: IPAInfo?
@@ -53,6 +54,14 @@ struct SignView: View {
                 if case .success(let urls) = result { tweaks.append(contentsOf: urls) }
             }
             .onAppear { if let app, info == nil { select(app) } }
+            .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
+                if let id = note.object as? UUID,
+                   let found = store.library.first(where: { $0.id == id }) {
+                    select(found)
+                } else if let newest = store.library.first {
+                    select(newest)
+                }
+            }
         }
     }
 
@@ -109,8 +118,10 @@ struct SignView: View {
             LabeledContent("Version") {
                 TextField("1.0", text: $version).multilineTextAlignment(.trailing)
             }
-            if let pattern = store.selectedCertificate?.bundleIDPattern, !pattern.hasSuffix("*") {
-                Text("Your certificate only allows the ID \(pattern). Anything else will not install.")
+            if let pattern = pairedPattern, !pattern.hasSuffix("*") {
+                Button("Use the ID my certificate allows") { bundleID = pattern }
+                    .font(.caption)
+                Text("Your profile only allows the ID \(pattern). Anything else will not install.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -145,23 +156,26 @@ struct SignView: View {
     var certificateSection: some View {
         Section("Certificate") {
             if store.certificates.isEmpty {
-                Text("No certificate yet. Add one on the Certificates tab, or sign without one to test (the app will not install).")
+                Text("No certificate yet. Open the File tab, tap your .p12 and choose Import, then tap "
+                     + "your .mobileprovision and choose Import.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Picker("Sign with", selection: Binding(
                     get: { store.selectedCertificateID },
                     set: { store.selectedCertificateID = $0; store.save() })) {
                     ForEach(store.certificates) { cert in
-                        VStack(alignment: .leading) {
-                            Text(cert.nickname)
-                            Text(cert.statusLine).font(.caption).foregroundStyle(.secondary)
-                        }.tag(Optional(cert.id))
+                        Text("\(cert.title) — \(cert.statusWord)").tag(Optional(cert.id))
                     }
                 }
                 if let cert = store.selectedCertificate, !cert.isUsable {
                     Label("This certificate is no good any more. Apps signed with it will not open.",
                           systemImage: "xmark.octagon")
                         .font(.caption).foregroundStyle(.red)
+                }
+                if let cert = store.selectedCertificate, store.profile(for: cert) == nil {
+                    Label("No profile paired with it yet — import the .mobileprovision too, or the app "
+                          + "will not install.", systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
                 }
             }
         }
@@ -198,6 +212,11 @@ struct SignView: View {
             .buttonStyle(.borderedProminent)
             .disabled(app == nil || runner.isRunning)
         }
+    }
+
+    var pairedPattern: String? {
+        guard let cert = store.selectedCertificate else { return nil }
+        return store.profile(for: cert)?.bundleIDPattern
     }
 
     // MARK: actions

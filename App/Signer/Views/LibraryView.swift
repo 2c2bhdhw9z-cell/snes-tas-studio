@@ -65,7 +65,7 @@ struct LibraryView: View {
                 .foregroundStyle(.secondary)
             Text("No apps yet")
                 .font(.headline)
-            Text("Tap + to pick an app file (an \".ipa\") from your phone, or add a source on the Sign tab.")
+            Text("Tap + to pick an app file (an \".ipa\"), or use the File tab, or add a source.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

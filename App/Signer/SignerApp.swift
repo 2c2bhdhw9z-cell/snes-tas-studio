@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import SignKit
 
 @main
@@ -10,7 +11,7 @@ struct SignerApp: App {
             RootView()
                 .environmentObject(store)
                 .onOpenURL { url in
-                    Task { await Importer.handle(url) }
+                    Importer.handle(url)
                 }
         }
     }
@@ -18,50 +19,46 @@ struct SignerApp: App {
 
 struct RootView: View {
     @EnvironmentObject var store: Store
-    @State private var tab = Tab.library
+    @State private var tab = Tab.files
 
-    enum Tab: Hashable { case library, sign, sources, certificates, settings }
+    enum Tab: Hashable { case files, apps, sign, sources, settings }
 
     var body: some View {
         TabView(selection: $tab) {
+            FilesView()
+                .tabItem { Label("File", systemImage: "folder") }
+                .tag(Tab.files)
+
             LibraryView()
-                .tabItem { Label("My apps", systemImage: "square.stack.3d.up") }
-                .tag(Tab.library)
+                .tabItem { Label("My apps", systemImage: "square.grid.2x2") }
+                .tag(Tab.apps)
 
             SignView()
                 .tabItem { Label("Sign", systemImage: "signature") }
                 .tag(Tab.sign)
 
             SourcesView()
-                .tabItem { Label("Sources", systemImage: "square.grid.2x2") }
+                .tabItem { Label("Sources", systemImage: "antenna.radiowaves.left.and.right") }
                 .tag(Tab.sources)
-
-            CertificatesView()
-                .tabItem { Label("Certificates", systemImage: "checkmark.seal") }
-                .tag(Tab.certificates)
 
             SettingsView()
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }
+        // Tapping "Sign this app" on a file jumps straight to the Sign tab.
+        .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { _ in
+            tab = .sign
+        }
     }
 }
 
-/// Handles files opened from elsewhere (Files app, Safari downloads, share sheet).
+/// Handles files opened from elsewhere: Safari downloads, the share sheet, another app.
+/// Everything lands in Signer's own folder so it shows up on the File tab.
 enum Importer {
-    @MainActor
-    static func handle(_ url: URL) async {
-        let ext = url.pathExtension.lowercased()
-        switch ext {
-        case "ipa":
-            _ = try? SigningRunner.importIPA(url)
-        case "p12", "pfx", "mobileprovision":
-            // Stash it; the Certificates screen picks it up and asks for the password.
-            let dest = Store.shared.importsDir.appendingPathComponent(url.lastPathComponent)
-            try? FileManager.default.removeItem(at: dest)
-            try? FileManager.default.copyItem(at: url, to: dest)
-        default:
-            break
-        }
+    static func handle(_ url: URL) {
+        guard url.isFileURL else { return }
+        let dest = Paths.files.appendingPathComponent(url.lastPathComponent)
+        try? FileManager.default.removeItem(at: dest)
+        try? FileManager.default.copyItem(at: url, to: dest)
     }
 }

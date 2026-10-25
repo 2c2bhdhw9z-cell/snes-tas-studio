@@ -1,58 +1,78 @@
 import SwiftUI
-import UniformTypeIdentifiers
 import SignKit
 
-/// Certificates: add one, see how long it has left, check whether Apple killed it.
+/// Certificate Management: the same plain list ESign shows — who the certificate is,
+/// when it ends, and one word for whether it still works.
 struct CertificatesView: View {
     @EnvironmentObject var store: Store
-    @State private var showAdd = false
     @State private var checking = false
-    @State private var errorMessage: String?
+    @State private var banner: String?
 
     var body: some View {
-        NavigationStack {
-            List {
-                if store.certificates.isEmpty {
-                    Section {
-                        Text("A certificate is the ID file that lets an app install on your phone. "
-                             + "You need a \".p12\" file and usually a \".mobileprovision\" file with it.")
+        List {
+            if store.certificates.isEmpty {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("No certificate yet").font(.headline)
+                        Text("Open the File tab, tap your .p12, choose Import Certificate Management "
+                             + "and type its password. Then tap your .mobileprovision and choose Import. "
+                             + "They pair up on their own.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
+                    .padding(.vertical, 4)
                 }
-                ForEach(store.certificates) { cert in
-                    NavigationLink {
-                        CertificateDetailView(certificate: cert)
-                    } label: {
-                        CertificateRow(cert: cert, isSelected: cert.id == store.selectedCertificateID)
-                    }
-                }
-                .onDelete { idx in idx.map { store.certificates[$0] }.forEach(store.deleteCertificate) }
+            }
 
-                if !store.certificates.isEmpty {
-                    Section {
-                        Button {
-                            Task { await checkAll() }
-                        } label: {
-                            if checking {
-                                Label("Checking with Apple…", systemImage: "arrow.triangle.2.circlepath")
-                            } else {
-                                Label("Check if Apple turned these off", systemImage: "shield.checkered")
-                            }
-                        }
-                        .disabled(checking)
-                    } footer: {
-                        Text("This asks Apple directly, so it catches a dead certificate even when the date still looks fine.")
-                    }
+            ForEach(store.certificates) { cert in
+                NavigationLink {
+                    CertificateDetailView(certificate: cert)
+                } label: {
+                    CertificateRow(cert: cert,
+                                   profile: store.profile(for: cert),
+                                   isSelected: cert.id == store.selectedCertificateID)
                 }
             }
-            .navigationTitle("Certificates")
-            .toolbar {
-                Button { showAdd = true } label: { Label("Add", systemImage: "plus") }
+            .onDelete { idx in idx.map { store.certificates[$0] }.forEach(store.deleteCertificate) }
+
+            if !store.profiles.isEmpty {
+                Section("Profiles") {
+                    ForEach(store.profiles) { profile in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(profile.name).font(.callout)
+                            Text(profile.summary).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .onDelete { idx in idx.map { store.profiles[$0] }.forEach(store.deleteProfile) }
+                }
             }
-            .sheet(isPresented: $showAdd) { AddCertificateView() }
-            .alert("That did not work", isPresented: .constant(errorMessage != nil)) {
-                Button("OK") { errorMessage = nil }
-            } message: { Text(errorMessage ?? "") }
+
+            if !store.certificates.isEmpty {
+                Section {
+                    Button {
+                        Task { await checkAll() }
+                    } label: {
+                        if checking {
+                            Label("Asking Apple…", systemImage: "arrow.triangle.2.circlepath")
+                        } else {
+                            Label("Check these with Apple", systemImage: "shield.checkered")
+                        }
+                    }
+                    .disabled(checking)
+                } footer: {
+                    Text("Asks Apple directly, so a certificate that has been switched off shows up "
+                         + "even while its dates still look fine.")
+                }
+            }
+        }
+        .navigationTitle("Certificate Management")
+        .overlay(alignment: .bottom) {
+            if let banner {
+                Text(banner)
+                    .font(.callout)
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 12)
+            }
         }
     }
 
@@ -63,7 +83,6 @@ struct CertificatesView: View {
             do {
                 let identity = try store.identity(for: cert)
                 guard let leaf = identity.chain.first else { continue }
-                // Apple's answer needs the certificate above this one; the profile carries it.
                 let issuer = identity.chain.count > 1 ? identity.chain[1] : leaf
                 let answer = await OCSP.check(certificate: leaf, issuer: issuer)
                 store.certificates[index].revocationState = {
@@ -76,7 +95,7 @@ struct CertificatesView: View {
                 }()
                 store.certificates[index].lastChecked = answer.checkedAt
             } catch {
-                errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
+                banner = (error as? SignKitError)?.description ?? error.localizedDescription
             }
         }
         store.save()
@@ -86,32 +105,36 @@ struct CertificatesView: View {
 
 struct CertificateRow: View {
     let cert: StoredCertificate
+    let profile: StoredProfile?
     let isSelected: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .foregroundStyle(colour)
-                .font(.title3)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(cert.nickname).font(.body.weight(.medium))
-                Text(cert.statusLine).font(.caption).foregroundStyle(colour)
-                if let team = cert.teamID {
-                    Text("Team \(team)").font(.caption2).foregroundStyle(.tertiary)
+        VStack(alignment: .leading, spacing: 3) {
+            Text(cert.title)
+                .font(.callout)
+                .lineLimit(2)
+            HStack {
+                Text("Expiration: \(cert.expiryText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(cert.statusWord)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(colour)
+            }
+            HStack(spacing: 6) {
+                if profile == nil {
+                    Text("no profile paired yet")
+                        .font(.caption2).foregroundStyle(.orange)
+                } else if let pattern = profile?.bundleIDPattern {
+                    Text(pattern).font(.caption2).foregroundStyle(.tertiary)
+                }
+                if isSelected {
+                    Text("· signing with this one").font(.caption2).foregroundStyle(.tint)
                 }
             }
-            Spacer()
-            if isSelected { Image(systemName: "checkmark").foregroundStyle(.tint) }
         }
-    }
-
-    var icon: String {
-        switch cert.revocationState {
-        case .revoked: return "xmark.seal"
-        case .expired: return "clock.badge.xmark"
-        case .good: return "checkmark.seal"
-        default: return "seal"
-        }
+        .padding(.vertical, 2)
     }
 
     var colour: Color {
@@ -125,129 +148,55 @@ struct CertificateRow: View {
 
 struct CertificateDetailView: View {
     @EnvironmentObject var store: Store
+    @Environment(\.dismiss) var dismiss
     let certificate: StoredCertificate
+
+    var profile: StoredProfile? { store.profile(for: certificate) }
 
     var body: some View {
         List {
-            Section("What this is") {
+            Section("Certificate") {
                 LabeledContent("Name", value: certificate.commonName)
                 if let team = certificate.teamID { LabeledContent("Team", value: team) }
                 if let apple = certificate.appleID { LabeledContent("Apple ID", value: apple) }
-                LabeledContent("Status", value: certificate.statusLine)
+                LabeledContent("Expiration", value: certificate.expiryText)
+                LabeledContent("Status", value: certificate.statusWord)
                 if let checked = certificate.lastChecked {
-                    LabeledContent("Last checked", value: checked.formatted(date: .abbreviated, time: .shortened))
+                    LabeledContent("Checked", value: checked.formatted(date: .abbreviated, time: .shortened))
                 }
             }
+
             Section("Profile") {
-                if let name = certificate.profileName {
-                    LabeledContent("Name", value: name)
+                if let profile {
+                    LabeledContent("Name", value: profile.name)
+                    if let pattern = profile.bundleIDPattern { LabeledContent("Apps allowed", value: pattern) }
+                    LabeledContent("Devices", value: profile.deviceCount.map(String.init) ?? "any")
+                    if let e = profile.expires {
+                        LabeledContent("Ends", value: e.formatted(date: .abbreviated, time: .omitted))
+                    }
                 } else {
-                    Text("No profile was added with this certificate. Most apps will not install without one.")
+                    Text("None paired. Import the matching .mobileprovision from the File tab and it "
+                         + "will attach itself to this certificate.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
-                if let pattern = certificate.bundleIDPattern {
-                    LabeledContent("Allows app IDs", value: pattern)
-                }
-                if let count = certificate.deviceCount {
-                    LabeledContent("Phones allowed", value: "\(count)")
-                } else if certificate.profileName != nil {
-                    LabeledContent("Phones allowed", value: "any")
-                }
-                if let expiry = certificate.profileExpires {
-                    LabeledContent("Profile ends", value: expiry.formatted(date: .abbreviated, time: .omitted))
-                }
             }
+
             Section {
-                Button("Use this one for signing") {
+                Button("Sign with this one") {
                     store.selectedCertificateID = certificate.id
                     store.save()
                 }
-                Button("Remove", role: .destructive) { store.deleteCertificate(certificate) }
+                Button("Remove", role: .destructive) {
+                    store.deleteCertificate(certificate)
+                    dismiss()
+                }
             }
+
             Section("Fingerprint") {
                 Text(certificate.sha256).font(.footnote.monospaced()).textSelection(.enabled)
             }
         }
-        .navigationTitle(certificate.nickname)
-    }
-}
-
-struct AddCertificateView: View {
-    @EnvironmentObject var store: Store
-    @Environment(\.dismiss) var dismiss
-
-    @State private var p12: URL?
-    @State private var profile: URL?
-    @State private var password = ""
-    @State private var nickname = ""
-    @State private var errorMessage: String?
-    @State private var picking: Picking?
-
-    enum Picking: Identifiable { case p12, profile; var id: Int { self == .p12 ? 0 : 1 } }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Files") {
-                    Button {
-                        picking = .p12
-                    } label: {
-                        LabeledContent("Certificate (.p12)", value: p12?.lastPathComponent ?? "choose")
-                    }
-                    Button {
-                        picking = .profile
-                    } label: {
-                        LabeledContent("Profile (.mobileprovision)", value: profile?.lastPathComponent ?? "choose")
-                    }
-                }
-                Section("Password") {
-                    SecureField("Certificate password", text: $password)
-                    Text("Leave this empty if the certificate has no password.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Section("Name it (optional)") {
-                    TextField("For example: work certificate", text: $nickname)
-                }
-                if let errorMessage {
-                    Section { Label(errorMessage, systemImage: "exclamationmark.triangle").foregroundStyle(.red) }
-                }
-            }
-            .navigationTitle("Add a certificate")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") { add() }.disabled(p12 == nil)
-                }
-            }
-            .fileImporter(isPresented: Binding(get: { picking != nil },
-                                               set: { if !$0 { picking = nil } }),
-                          allowedContentTypes: contentTypes) { result in
-                if case .success(let url) = result {
-                    if picking == .p12 { p12 = url } else { profile = url }
-                }
-                picking = nil
-            }
-        }
-    }
-
-    var contentTypes: [UTType] {
-        picking == .profile
-            ? [UTType(filenameExtension: "mobileprovision") ?? .data]
-            : [UTType(filenameExtension: "p12") ?? .data, UTType(filenameExtension: "pfx") ?? .data]
-    }
-
-    func add() {
-        guard let p12 else { return }
-        do {
-            _ = try store.importCertificate(p12: p12, password: password, profile: profile,
-                                            nickname: nickname.isEmpty ? nil : nickname)
-            dismiss()
-        } catch let e as SignKitError {
-            errorMessage = e.description
-        } catch let other {
-            errorMessage = other.localizedDescription
-        }
+        .navigationTitle("Certificate")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
