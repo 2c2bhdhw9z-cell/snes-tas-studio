@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import SignKit
 
 /// Certificate passwords belong in the iPhone Keychain, not in the app's JSON file.
 /// Keychain entries are device-only and are unavailable while the phone is locked.

@@ -51,7 +51,7 @@ final class InstallServer: ObservableObject {
         keepingAwake = true
         do {
             payloadURL = ipa
-            payloadSize = (try? FileManager.default.attributesOfItem(atPath: ipa.path)[.size] as? Int) ?? 0 ?? 0
+            payloadSize = (try? FileManager.default.attributesOfItem(atPath: ipa.path)[.size] as? Int) ?? 0
             icon = iconPNG
             let p = try startListener(route: route)
             port = p

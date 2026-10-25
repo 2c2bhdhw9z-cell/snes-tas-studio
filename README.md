@@ -18,6 +18,10 @@ how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is goin
   has been switched off is caught even while its end date still looks fine.
 - **Changes apps while signing**: name, app ID, version, icon, minimum iOS, file sharing,
   120 Hz, remove extras, remove the Watch app, add `.dylib`/`.deb` add-ons.
+- **Handles multi-gigabyte apps.** Imports, downloads, unpacking, resource hashing,
+  Mach-O signing, packing and installation all stream in small chunks. A 2 GB app is
+  never loaded into memory; ZIP64 covers archives that pass 4 GB; long jobs stay alive
+  when the screen locks; disk room is checked from the real unpacked sizes first.
 - **Installs from the phone itself.** The app is served by the phone; nothing is uploaded.
 - **Reads the phone's own ID** with no computer.
 
@@ -33,7 +37,7 @@ how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is goin
 ## Checking the engine
 
 ```sh
-swift test --package-path Packages/SignKit          # 45 tests, runs on Linux
+swift test --package-path Packages/SignKit          # 56 tests, runs on Linux
 Packages/SignKit/.build/debug/signkit-cli zip x.ipa # read any .ipa, verify every checksum
 signkit-cli sign-ipa in.ipa out.ipa cert.p12 pw     # sign end to end
 RCODESIGN=/path/to/rcodesign tools/verify-signature.sh out.ipa

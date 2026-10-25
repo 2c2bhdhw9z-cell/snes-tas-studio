@@ -137,6 +137,36 @@ final class HugeAppTests: XCTestCase {
         XCTAssertEqual(off + size, slice.data.count)
     }
 
+    /// Header-only changes do not read the rest of a huge program file.
+    func testHeaderOnlyEditThenOnDiskSign() throws {
+        let source = try sampleBinary()
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("edited.bin")
+        try FileManager.default.copyItem(at: source, to: target)
+        let beforeSize = (try FileManager.default.attributesOfItem(atPath: target.path)[.size] as? Int) ?? 0
+
+        try MachOFileSigner.editHeader(fileAt: target) { slice in
+            try slice.injectDylib("@executable_path/Frameworks/TestTweak.dylib")
+            slice.setMinOS(major: 16, minor: 0)
+        }
+        let afterEdit = try MachOFile(data: try Data(contentsOf: target)).slices[0]
+        XCTAssertTrue(afterEdit.dylibs.contains("@executable_path/Frameworks/TestTweak.dylib"))
+        XCTAssertEqual(afterEdit.minOS, "16.0")
+        XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: target.path)[.size] as? Int), beforeSize)
+
+        let (key, cert) = try identity()
+        let saved = MachOFileSigner.diskThreshold
+        MachOFileSigner.diskThreshold = 1
+        defer { MachOFileSigner.diskThreshold = saved }
+        let hash = try MachOFileSigner(key: key, chain: [cert]).sign(
+            fileAt: target, options: .init(identifier: "com.continuum.edited", teamID: cert.teamID))
+        XCTAssertEqual(hash.count, 32)
+        let signed = try MachOFile(data: try Data(contentsOf: target)).slices[0]
+        XCTAssertTrue(signed.dylibs.contains("@executable_path/Frameworks/TestTweak.dylib"))
+        XCTAssertNotNil(signed.existingSignature)
+    }
+
     /// Reading an app's details must not depend on unpacking its whole binary.
     func testHeadOnlyReadOfABigEntry() throws {
         let path = "/projects/sandbox/research/ipa/SideStore.ipa"

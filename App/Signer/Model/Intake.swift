@@ -63,7 +63,7 @@ enum Intake {
                 throw SignKitError.io("cannot save \(source.lastPathComponent) into the app")
             }
             defer { try? output.close() }
-            let total = ((try? fm.attributesOfItem(atPath: source.path)[.size] as? Int) ?? 0) ?? 0
+            let total = (try? fm.attributesOfItem(atPath: source.path)[.size] as? Int) ?? 0
             var copied = 0
             while true {
                 let chunk = input.readData(ofLength: 4 << 20)

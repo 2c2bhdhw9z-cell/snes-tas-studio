@@ -65,7 +65,7 @@ struct IPAInfo {
             build: info["CFBundleVersion"] as? String ?? "",
             minimumOS: info["MinimumOSVersion"] as? String,
             iconPNG: iconData,
-            bytes: size ?? 0,
+            bytes: size,
             architectures: archs,
             isEncrypted: encrypted,
             hasExtensions: reader.entries.contains { $0.name.contains("/PlugIns/") },

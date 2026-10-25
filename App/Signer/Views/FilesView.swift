@@ -331,7 +331,7 @@ struct FileViewer: View {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "Could not read this file." }
         let slice = handle.readData(ofLength: 64 * 1024)
         try? handle.close()
-        let total = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? slice.count) ?? slice.count
+        let total = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? slice.count
         if !hex, let text = String(data: slice, encoding: .utf8), !text.isEmpty {
             return text + (total > slice.count ? "\n\n… \(ByteCountFormatter.string(fromByteCount: Int64(total - slice.count), countStyle: .file)) more" : "")
         }
