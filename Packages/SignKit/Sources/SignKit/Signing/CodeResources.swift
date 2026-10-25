@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 
 /// Builds `_CodeSignature/CodeResources`: the list of hashes for everything in the
 /// app bundle that is not code. The rules below were read off real signed apps
@@ -60,29 +61,54 @@ public enum CodeResources {
         }
         paths.sort()
 
+        // Work out which files count, then hash them on every core at once.
+        // Files inside nested frameworks and extensions are listed one by one,
+        // their own signature file included. (Checked against Feather, GBox and ESign:
+        // iPhone apps never use "cdhash" entries here, only plain file hashes.)
+        var wanted = [String]()
+        var symlinks = [(String, String)]()
         for rel in paths {
             if rel == mainExecutable { continue }
             if rel.hasPrefix("_CodeSignature/") || alwaysSkipped.contains(rel) { continue }
             if rel.hasSuffix("/.DS_Store") || rel.hasSuffix(".DS_Store") { continue }
             if rel.hasSuffix("locversion.plist") { continue }
 
-            // Files inside nested frameworks and extensions are listed one by one,
-            // their own signature file included. (Checked against Feather, GBox and ESign:
-            // iPhone apps never use "cdhash" entries here, only plain file hashes.)
             let url = bundle.appendingPathComponent(rel)
             let vals = try url.resourceValues(forKeys: [.isSymbolicLinkKey])
-            let optional = rel.contains(".lproj/")
-
             if vals.isSymbolicLink == true {
-                let target = try fm.destinationOfSymbolicLink(atPath: url.path)
-                var entry: [String: Any] = ["symlink": target]
-                if optional { entry["optional"] = true }
-                files2[rel] = entry
-                continue
+                symlinks.append((rel, try fm.destinationOfSymbolicLink(atPath: url.path)))
+            } else {
+                wanted.append(rel)
             }
+        }
 
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            let h1 = sha1(data), h2 = sha256(data)
+        var hashes = [(Data, Data)](repeating: (Data(), Data()), count: wanted.count)
+        let root = bundle
+        if wanted.count > 4 {
+            hashes.withUnsafeMutableBufferPointer { out in
+                let buffer = out
+                DispatchQueue.concurrentPerform(iterations: wanted.count) { i in
+                    guard let data = try? Data(contentsOf: root.appendingPathComponent(wanted[i]),
+                                               options: .mappedIfSafe) else { return }
+                    buffer[i] = (sha1(data), sha256(data))
+                }
+            }
+        } else {
+            for (i, rel) in wanted.enumerated() {
+                let data = try Data(contentsOf: root.appendingPathComponent(rel), options: .mappedIfSafe)
+                hashes[i] = (sha1(data), sha256(data))
+            }
+        }
+
+        for (rel, target) in symlinks {
+            var entry: [String: Any] = ["symlink": target]
+            if rel.contains(".lproj/") { entry["optional"] = true }
+            files2[rel] = entry
+        }
+
+        for (i, rel) in wanted.enumerated() {
+            let (h1, h2) = hashes[i]
+            let optional = rel.contains(".lproj/")
 
             // `files` keeps the old SHA-1 list; Info.plist and PkgInfo appear here only.
             if optional {

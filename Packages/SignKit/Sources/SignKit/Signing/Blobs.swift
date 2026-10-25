@@ -1,4 +1,5 @@
 import Foundation
+import Dispatch
 
 /// Apple's code-signing blob types.
 public enum BlobMagic {
@@ -161,13 +162,38 @@ public struct CodeDirectory {
     public var truncatedCDHash: Data { cdhash.prefix(20) }
 
     /// Hashes every page of the file up to `codeLimit`.
+    /// The pages are independent, so they are hashed on all the phone's cores at once —
+    /// which is most of the time spent signing a big app.
     public mutating func hashCode(of data: Data) {
-        codeHashes.removeAll()
-        var o = 0
-        while o < codeLimit {
-            let n = min(pageSize, codeLimit - o)
-            codeHashes.append(Hasher.hash(hashKind, data.sub(o, n)))
-            o += n
+        let pages = (codeLimit + pageSize - 1) / pageSize
+        guard pages > 0 else { codeHashes = []; return }
+        let kind = hashKind
+        let size = pageSize
+        let limit = codeLimit
+
+        if pages < 8 {
+            codeHashes = (0..<pages).map { i in
+                let start = i * size
+                return Hasher.hash(kind, data.sub(start, min(size, limit - start)))
+            }
+            return
         }
+
+        var results = [Data](repeating: Data(), count: pages)
+        data.withUnsafeBytes { raw in
+            let base = raw.baseAddress!
+            results.withUnsafeMutableBufferPointer { out in
+                let buffer = out
+                DispatchQueue.concurrentPerform(iterations: pages) { i in
+                    let start = i * size
+                    let count = min(size, limit - start)
+                    let page = UnsafeRawBufferPointer(start: base + start, count: count)
+                    var hasher = Hasher(kind)
+                    hasher.update(page)
+                    buffer[i] = hasher.finish()
+                }
+            }
+        }
+        codeHashes = results
     }
 }

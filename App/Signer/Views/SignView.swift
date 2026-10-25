@@ -23,6 +23,7 @@ struct SignView: View {
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
     @State private var showTweakPicker = false
+    @State private var installing: LibraryApp?
 
     init(preselected: LibraryApp? = nil) {
         _app = State(initialValue: preselected)
@@ -54,6 +55,9 @@ struct SignView: View {
                 if case .success(let urls) = result { tweaks.append(contentsOf: urls) }
             }
             .onAppear { if let app, info == nil { select(app) } }
+            .sheet(item: $installing) { (app: LibraryApp) in
+                InstallView(app: app)
+            }
             .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
                 if let id = note.object as? UUID,
                    let found = store.library.first(where: { $0.id == id }) {
@@ -196,8 +200,17 @@ struct SignView: View {
                     ForEach(result.warnings, id: \.self) {
                         Text($0).font(.caption).foregroundStyle(.orange)
                     }
-                    Text("It is in My apps, ready to install.")
+                    Text("It is in My apps too.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                if let signed = store.library.first, signed.isSigned {
+                    Button {
+                        installing = signed
+                    } label: {
+                        Label("Install it now", systemImage: "arrow.down.app")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
             } else if let message = runner.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.red)

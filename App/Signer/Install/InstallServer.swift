@@ -25,7 +25,8 @@ final class InstallServer: ObservableObject {
     @Published var log: [String] = []
 
     private var listener: NWListener?
-    private var payload: Data?
+    private var payloadURL: URL?
+    private var payloadSize = 0
     private var manifest: Data?
     private var icon: Data?
     private var port: UInt16 = 0
@@ -46,8 +47,8 @@ final class InstallServer: ObservableObject {
                iconPNG: Data?, route: Route) async {
         stop()
         do {
-            let data = try Data(contentsOf: ipa, options: .mappedIfSafe)
-            payload = data
+            payloadURL = ipa
+            payloadSize = (try? FileManager.default.attributesOfItem(atPath: ipa.path)[.size] as? Int) ?? 0 ?? 0
             icon = iconPNG
             let p = try startListener(route: route)
             port = p
@@ -87,7 +88,7 @@ final class InstallServer: ObservableObject {
         listener = nil
         connections.forEach { $0.cancel() }
         connections.removeAll()
-        payload = nil
+        payloadURL = nil
         manifest = nil
         bytesSent = 0
     }
@@ -150,25 +151,59 @@ final class InstallServer: ObservableObject {
         case "/app.ipa":
             note("iOS is downloading the app")
             stage = .downloading(0)
-            if let data = payload {
-                var head = "HTTP/1.1 200 OK\r\n"
-                head += "Content-Type: application/octet-stream\r\n"
-                head += "Content-Length: \(data.count)\r\n"
-                head += "Connection: close\r\n\r\n"
-                conn.send(content: Data(head.utf8) + data, completion: .contentProcessed { [weak self] _ in
-                    conn.cancel()
-                    Task { @MainActor in
-                        self?.stage = .handedOff
-                        self?.note("The app was handed to iOS. Watch the home screen.")
-                    }
-                })
-            } else {
-                send(Data(), "application/octet-stream")
-            }
+            sendPayload(on: conn)
         default:
             let body = Data("Signer".utf8)
             send(body, "text/plain")
         }
+    }
+
+    /// Sends the app a megabyte at a time, so even a very large app never has to sit
+    /// in memory all at once.
+    private func sendPayload(on conn: NWConnection) {
+        guard let url = payloadURL, let handle = try? FileHandle(forReadingFrom: url) else {
+            conn.cancel()
+            stage = .failed("The signed app file went missing")
+            return
+        }
+        var head = "HTTP/1.1 200 OK\r\n"
+        head += "Content-Type: application/octet-stream\r\n"
+        head += "Content-Length: \(payloadSize)\r\n"
+        head += "Connection: close\r\n\r\n"
+        conn.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
+
+        let chunkSize = 1 << 20
+        let total = payloadSize
+        func pump() {
+            let chunk = handle.readData(ofLength: chunkSize)
+            if chunk.isEmpty {
+                try? handle.close()
+                conn.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
+                    conn.cancel()
+                })
+                Task { @MainActor in
+                    self.stage = .handedOff
+                    self.note("The app was handed to iOS. Watch the home screen.")
+                }
+                return
+            }
+            conn.send(content: chunk, completion: .contentProcessed { [weak self] error in
+                guard error == nil else {
+                    try? handle.close()
+                    conn.cancel()
+                    return
+                }
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.bytesSent += chunk.count
+                    if total > 0 {
+                        self.stage = .downloading(Double(self.bytesSent) / Double(total))
+                    }
+                    pump()
+                }
+            })
+        }
+        pump()
     }
 
     // MARK: - helpers

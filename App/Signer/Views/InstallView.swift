@@ -38,6 +38,10 @@ struct InstallView: View {
                     .disabled(busy)
                 }
 
+                if case .downloading(let f) = server.stage {
+                    Section { ProgressView(value: f) }
+                }
+
                 if !server.log.isEmpty {
                     Section("Progress") {
                         ForEach(server.log.reversed(), id: \.self) { line in
@@ -82,7 +86,7 @@ struct InstallView: View {
         case .idle: return "Install now"
         case .serving: return "Starting…"
         case .askedIOS: return "Waiting for iOS…"
-        case .downloading: return "iOS is copying the app…"
+        case .downloading(let f): return "iOS is copying the app… \(Int(f * 100))%"
         case .handedOff: return "Install again"
         case .failed: return "Try again"
         }
