@@ -111,7 +111,8 @@ struct SignView: View {
             if let pattern = pairedPattern, !pattern.hasSuffix("*") {
                 Button("Use the ID my certificate allows") { bundleID = pattern }
                     .font(.caption)
-                Text("Your profile only allows the ID \(pattern). Anything else will not install.")
+                Text("Your profile only allows the ID \(pattern). Signer will use that ID for you, "
+                     + "and remove any extras the profile can't cover.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

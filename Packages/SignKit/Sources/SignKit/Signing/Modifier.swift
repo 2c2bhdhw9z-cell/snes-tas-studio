@@ -77,6 +77,16 @@ struct Modifier {
         }
     }
 
+    /// Does the app carry any app extensions (widgets, share sheets and so on)?
+    static func hasExtensions(_ app: URL) -> Bool {
+        let fm = FileManager.default
+        for dir in ["PlugIns", "Plug-ins", "Extensions"] {
+            if let items = try? fm.contentsOfDirectory(atPath: app.appendingPathComponent(dir).path),
+               items.contains(where: { $0.hasSuffix(".appex") }) { return true }
+        }
+        return false
+    }
+
     func plist(at url: URL) throws -> [String: Any] {
         let data = try Data(contentsOf: url)
         guard let d = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {

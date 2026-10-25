@@ -137,6 +137,38 @@ final class IPASignerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
     }
 
+    /// A profile made for exactly one app ID: the app must take that ID, and its
+    /// extensions must go, or iOS refuses the install. (Real profile from ESign.)
+    func testOneIDProfileSwitchesTheAppIDAndDropsExtensions() throws {
+        let profilePath = "/projects/sandbox/research/ipa/x/ESign/Payload/ESign.app/embedded.mobileprovision"
+        let ipaPath = "/projects/sandbox/research/ipa/SideStore.ipa"
+        guard FileManager.default.fileExists(atPath: profilePath),
+              FileManager.default.fileExists(atPath: ipaPath) else { throw XCTSkip("samples missing") }
+        let identity = try IPASigner.Identity.load(
+            p12: IPASignerTests.fixtures.appendingPathComponent("testcert.p12"),
+            password: "hunter2", profile: URL(fileURLWithPath: profilePath))
+        let allowed = try XCTUnwrap(identity.profile?.bundleIDPattern)
+        XCTAssertFalse(allowed.hasSuffix("*"), "this test needs a one-ID profile")
+
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let output = dir.appendingPathComponent("out.ipa")
+        var options = SigningOptions()
+        options.compressOutput = false
+        let result = try IPASigner().sign(ipa: URL(fileURLWithPath: ipaPath), to: output,
+                                          identity: identity, options: options)
+
+        XCTAssertEqual(result.bundleID, allowed)
+        XCTAssertTrue(result.warnings.contains { $0.contains(allowed) }, "the user must be told")
+        let names = try ZipReader(url: output).entries.map(\.name)
+        XCTAssertFalse(names.contains { $0.contains(".appex/") }, "extensions must be removed")
+
+        let info = try PropertyListSerialization.propertyList(
+            from: try read(output, ".app/Info.plist"), format: nil) as? [String: Any]
+        XCTAssertEqual(info?["CFBundleIdentifier"] as? String, allowed)
+        XCTAssertTrue(names.contains { $0.hasSuffix(".app/embedded.mobileprovision") })
+    }
+
     func testRefusesSomethingThatIsNotAnApp() throws {
         let dir = try temp()
         defer { try? FileManager.default.removeItem(at: dir) }

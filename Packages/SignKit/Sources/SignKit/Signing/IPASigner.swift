@@ -73,6 +73,24 @@ public final class IPASigner {
 
         // 2. Modify
         onProgress?(0.3, "Applying your changes")
+        var options = options
+        if let profile = identity?.profile {
+            let original = (try? BundleSigner(key: nil, chain: [], profile: nil).infoPlist(of: app))?["CFBundleIdentifier"] as? String
+            let wanted = options.bundleID ?? original ?? ""
+            // A profile made for one exact app ID only installs apps with that ID —
+            // the same thing ESign does without asking. Wildcard profiles leave it alone.
+            if !profile.isWildcard, let allowed = profile.bundleIDPattern, !profile.allows(bundleID: wanted) {
+                options.bundleID = allowed
+                warnings.append("Your profile only allows the app ID \(allowed), so the app was signed with that ID.")
+            }
+            // Extensions each have their own app ID. A one-ID profile cannot cover them,
+            // and iOS then refuses the whole install, so they have to go.
+            if !profile.isWildcard, !options.removeExtensions, Modifier.hasExtensions(app) {
+                options.removeExtensions = true
+                warnings.append("Its extras (widgets, extensions) were removed: your profile allows only one app ID, "
+                                + "and iOS refuses the whole install if they stay.")
+            }
+        }
         try Modifier(options: options, warnings: { self.warnings.append($0) }).apply(to: app)
 
         // 3. Sign

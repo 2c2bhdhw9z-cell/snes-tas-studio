@@ -53,7 +53,7 @@ final class InstallServer: ObservableObject {
             payloadURL = ipa
             payloadSize = (try? FileManager.default.attributesOfItem(atPath: ipa.path)[.size] as? Int) ?? 0
             icon = iconPNG
-            let p = try startListener(route: route)
+            let p = try await startListener(route: route)
             port = p
             let base: String
             switch route {
@@ -103,7 +103,7 @@ final class InstallServer: ObservableObject {
 
     // MARK: - the server
 
-    private func startListener(route: Route) throws -> UInt16 {
+    private func startListener(route: Route) async throws -> UInt16 {
         let params: NWParameters
         switch route {
         case .localHTTPS(let p12, let password, _):
@@ -112,21 +112,58 @@ final class InstallServer: ObservableObject {
             params = .tcp
         }
         params.allowLocalEndpointReuse = true
-        let l = try NWListener(using: params)
-        l.newConnectionHandler = { [weak self] conn in
-            Task { @MainActor in self?.handle(conn) }
+
+        // A fixed, known port (with a few spares) rather than "any port". Before the
+        // listener is ready, iOS reports its port as 0, and build 16 handed iOS
+        // "127.0.0.1:0" — an address nothing listens on. Now we only carry on once
+        // the listener says it is ready, and the port is one we chose ourselves.
+        var lastError: Error?
+        for candidate in InstallServer.ports {
+            guard let port = NWEndpoint.Port(rawValue: candidate) else { continue }
+            do {
+                let l = try NWListener(using: params, on: port)
+                l.newConnectionHandler = { [weak self] conn in
+                    Task { @MainActor in self?.handle(conn) }
+                }
+                if try await InstallServer.waitUntilReady(l) {
+                    listener = l
+                    return candidate
+                }
+                l.cancel()
+            } catch {
+                lastError = error
+            }
         }
-        l.start(queue: .global(qos: .userInitiated))
-        listener = l
-        // Wait briefly for the port to be assigned.
-        var waited = 0
-        while l.port?.rawValue == nil && waited < 50 {
-            usleep(20_000); waited += 1
+        throw SignKitError.io("the phone would not let Signer serve the app"
+                              + (lastError.map { " (\($0.localizedDescription))" } ?? ""))
+    }
+
+    /// Ports tried in order. Several, in case another app is already using one.
+    static let ports: [UInt16] = [41_234, 41_235, 41_236, 52_731, 52_732, 60_101]
+
+    /// Starts the listener and waits until it is actually accepting connections.
+    /// Returns false if that port could not be used.
+    static func waitUntilReady(_ listener: NWListener) async throws -> Bool {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Bool, Error>) in
+            let once = OnceFlag()
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    if once.claim() { cont.resume(returning: true) }
+                case .failed, .cancelled:
+                    if once.claim() { cont.resume(returning: false) }
+                case .waiting:
+                    // Port busy or not allowed: give up on this one, try the next.
+                    if once.claim() { cont.resume(returning: false) }
+                default:
+                    break
+                }
+            }
+            listener.start(queue: .global(qos: .userInitiated))
+            DispatchQueue.global().asyncAfter(deadline: .now() + 5) {
+                if once.claim() { cont.resume(returning: false) }
+            }
         }
-        guard let port = l.port?.rawValue else {
-            throw SignKitError.io("the phone would not give us a port to serve on")
-        }
-        return port
     }
 
     private func handle(_ conn: NWConnection) {
@@ -348,3 +385,15 @@ final class InstallServer: ObservableObject {
 #if canImport(UIKit)
 import UIKit
 #endif
+
+/// Makes sure a continuation is resumed exactly once, whichever callback fires first.
+final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if done { return false }
+        done = true
+        return true
+    }
+}
