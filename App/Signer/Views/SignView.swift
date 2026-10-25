@@ -42,15 +42,13 @@ struct SignView: View {
                 actionSection
             }
             .navigationTitle("Sign")
-            .fileImporter(isPresented: $showPicker,
-                          allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive]) { result in
+            .fileImporter(isPresented: $showPicker, allowedContentTypes: [.item]) { result in
                 if case .success(let url) = result {
                     if let imported = try? SigningRunner.importIPA(url) { select(imported) }
                 }
             }
             .fileImporter(isPresented: $showTweakPicker,
-                          allowedContentTypes: [UTType(filenameExtension: "dylib") ?? .data,
-                                                UTType(filenameExtension: "deb") ?? .data],
+                          allowedContentTypes: [.item],
                           allowsMultipleSelection: true) { result in
                 if case .success(let urls) = result { tweaks.append(contentsOf: urls) }
             }

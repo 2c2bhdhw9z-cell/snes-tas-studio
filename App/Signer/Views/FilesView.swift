@@ -133,15 +133,18 @@ struct FilesView: View {
             .sheet(item: $hexing) { (entry: FileEntry) in
                 FileViewer(entry: entry, hex: true)
             }
+            // Everything can be picked — nothing greyed out — and each file goes
+            // where it belongs on its own.
             .fileImporter(isPresented: $showSystemPicker, allowedContentTypes: [.item],
                           allowsMultipleSelection: true) { result in
                 if case .success(let urls) = result {
+                    var notes = [String]()
                     for url in urls {
-                        let dest = directory.appendingPathComponent(url.lastPathComponent)
-                        try? FileManager.default.removeItem(at: dest)
-                        try? FileManager.default.copyItem(at: url, to: dest)
+                        do { notes.append(try Intake.take(url, password: nil)) }
+                        catch { notes.append((error as? SignKitError)?.description ?? error.localizedDescription) }
                     }
                     reload()
+                    if let first = notes.first { show(notes.count == 1 ? first : "\(notes.count) files added") }
                 }
             }
         }

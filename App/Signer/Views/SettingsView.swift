@@ -92,7 +92,7 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .fileImporter(isPresented: $showWebCertPicker,
-                          allowedContentTypes: [UTType(filenameExtension: "p12") ?? .data]) { result in
+                          allowedContentTypes: [.item]) { result in
                 if case .success(let url) = result,
                    let data = try? Data(contentsOf: url) {
                     try? data.write(to: store.root.appendingPathComponent("local-https.p12"))

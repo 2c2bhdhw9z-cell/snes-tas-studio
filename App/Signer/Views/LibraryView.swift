@@ -9,6 +9,7 @@ struct LibraryView: View {
     @State private var showImporter = false
     @State private var installing: LibraryApp?
     @State private var errorMessage: String?
+    @State private var banner: String?
 
     var body: some View {
         NavigationStack {
@@ -34,21 +35,39 @@ struct LibraryView: View {
                     Label("Add an app", systemImage: "plus")
                 }
             }
+            // Anything can be picked: certificates, profiles and apps all land where
+            // they belong, worked out from the file itself.
             .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: [UTType(filenameExtension: "ipa") ?? .archive],
+                          allowedContentTypes: [.item],
                           allowsMultipleSelection: true) { result in
                 switch result {
                 case .success(let urls):
+                    var notes = [String]()
                     for url in urls {
-                        do { _ = try SigningRunner.importIPA(url) }
-                        catch { self.errorMessage = friendly(error) }
+                        do { notes.append(try Intake.take(url, password: nil)) }
+                        catch { notes.append(friendly(error)) }
                     }
+                    if notes.count == 1 { banner = notes[0] }
+                    else if notes.count > 1 { banner = "\(notes.count) files added" }
                 case .failure(let e):
                     self.errorMessage = e.localizedDescription
                 }
             }
             .sheet(item: $installing) { (app: LibraryApp) in
                 InstallView(app: app)
+            }
+            .overlay(alignment: .bottom) {
+                if let banner {
+                    Text(banner)
+                        .font(.callout)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.bottom, 12)
+                        .task {
+                            try? await Task.sleep(nanoseconds: 2_500_000_000)
+                            self.banner = nil
+                        }
+                }
             }
             .alert("That did not work", isPresented: .constant(errorMessage != nil)) {
                 Button("OK") { errorMessage = nil }
@@ -65,7 +84,8 @@ struct LibraryView: View {
                 .foregroundStyle(.secondary)
             Text("No apps yet")
                 .font(.headline)
-            Text("Tap + to pick an app file (an \".ipa\"), or use the File tab, or add a source.")
+            Text("Tap + and pick anything — an app file, your certificate, your profile. "
+                 + "Nothing will be greyed out. They each go where they belong.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
