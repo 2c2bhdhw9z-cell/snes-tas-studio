@@ -11,7 +11,6 @@ struct SignView: View {
 
     @State private var app: LibraryApp?
     @State private var info: IPAInfo?
-    @State private var showPicker = false
 
     // What the user can change
     @State private var name = ""
@@ -22,7 +21,6 @@ struct SignView: View {
     @State private var removeExtensions = false
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
-    @State private var showTweakPicker = false
     @State private var installing: LibraryApp?
 
     init(preselected: LibraryApp? = nil) {
@@ -42,24 +40,6 @@ struct SignView: View {
                 actionSection
             }
             .navigationTitle("Sign")
-            .fileImporter(isPresented: $showPicker, allowedContentTypes: [.item]) { result in
-                if case .success(let url) = result {
-                    if let local = try? Intake.keep(url),
-                       let imported = try? SigningRunner.importIPA(local) {
-                        select(imported)
-                    } else {
-                        ImportCoordinator.shared.take([url])
-                    }
-                }
-            }
-            .fileImporter(isPresented: $showTweakPicker,
-                          allowedContentTypes: [.item],
-                          allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result {
-                    // Copy them in first, or they cannot be read later.
-                    tweaks.append(contentsOf: urls.compactMap { try? Intake.keep($0) })
-                }
-            }
             .onAppear { if let app, info == nil { select(app) } }
             .sheet(item: $installing) { (app: LibraryApp) in
                 InstallView(app: app)
@@ -93,10 +73,10 @@ struct SignView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
-                Button("Pick a different app") { showPicker = true }
+                Button("Pick a different app") { pickApp() }
             } else {
                 Button {
-                    showPicker = true
+                    pickApp()
                 } label: {
                     Label("Choose an app file", systemImage: "folder")
                 }
@@ -156,7 +136,7 @@ struct SignView: View {
             }
             .onDelete { idx in idx.forEach { tweaks.remove(at: $0) } }
             Button {
-                showTweakPicker = true
+                pickTweaks()
             } label: {
                 Label("Add a .dylib or .deb", systemImage: "plus")
             }
@@ -239,6 +219,23 @@ struct SignView: View {
     }
 
     // MARK: actions
+
+    func pickApp() {
+        DocumentPicker.present(multiple: false) { urls in
+            guard let url = urls.first else { return }
+            if let local = try? Intake.keep(url), let imported = try? SigningRunner.importIPA(local) {
+                select(imported)
+            } else {
+                ImportCoordinator.shared.take([url])
+            }
+        }
+    }
+
+    func pickTweaks() {
+        DocumentPicker.present { urls in
+            tweaks.append(contentsOf: urls.compactMap { try? Intake.keep($0) })
+        }
+    }
 
     func select(_ app: LibraryApp) {
         self.app = app

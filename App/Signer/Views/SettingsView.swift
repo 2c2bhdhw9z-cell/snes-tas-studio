@@ -10,7 +10,6 @@ struct SettingsView: View {
     @AppStorage("installLocalHTTPS") private var useLocalHTTPS = false
     @AppStorage("compressOutput") private var compressOutput = false
     @AppStorage("keepLongJobsRunning") private var keepLongJobsRunning = true
-    @State private var showWebCertPicker = false
     @State private var webCertPassword = ""
 
     var body: some View {
@@ -43,7 +42,11 @@ struct SettingsView: View {
                     Toggle("Do everything on this phone", isOn: $useLocalHTTPS)
                     if useLocalHTTPS {
                         Button {
-                            showWebCertPicker = true
+                            DocumentPicker.present(multiple: false) { urls in
+                                if let url = urls.first, let data = try? Data(contentsOf: url) {
+                                    try? data.write(to: store.root.appendingPathComponent("local-https.p12"))
+                                }
+                            }
                         } label: {
                             LabeledContent("Web certificate (.p12)",
                                            value: hasWebCertificate ? "added" : "choose")
@@ -96,14 +99,6 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .fileImporter(isPresented: $showWebCertPicker,
-                          allowedContentTypes: [.item]) { result in
-                if case .success(let url) = result,
-                   let local = try? Intake.keep(url),
-                   let data = try? Data(contentsOf: local) {
-                    try? data.write(to: store.root.appendingPathComponent("local-https.p12"))
-                }
-            }
             .onAppear {
                 webCertPassword = UserDefaults.standard.string(forKey: "localHTTPSPassword") ?? ""
             }

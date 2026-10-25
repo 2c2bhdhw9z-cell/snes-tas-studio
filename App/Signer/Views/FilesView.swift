@@ -17,7 +17,6 @@ struct FilesView: View {
     @State private var hexing: FileEntry?
     @State private var banner: String?
     @State private var bannerIsError = false
-    @State private var showSystemPicker = false
 
     var shown: [FileEntry] {
         guard !search.isEmpty else { return entries }
@@ -74,7 +73,12 @@ struct FilesView: View {
                             Label("Up", systemImage: "arrow.up.left")
                         }
                     }
-                    Button { showSystemPicker = true } label: { Label("Add", systemImage: "plus") }
+                    Button {
+                        DocumentPicker.present { urls in
+                            guard !urls.isEmpty else { return }
+                            ImportCoordinator.shared.take(urls)
+                        }
+                    } label: { Label("Add", systemImage: "plus") }
                 }
             }
             .refreshable { reload() }
@@ -125,19 +129,6 @@ struct FilesView: View {
             }
             .sheet(item: $hexing) { (entry: FileEntry) in
                 FileViewer(entry: entry, hex: true)
-            }
-            // Everything can be picked — nothing greyed out — and each file goes
-            // where it belongs on its own.
-            .fileImporter(isPresented: $showSystemPicker, allowedContentTypes: [.item],
-                          allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result {
-                    ImportCoordinator.shared.take(urls)
-                    // Give the copy a moment, then show the new files.
-                    Task {
-                        try? await Task.sleep(nanoseconds: 400_000_000)
-                        reload()
-                    }
-                }
             }
         }
     }

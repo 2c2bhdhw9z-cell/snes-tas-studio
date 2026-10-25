@@ -6,7 +6,6 @@ import SignKit
 /// The apps on this phone's list: imported ones and ones we signed.
 struct LibraryView: View {
     @EnvironmentObject var store: Store
-    @State private var showImporter = false
     @State private var installing: LibraryApp?
     @State private var errorMessage: String?
     @State private var banner: String?
@@ -30,21 +29,12 @@ struct LibraryView: View {
             .navigationTitle("My apps")
             .toolbar {
                 Button {
-                    showImporter = true
+                    DocumentPicker.present { urls in
+                        guard !urls.isEmpty else { return }
+                        ImportCoordinator.shared.take(urls)
+                    }
                 } label: {
                     Label("Add an app", systemImage: "plus")
-                }
-            }
-            // Anything can be picked: certificates, profiles and apps all land where
-            // they belong, worked out from the file itself.
-            .fileImporter(isPresented: $showImporter,
-                          allowedContentTypes: [.item],
-                          allowsMultipleSelection: true) { result in
-                switch result {
-                case .success(let urls):
-                    ImportCoordinator.shared.take(urls)
-                case .failure(let e):
-                    self.errorMessage = e.localizedDescription
                 }
             }
             .sheet(item: $installing) { (app: LibraryApp) in
