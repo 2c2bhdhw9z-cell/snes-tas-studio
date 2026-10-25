@@ -101,9 +101,13 @@ final class SignerTests: XCTestCase {
 
         let der = try XCTUnwrap(b[CSSlot.derEntitlements])
         XCTAssertEqual(der.u32be(0), BlobMagic.derEntitlements)
+        // Apple's version-1 layout: an application-class SEQUENCE (0x70) holding the
+        // INTEGER 1 and then a context-class [0] (0xb0) that carries the key/value pairs.
         let node = try DERNode.parse(der.sub(8, der.count - 8))
-        XCTAssertEqual(node.tag, 0x30)
+        XCTAssertEqual(node.tag, 0x70)
+        XCTAssertEqual(node.child(0)?.tag, 0x02)
         XCTAssertEqual(node.child(0)?.intValue, 1)
+        XCTAssertEqual(node.child(1)?.tag, 0xb0)
 
         // Both must be recorded in the code directory's special slots.
         let cd = try XCTUnwrap(b[CSSlot.codeDirectory])

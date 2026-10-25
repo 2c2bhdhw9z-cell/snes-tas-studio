@@ -61,7 +61,8 @@ public struct MachOFileSigner {
             let signer = MachOSigner(key: key, chain: chain)
             let signed = try signer.sign(data: try Data(contentsOf: url, options: .mappedIfSafe),
                                          options: options)
-            try signed.write(to: url, options: .atomic)
+            try signed.write(to: url)
+            MachOFileSigner.makeRunnable(url)
             let slice = try MachOFile(data: signed).slices[0]
             return signer.cdhash(for: slice) ?? Data()
         }
@@ -145,12 +146,9 @@ public struct MachOFileSigner {
                 try output.close()
 
                 // 4. Swap it in, keeping the file's permissions.
-                let mode = (try? fm.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber) ?? nil
                 try fm.removeItem(at: url)
                 try fm.moveItem(at: temp, to: url)
-                if let mode {
-                    try? fm.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
-                }
+                MachOFileSigner.makeRunnable(url)
                 return Hasher.hash(options.hashKind, signatureCodeDirectory(signature) ?? Data())
             }
             // Not enough room reserved: try once more with the real size.
@@ -163,6 +161,13 @@ public struct MachOFileSigner {
     }
 
     // MARK: - pieces
+
+    /// iOS refuses an app whose program files are not marked runnable, and says only
+    /// "integrity could not be verified". Every program file we sign gets rwxr-xr-x.
+    static func makeRunnable(_ url: URL) {
+        try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: 0o755)],
+                                               ofItemAtPath: url.path)
+    }
 
     func isThin(_ url: URL) throws -> Bool {
         let head = try readRange(url, 0, 8)
@@ -197,7 +202,8 @@ public struct MachOFileSigner {
         let text = header.segments.first { $0.name == "__TEXT" }
         cd.execSegBase = text?.fileoff ?? 0
         cd.execSegLimit = text?.filesize ?? 0
-        cd.execSegFlags = header.isExecutable ? 1 : 0
+        cd.execSegFlags = MachOSigner.execSegFlags(isExecutable: header.isExecutable,
+                                                   entitlements: options.entitlements)
         cd.flags = options.adhoc ? CSFlags.adhoc : 0
         cd.codeHashes = try hashPages(of: file, upTo: codeLimit, kind: options.hashKind,
                                       progress: progress)
@@ -205,14 +211,14 @@ public struct MachOFileSigner {
         let requirements = options.adhoc
             ? Requirement.emptySet()
             : Requirement.set(designated: Requirement.designated(identifier: options.identifier,
-                                                                 teamID: options.teamID))
+                                                                 subjectCN: chain.first?.commonName ?? ""))
         cd.specialHashes[CSSlot.requirements] = Hasher.hash(options.hashKind, requirements.encoded)
         if let h = options.infoPlistHash { cd.specialHashes[CSSlot.infoPlist] = h }
         if let h = options.resourcesHash { cd.specialHashes[CSSlot.resourceDir] = h }
 
         var xmlBlob: Blob?
         var derBlob: Blob?
-        if let ents = options.entitlements, !ents.isEmpty {
+        if let ents = options.entitlements.map({ Entitlements.storable($0).kept }), !ents.isEmpty {
             xmlBlob = try Entitlements.xmlBlob(ents)
             derBlob = try Entitlements.derBlob(ents)
             cd.specialHashes[CSSlot.entitlements] = Hasher.hash(options.hashKind, xmlBlob!.encoded)
@@ -226,8 +232,7 @@ public struct MachOFileSigner {
         if let d = derBlob { sb.add(CSSlot.derEntitlements, d) }
         if let key = key, !chain.isEmpty, !options.adhoc {
             sb.add(CSSlot.signatureSlot, Blob.wrapper(try CMS.sign(codeDirectories: [cd], key: key,
-                                                                   chain: chain,
-                                                                   includeAppleHashAttributes: false)))
+                                                                   chain: chain)))
         } else {
             sb.add(CSSlot.signatureSlot, Blob.wrapper(Data()))
         }

@@ -20,9 +20,13 @@ apart with REA (Ghidra + Rizin) only to learn what they do — see `docs/RESEARC
   (code directory, requirements, entitlements XML + DER, CMS), `CodeResources` matching
   Apple's own output, `.p12` reader (AES / Triple-DES / RC2-40), provisioning profiles,
   X.509, OCSP revocation checks, SHA-1/SHA-256/HMAC, RSA with Montgomery maths.
-  56 tests, run on Linux in CI, including forced on-disk signing and streamed archive
+  78 tests, run on Linux in CI, including forced on-disk signing and streamed archive
   tests for multi-gigabyte apps. Output verified with an outside tool (rcodesign):
   `signature_verifies: true` for the app and every framework inside it.
+- Signature shape now matches what Apple's own tool writes (entitlement block, certificate
+  chain inside the signature, attributes, rule text, run permission, archive dates) — see
+  section 7 of `docs/RESEARCH.md` — plus a built-in installer-style checker that reports
+  problems in plain English after every signing.
 - App: My apps, Sign, Sources, Certificates, Settings; local install server;
   phone-ID reader; app modifications (name, ID, version, flags, remove extras, tweaks).
 - Build: GitHub Actions runs the engine tests, builds the `.ipa`, publishes a release.

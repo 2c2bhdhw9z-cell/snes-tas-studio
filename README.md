@@ -16,6 +16,9 @@ how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is goin
   often refuses, with a plain reason when something is wrong instead of "unknown error".
 - **Says when a certificate is dead.** Asks Apple directly (OCSP), so a certificate that
   has been switched off is caught even while its end date still looks fine.
+- **Checks its own work the way the iPhone's installer does.** After signing, it re-reads
+  the finished app and shows a plain "Check failed — …" line for anything iOS would refuse,
+  instead of iOS's vague "integrity could not be verified".
 - **Changes apps while signing**: name, app ID, version, icon, minimum iOS, file sharing,
   120 Hz, remove extras, remove the Watch app, add `.dylib`/`.deb` add-ons.
 - **Handles multi-gigabyte apps.** Imports, downloads, unpacking, resource hashing,
@@ -37,7 +40,7 @@ how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is goin
 ## Checking the engine
 
 ```sh
-swift test --package-path Packages/SignKit          # 56 tests, runs on Linux
+swift test --package-path Packages/SignKit          # 78 tests, runs on Linux
 Packages/SignKit/.build/debug/signkit-cli zip x.ipa # read any .ipa, verify every checksum
 signkit-cli sign-ipa in.ipa out.ipa cert.p12 pw     # sign end to end
 RCODESIGN=/path/to/rcodesign tools/verify-signature.sh out.ipa

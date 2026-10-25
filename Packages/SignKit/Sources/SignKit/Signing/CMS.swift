@@ -2,60 +2,83 @@ import Foundation
 
 /// Builds the CMS (PKCS#7) signature that iOS checks against Apple's root.
 /// It signs the code directory, not the app bytes directly.
+///
+/// The layout below is copied from a real signature made by Apple's own tool (the
+/// GBox app) and checked against the open-source `zsign` and `rcodesign`:
+///
+///  - five signed attributes: content type, signing time, message digest, and Apple's
+///    two code-directory hash attributes (1.2.840.113635.100.9.2 and .9.1);
+///  - the certificates above yours (Apple's developer-relations certificate and
+///    Apple's root) embedded next to yours;
+///  - SHA-256 with RSA, labelled the way Apple labels it.
 public enum CMS {
     /// - Parameters:
-    ///   - codeDirectories: the primary code directory first; others go in the Apple hash attributes.
-    ///   - chain: signing certificate first, then any intermediates.
+    ///   - codeDirectories: the primary code directory first.
+    ///   - chain: the signing certificate first, then any further certificates from the `.p12`.
+    ///     Apple's own certificates are added automatically.
     public static func sign(codeDirectories: [CodeDirectory], key: RSAPrivateKey,
-                            chain: [Certificate], signingTime: Date = Date(),
-                            includeAppleHashAttributes: Bool = false) throws -> Data {
+                            chain: [Certificate], signingTime: Date = Date()) throws -> Data {
         guard let primary = codeDirectories.first, let leaf = chain.first else {
             throw SignKitError.crypto("nothing to sign with")
         }
         let digestKind = primary.hashKind
         let messageDigest = Hasher.hash(digestKind, primary.blob.encoded)
 
-        // Apple's two extra attributes: the short hashes as a plist, and the full ones in DER.
-        let plist: [String: Any] = ["cdhashes": codeDirectories.map { $0.truncatedCDHash }]
-        let cdhashPlist = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
-        let cdhashSeq = DER.seq(codeDirectories.map { cd in
-            .seq([.seq([.oid(cd.hashKind == .sha1 ? OID.sha1 : OID.sha256), .null]), .octets(cd.cdhash)])
+        // Apple's two extra attributes.
+        let hashOID = digestKind == .sha1 ? OID.sha1 : OID.sha256
+        let cdHashesDER = DER.set(codeDirectories.map { cd in
+            DER.seq([.oid(cd.hashKind == .sha1 ? OID.sha1 : OID.sha256), .octets(cd.cdhash)])
         })
+        let cdHashesPlist = cdhashPlist(codeDirectories.map { $0.truncatedCDHash })
 
-        // Real shipping signatures (checked against ESign and Apple's own) carry
-        // these three attributes; the two Apple hash attributes are optional extras.
-        var signedAttrs: [DER] = [
+        let signedAttrs: [DER] = [
             .seq([.oid(OID.contentType), .set([.oid(OID.pkcs7Data)])]),
             .seq([.oid(OID.signingTime), .set([.utcTime(signingTime)])]),
             .seq([.oid(OID.messageDigest), .set([.octets(messageDigest)])]),
+            .seq([.oid(OID.appleCDHashes), cdHashesDER]),
+            .seq([.oid(OID.appleCDHashesPlist), .set([.octets(cdHashesPlist)])]),
         ]
-        if includeAppleHashAttributes {
-            signedAttrs.append(.seq([.oid(OID.appleCDHashesPlist), .set([.octets(cdhashPlist)])]))
-            signedAttrs.append(.seq([.oid(OID.appleCDHashes), .set([cdhashSeq])]))
-        }
         // The signature covers the attributes encoded as a SET, not as the [0] they appear in.
+        // DER sorts a SET by its encoding, which is also the order Apple's tool writes.
         let attrsForSigning = DER.set(signedAttrs).encoded
         let signature = try key.sign(attrsForSigning, digestKind)
 
-        let digestOID = digestKind == .sha1 ? OID.sha1 : OID.sha256
         let signerInfo = DER.seq([
             .intValue(1),
             .seq([.raw(leaf.issuerDER), .int(leaf.serial)]),
-            .seq([.oid(digestOID), .null]),
+            .seq([.oid(hashOID), .null]),
             .raw(CMS.retagAsContext0(attrsForSigning)),
-            .seq([.oid(OID.rsaEncryption), .null]),
+            .seq([.oid(digestKind == .sha1 ? OID.sha1WithRSA : OID.sha256WithRSAEncryption), .null]),
             .octets(signature),
         ])
 
+        // Everything that travels with the signature: Apple's certificates, then yours.
+        let parents = AppleChain.parents(of: leaf, extra: Array(chain.dropFirst()))
+        let embedded = AppleChain.embedded(leaf: leaf, parents: parents)
+
         let signedData = DER.seq([
             .intValue(1),
-            .set([.seq([.oid(digestOID), .null])]),
+            .set([.seq([.oid(hashOID), .null])]),
             .seq([.oid(OID.pkcs7Data)]),                       // detached: no content
-            .tagged(0, chain.map { .raw($0.der) }),
+            .tagged(0, embedded.map { .raw($0.der) }),
             .set([signerInfo]),
         ])
 
         return DER.seq([.oid(OID.pkcs7SignedData), .tagged(0, [signedData])]).encoded
+    }
+
+    /// The property list Apple puts in attribute 1.2.840.113635.100.9.1: the short
+    /// (20-byte) code-directory hashes. Written exactly the way Apple's tool writes it.
+    public static func cdhashPlist(_ hashes: [Data]) -> Data {
+        var text = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        text += "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+        text += "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+        text += "<plist version=\"1.0\">\n<dict>\n\t<key>cdhashes</key>\n\t<array>\n"
+        for h in hashes {
+            text += "\t\t<data>\n\t\t\(h.base64EncodedString())\n\t\t</data>\n"
+        }
+        text += "\t</array>\n</dict>\n</plist>\n"
+        return Data(text.utf8)
     }
 
     /// Length of the tag+length header of a DER value, so the body can be re-tagged as [0].

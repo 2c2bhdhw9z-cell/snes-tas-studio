@@ -71,6 +71,40 @@ public struct Certificate {
         return Int(na.timeIntervalSinceNow / 86400)
     }
 
+    /// A certificate that vouches for itself: a root.
+    public var isSelfIssued: Bool { subjectDER == issuerDER }
+
+    /// The identifier of this certificate's own key.
+    public var subjectKeyID: Data? {
+        guard let raw = extensions[OID.subjectKeyIdentifier],
+              let node = try? DERNode.parse(raw), node.tag == 0x04 else { return nil }
+        return node.content
+    }
+
+    /// The identifier of the key that signed this certificate.
+    public var authorityKeyID: Data? {
+        guard let raw = extensions[OID.authorityKeyIdentifier],
+              let seq = try? DERNode.parse(raw),
+              let id = seq.children.first(where: { $0.tag == 0x80 }) else { return nil }
+        return id.content
+    }
+
+    /// Checks whether `issuer`'s key produced this certificate's signature.
+    /// Only RSA issuers can be checked; anything else returns nil (unknown).
+    public func isSigned(by issuer: Certificate) -> Bool? {
+        guard let top = try? DERNode.parse(der), top.children.count >= 3,
+              let algoOID = top.children[1].child(0)?.oid else { return nil }
+        let kind: HashKind
+        switch algoOID {
+        case OID.sha256WithRSA: kind = .sha256
+        case OID.sha1WithRSA: kind = .sha1
+        default: return nil
+        }
+        guard (try? RSAPrivateKey.publicModulus(spki: issuer.publicKeyDER)) != nil else { return nil }
+        return RSAPrivateKey.verify(signature: top.children[2].bitString, message: tbs, kind,
+                                    spki: issuer.publicKeyDER)
+    }
+
     /// Where to ask Apple whether this certificate has been pulled.
     public var ocspURL: URL? {
         guard let aia = extensions[OID.authorityInfoAccess],

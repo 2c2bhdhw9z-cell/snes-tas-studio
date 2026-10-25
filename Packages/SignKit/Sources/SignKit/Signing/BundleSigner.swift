@@ -37,20 +37,22 @@ public final class BundleSigner {
         }
         let bundleID = info["CFBundleIdentifier"] as? String ?? "unknown"
 
-        // 1. Everything nested inside, innermost first.
-        let nested = try nestedCode(in: bundle)
+        // 1. Everything nested inside, innermost first: bundles sign their own insides.
+        let items = try nestedItems(in: bundle)
+        let nested = items.bundles + items.loose
         var cdHashes = [String: Data]()
         for (i, rel) in nested.enumerated() {
             report(Double(i) / Double(max(nested.count, 1)) * 0.6, "Signing \(URL(fileURLWithPath: rel).lastPathComponent)")
             let url = bundle.appendingPathComponent(rel)
-            if url.pathExtension == "framework" || url.pathExtension == "appex" || url.pathExtension == "app" {
+            if items.bundles.contains(rel) {
                 let child = BundleSigner(key: key, chain: chain, profile: profile)
                 child.hashKind = hashKind
                 child.adhoc = adhoc
                 // Extensions get their own app identifier, derived from the parent's.
                 var childEnts: [String: Any]?
-                if let ents = entitlements, let childInfo = try? infoPlist(of: url),
-                   let childID = childInfo["CFBundleIdentifier"] as? String {
+                let kind = url.pathExtension
+                if kind == "appex" || kind == "app", let ents = entitlements,
+                   let childInfo = try? infoPlist(of: url), let childID = childInfo["CFBundleIdentifier"] as? String {
                     childEnts = profile?.entitlements(forBundleID: childID) ?? ents
                 }
                 cdHashes[rel] = try child.sign(bundle: url, entitlements: childEnts)
@@ -109,11 +111,8 @@ public final class BundleSigner {
     func report(_ f: Double, _ m: String) { onProgress?(Progress(fraction: f, message: m)) }
 
     func write(_ data: Data, to url: URL) throws {
-        let perms = try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
         try data.write(to: url)
-        if let p = perms ?? NSNumber(value: 0o755) as NSNumber? {
-            try? FileManager.default.setAttributes([.posixPermissions: p], ofItemAtPath: url.path)
-        }
+        MachOFileSigner.makeRunnable(url)
     }
 
     public func infoPlist(of bundle: URL) throws -> [String: Any] {
@@ -124,28 +123,44 @@ public final class BundleSigner {
         return d
     }
 
-    /// Relative paths of everything inside the bundle that is itself code,
-    /// deepest first so children are signed before their parents.
-    public func nestedCode(in bundle: URL) throws -> [String] {
+    /// What is inside a bundle that needs its own signature: nested bundles (frameworks,
+    /// extensions, watch apps) and loose program files — wherever they are.
+    ///
+    /// Emulator cores, plug-ins and helper libraries are often tucked into folders that are
+    /// not the standard ones. `zsign` finds them by looking at every file; so do we.
+    /// Anything inside a nested bundle is left for that bundle's own signing run.
+    public func nestedItems(in bundle: URL) throws -> (bundles: [String], loose: [String]) {
         let fm = FileManager.default
-        var found = [String]()
-        let dirs = ["Frameworks", "PlugIns", "Plug-ins", "XPCServices", "SystemExtensions", "Extensions", "Watch"]
-        for dir in dirs {
-            let base = bundle.appendingPathComponent(dir)
-            guard let items = try? fm.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else { continue }
-            for item in items.sorted(by: { $0.path < $1.path }) {
-                let rel = "\(dir)/\(item.lastPathComponent)"
-                switch item.pathExtension {
-                case "framework", "appex", "app", "xpc", "systemextension":
-                    found.append(rel)
-                case "dylib", "so":
-                    found.append(rel)
-                default:
-                    if MachOFile.isMachO(url: item) { found.append(rel) }
+        let nestedKinds: Set<String> = ["framework", "appex", "app", "xpc", "systemextension", "xctest"]
+        let mainExec = (try? infoPlist(of: bundle))?["CFBundleExecutable"] as? String
+        var bundles = [String](), loose = [String]()
+        let base = bundle.standardizedFileURL.path
+        guard let walker = fm.enumerator(at: bundle, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+                                         options: []) else { return ([], []) }
+        for case let url as URL in walker {
+            let rel = String(url.standardizedFileURL.path.dropFirst(base.count + 1))
+            let vals = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if vals?.isSymbolicLink == true { continue }
+            let name = url.lastPathComponent
+            if vals?.isDirectory == true {
+                if name == "_CodeSignature" || name.hasSuffix(".dSYM") || name == "_WatchKitStub" || name == "SC_Info" {
+                    walker.skipDescendants(); continue
                 }
+                if nestedKinds.contains(url.pathExtension), url != bundle {
+                    bundles.append(rel)
+                    walker.skipDescendants()
+                }
+                continue
             }
+            if rel == mainExec { continue }
+            if MachOFile.isSignable(url: url) { loose.append(rel) }
         }
-        // Deepest paths first.
-        return found.sorted { $0.components(separatedBy: "/").count > $1.components(separatedBy: "/").count }
+        return (bundles, loose)
+    }
+
+    /// Kept for callers that want one flat list, deepest first.
+    public func nestedCode(in bundle: URL) throws -> [String] {
+        let items = try nestedItems(in: bundle)
+        return (items.bundles + items.loose).sorted { $0.components(separatedBy: "/").count > $1.components(separatedBy: "/").count }
     }
 }

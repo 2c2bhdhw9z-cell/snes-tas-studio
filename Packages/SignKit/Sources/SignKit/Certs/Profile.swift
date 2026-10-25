@@ -94,6 +94,12 @@ public struct ProvisioningProfile {
     /// The entitlements to sign the app with, with the app identifier rewritten for a new bundle ID.
     public func entitlements(forBundleID bundleID: String) -> [String: Any] {
         var e = entitlements
+        // A profile grants some things as "any" (a bare *), for example associated domains.
+        // That is a permission slip, not a value an app can carry, so it stays out.
+        for (key, value) in e {
+            if let s = value as? String, s == "*" { e[key] = nil }
+            else if let a = value as? [String], !a.isEmpty, a.allSatisfy({ $0 == "*" }) { e[key] = nil }
+        }
         guard let team = teamID else { return e }
         e["application-identifier"] = "\(team).\(bundleID)"
         if e["com.apple.developer.team-identifier"] == nil { e["com.apple.developer.team-identifier"] = team }

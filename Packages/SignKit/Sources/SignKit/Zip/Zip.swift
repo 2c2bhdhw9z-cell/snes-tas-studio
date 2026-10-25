@@ -286,9 +286,9 @@ public final class ZipWriter {
         var local = Data()
         local.put32le(0x0403_4b50)
         local.put16le(zip64 ? 45 : 20)   // version needed
-        local.put16le(0)                 // flags
+        local.put16le(Zip.nameFlags(name)) // flags (UTF-8 names)
         local.put16le(method)
-        local.put16le(0); local.put16le(0)  // dos time/date (fixed, keeps output reproducible)
+        local.put16le(Zip.stampTime); local.put16le(Zip.stampDate)
         local.put32le(crc)
         local.put32le(UInt32(min(payload.count, 0xffff_ffff)))
         local.put32le(UInt32(min(raw.count, 0xffff_ffff)))
@@ -305,9 +305,9 @@ public final class ZipWriter {
         central.put32le(0x0201_4b50)
         central.put16le(0x031e)          // made by unix
         central.put16le(zip64 ? 45 : 20)
-        central.put16le(0)
+        central.put16le(Zip.nameFlags(name))
         central.put16le(method)
-        central.put16le(0); central.put16le(0)
+        central.put16le(Zip.stampTime); central.put16le(Zip.stampDate)
         central.put32le(crc)
         central.put32le(UInt32(min(payload.count, 0xffff_ffff)))
         central.put32le(UInt32(min(raw.count, 0xffff_ffff)))
@@ -362,9 +362,9 @@ public final class ZipWriter {
         var local = Data()
         local.put32le(0x0403_4b50)
         local.put16le(localZip64 ? 45 : 20)
-        local.put16le(0)
+        local.put16le(Zip.nameFlags(name))
         local.put16le(compress ? 8 : 0)
-        local.put16le(0); local.put16le(0)
+        local.put16le(Zip.stampTime); local.put16le(Zip.stampDate)
         local.put32le(0)                                // checksum, patched later
         local.put32le(localZip64 ? 0xffff_ffff : 0)     // compressed size
         local.put32le(localZip64 ? 0xffff_ffff : UInt32(fileSize))
@@ -382,7 +382,7 @@ public final class ZipWriter {
         try out.seek(toOffset: UInt64(localOffset + 8))
         var patch = Data()
         patch.put16le(method)
-        patch.put16le(0); patch.put16le(0)
+        patch.put16le(Zip.stampTime); patch.put16le(Zip.stampDate)
         patch.put32le(crc)
         patch.put32le(localZip64 ? 0xffff_ffff : UInt32(written))
         try out.write(contentsOf: patch)
@@ -414,9 +414,9 @@ public final class ZipWriter {
         central.put32le(0x0201_4b50)
         central.put16le(0x031e)
         central.put16le(needsZip64 ? 45 : 20)
-        central.put16le(0)
+        central.put16le(Zip.nameFlags(name))
         central.put16le(method)
-        central.put16le(0); central.put16le(0)
+        central.put16le(Zip.stampTime); central.put16le(Zip.stampDate)
         central.put32le(crc)
         central.put32le(UInt32(min(written, 0xffff_ffff)))
         central.put32le(UInt32(min(fileSize, 0xffff_ffff)))
@@ -512,6 +512,18 @@ public final class ZipWriter {
 }
 
 public enum Zip {
+    /// Names with accents or other non-ASCII letters must be flagged as UTF-8, or strict
+    /// readers decode them as old DOS text and the file no longer matches the resource list.
+    static func nameFlags(_ name: String) -> UInt16 {
+        name.utf8.contains { $0 > 127 } ? 0x0800 : 0
+    }
+
+    /// Every entry carries the same real date (1 January 2026, 00:00). A date of zero is
+    /// not a valid calendar date, and strict readers can object to it. A fixed one also
+    /// keeps the output identical from run to run.
+    static let stampTime: UInt16 = 0
+    static let stampDate: UInt16 = UInt16((2026 - 1980) << 9 | 1 << 5 | 1)
+
     static func dosDate(_ time: UInt16, _ date: UInt16) -> Date? {
         guard date != 0 else { return nil }
         var c = DateComponents()

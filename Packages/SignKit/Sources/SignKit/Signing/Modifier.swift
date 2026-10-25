@@ -220,6 +220,7 @@ struct Modifier {
             }
             try file.forEachSlice(edit)
             try file.encoded().write(to: target)
+            MachOFileSigner.makeRunnable(target)
         }
 
         // Tweaks themselves often link Substrate; point them at the bundled copy.
@@ -234,6 +235,7 @@ struct Modifier {
                     try slice.addRpath("@executable_path/Frameworks")
                 }
                 try lib.encoded().write(to: url)
+                MachOFileSigner.makeRunnable(url)
             }
         }
     }

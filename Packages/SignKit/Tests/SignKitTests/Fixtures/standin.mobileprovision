@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AppIDName</key>
+	<string>Stand-in App</string>
+	<key>ApplicationIdentifierPrefix</key>
+	<array>
+		<string>3KQD4FN5YL</string>
+	</array>
+	<key>CreationDate</key>
+	<date>2026-03-07T12:05:00Z</date>
+	<key>DeveloperCertificates</key>
+	<array>
+		<data>
+		MIIEPzCCAyegAwIBAgIMKLEH2ikzTJi6xherMA0GCSqGSIb3DQEBCwUAMHUx
+		RDBCBgNVBAMMO0FwcGxlIFdvcmxkd2lkZSBEZXZlbG9wZXIgUmVsYXRpb25z
+		IENlcnRpZmljYXRpb24gQXV0aG9yaXR5MQswCQYDVQQLDAJHMzETMBEGA1UE
+		CgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwHhcNMjYwMzA3MTIwMDAwWhcN
+		MjcwMzA3MTIwMDAwWjCBlDEaMBgGCgmSJomT8ixkAQEMCkExQjJDM0Q0RTUx
+		NzA1BgNVBAMMLmlQaG9uZSBEZXZlbG9wZXI6IENyZWF0ZWQgdmlhIEFQSSAo
+		M0tRRDRGTjVZTCkxEzARBgNVBAsMCjNLUUQ0Rk41WUwxGzAZBgNVBAoMElN0
+		YW5kLWluIFRlc3QgVGVhbTELMAkGA1UEBhMCVVMwggEiMA0GCSqGSIb3DQEB
+		AQUAA4IBDwAwggEKAoIBAQDK42ToNkPVaG3fI0hXVnCQEMVp6Llv3wb2/Klm
+		B3XJeynnESPFApJZJzFJ2r8fsuyhZe1tZnqQcW+tzzzifPxC/I93tbz3oVVz
+		RxFdIC1RtDnww0TA1wYPorCk8AZF5AA7cAHn5sdQ5jYsIo8nGFFCTyjGekB2
+		tHbdv3kYUD4woMTDMh0ShDQ9rR7xgp+45sJF9rywLocmqGBXCRNnG91Ul/Lo
+		GVU3F0NyU48BZpNzBzJ/dz8VZap1yToswDRsTooDpfbamnS6qPQ0PcAu3PFx
+		Hy3ssJGvvRSJi7zsJE8Yj1G8Pg7blm9qAeHXbuBtEKvD+XyhHgC33brvYGwq
+		OTKnAgMBAAGjga4wgaswHwYDVR0jBBgwFoAUCf7AFZD5r2QKkhK5JihjDJfs
+		p7IwHQYDVR0OBBYEFH4Kh4EGq9Xoi/69vLXCVnfKF5nrMA4GA1UdDwEB/wQE
+		AwIHgDAWBgNVHSUBAf8EDDAKBggrBgEFBQcDAzBBBggrBgEFBQcBAQQ1MDMw
+		MQYIKwYBBQUHMAGGJWh0dHA6Ly9vY3NwLmFwcGxlLmNvbS9vY3NwMDMtd3dk
+		cmczMDEwDQYJKoZIhvcNAQELBQADggEBABx68NK0vTEHy/qSNU1Ba2GSWQLQ
+		RlaqJtQPshSYbWwj0sccO3cyxn6akm+dDZkUYQubphaCL4+I4uTMB8zB4HKQ
+		doj7JJPt5wv8XJlUh9HaGn3IfcHqW98QnvpBmJmtA7i5wIj97E1rOB3qSLu5
+		rjBdYhRhqZxmsg74toK3NEbQHjy+tdiap/T+LvTWXTUlWzIx/M6BCC3c9Aft
+		HWRXpSOwQvoiiUI1BCN+MGPcfYPvPDItYtsxbLhEOsEvFKspLhpKyOaZZRPB
+		gjapqcshhtQLDcdOorOCaXb6L5MszN2fieAw1iWg0fkWmKb7tka8UNTdSbbx
+		lllyLPxCOy6Q3F0=
+		</data>
+	</array>
+	<key>Entitlements</key>
+	<dict>
+		<key>application-identifier</key>
+		<string>3KQD4FN5YL.app.sweetpotato2703.cancer3985</string>
+		<key>com.apple.developer.associated-domains</key>
+		<string>*</string>
+		<key>com.apple.developer.team-identifier</key>
+		<string>3KQD4FN5YL</string>
+		<key>get-task-allow</key>
+		<true/>
+		<key>keychain-access-groups</key>
+		<array>
+			<string>3KQD4FN5YL.*</string>
+		</array>
+	</dict>
+	<key>ExpirationDate</key>
+	<date>2027-03-07T12:05:00Z</date>
+	<key>Name</key>
+	<string>Stand-in Development Profile</string>
+	<key>Platform</key>
+	<array>
+		<string>iOS</string>
+	</array>
+	<key>ProvisionedDevices</key>
+	<array>
+		<string>00008110-000A1B2C3D4E901E</string>
+	</array>
+	<key>TeamIdentifier</key>
+	<array>
+		<string>3KQD4FN5YL</string>
+	</array>
+	<key>TeamName</key>
+	<string>Stand-in Test Team</string>
+	<key>TimeToLive</key>
+	<integer>365</integer>
+	<key>UUID</key>
+	<string>E0514E4C-B526-4D00-8564-A92DF7910E00</string>
+	<key>Version</key>
+	<integer>1</integer>
+</dict>
+</plist>

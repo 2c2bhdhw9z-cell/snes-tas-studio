@@ -216,6 +216,29 @@ public struct MachOFile {
         return true
     }
 
+    /// True for the kinds of file iOS wants signed: programs, libraries and plug-in bundles.
+    /// Object files, debug symbols and `.a` archives are not signable and are left alone.
+    public static func isSignable(url: URL) -> Bool {
+        guard let h = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? h.close() }
+        let head = h.readData(ofLength: 64)
+        guard head.count >= 32 else { return false }
+        let be = head.u32be(0)
+        var header = head
+        if be == 0xcafebabe || be == 0xcafebabf {
+            let n = head.u32be(4)
+            guard n > 0, n < 32 else { return false }                 // Java class files share this magic
+            let offset = be == 0xcafebabf ? Int(head.u64be(16)) : Int(head.u32be(16))
+            guard (try? h.seek(toOffset: UInt64(offset))) != nil else { return false }
+            header = h.readData(ofLength: 32)
+            guard header.count >= 16 else { return false }
+        }
+        let m = header.u32le(0)
+        guard m == 0xfeedfacf || m == 0xfeedface else { return false }
+        let fileType = header.u32le(12)
+        return fileType == 2 || fileType == 6 || fileType == 8       // executable, dylib, bundle
+    }
+
     /// Rebuilds the file bytes from the slices.
     public func encoded() -> Data {
         if !isFat { return slices[0].data }

@@ -118,6 +118,53 @@ final class BundleTests: XCTestCase {
         XCTAssertEqual(special(Int(CSSlot.resourceDir)), sha256(try Data(contentsOf: crURL)))
     }
 
+    /// Emulator cores and helper libraries are often tucked into folders that are not the
+    /// standard ones. Every one of them must still be found and signed.
+    func testProgramFilesInUnusualFoldersAreSignedToo() throws {
+        let app = try makeBundle()
+        defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+        let fm = FileManager.default
+        let binary = try machO()
+        // Loose libraries in made-up folders, a framework in a made-up folder, a nested bundle
+        // with its own library, and a file named like a library that is not one.
+        for path in ["Cores/gba_core.dylib", "Resources/libs/helper.dylib", "libroot.dylib", "Deep/er/x/lib.so"] {
+            let url = app.appendingPathComponent(path)
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try binary.write(to: url)
+        }
+        let odd = app.appendingPathComponent("Support/Odd.framework")
+        try fm.createDirectory(at: odd, withIntermediateDirectories: true)
+        try binary.write(to: odd.appendingPathComponent("Odd"))
+        try write(["CFBundleIdentifier": "com.continuum.demo.odd", "CFBundleExecutable": "Odd", "CFBundleName": "Odd"],
+                  to: odd.appendingPathComponent("Info.plist"))
+        try Data("not a library".utf8).write(to: app.appendingPathComponent("Cores/readme.dylib"))
+        try Data("!<arch>\n".utf8).write(to: app.appendingPathComponent("Cores/libstatic.a"))
+
+        let items = try BundleSigner(key: nil, chain: [], profile: nil).nestedItems(in: app)
+        XCTAssertTrue(items.bundles.contains("Support/Odd.framework"))
+        XCTAssertTrue(items.bundles.contains("Frameworks/Demo.framework"))
+        for rel in ["Cores/gba_core.dylib", "Resources/libs/helper.dylib", "libroot.dylib", "Deep/er/x/lib.so",
+                    "Frameworks/libtweak.dylib"] {
+            XCTAssertTrue(items.loose.contains(rel), "\(rel) must be found")
+        }
+        XCTAssertFalse(items.loose.contains("Cores/readme.dylib"), "text named .dylib is not a program")
+        XCTAssertFalse(items.loose.contains("Cores/libstatic.a"))
+        XCTAssertFalse(items.loose.contains("Demo"), "the app's own program is signed last, separately")
+        XCTAssertFalse(items.loose.contains { $0.hasPrefix("Frameworks/Demo.framework/") }, "inside a bundle is left to it")
+
+        let (key, cert) = try identity()
+        let signer = BundleSigner(key: key, chain: [cert], profile: nil)
+        try signer.sign(bundle: app)
+        for rel in ["Cores/gba_core.dylib", "Resources/libs/helper.dylib", "libroot.dylib", "Deep/er/x/lib.so",
+                    "Support/Odd.framework/Odd", "Frameworks/Demo.framework/Demo"] {
+            let data = try Data(contentsOf: app.appendingPathComponent(rel))
+            XCTAssertNotNil(try MachOFile(data: data).slices[0].existingSignature, "\(rel) must be signed")
+        }
+        // And the installer-style check agrees there is nothing unsigned left anywhere.
+        let report = SignatureInspector.check(app: app, profile: nil)
+        XCTAssertFalse(report.problems.contains { $0.kind == .structure }, report.summary)
+    }
+
     func testNestedCodeIsFoundDeepestFirst() throws {
         let app = try makeBundle()
         defer { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }

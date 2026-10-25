@@ -106,6 +106,15 @@ case "sign-ipa":
       cdhash: \(result.cdhash.hex)
     """)
     for w in result.warnings { print("  warning: \(w)") }
+case "check":
+    // check <App.app> [profile.mobileprovision]   — look the app over the way the installer does
+    guard args.count >= 2 else { print("usage: signkit-cli check <App.app> [profile]"); exit(2) }
+    let profile = args.count > 2 ? try ProvisioningProfile(url: URL(fileURLWithPath: args[2])) : nil
+    let report = SignatureInspector.check(app: URL(fileURLWithPath: args[1]), profile: profile)
+    print("checked \(report.binariesChecked) program files and \(report.filesChecked) listed resources")
+    if report.isClean { print("CLEAN: nothing the installer would refuse") }
+    for p in report.problems { print("PROBLEM [\(p.kind.rawValue)] \(p)") }
+    exit(report.isClean ? 0 : 1)
 default:
     usage()
 }

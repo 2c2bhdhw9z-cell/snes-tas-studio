@@ -129,7 +129,8 @@ public struct MachOSigner {
                                hashKind: options.hashKind, codeLimit: codeLimit)
         cd.execSegBase = textSegment?.fileoff ?? 0
         cd.execSegLimit = textSegment?.filesize ?? 0
-        cd.execSegFlags = slice.isExecutable ? 1 : 0   // main binary flag
+        cd.execSegFlags = MachOSigner.execSegFlags(isExecutable: slice.isExecutable,
+                                                   entitlements: options.entitlements)
         cd.flags = options.adhoc ? CSFlags.adhoc : 0
         cd.hashCode(of: slice.data)
 
@@ -137,14 +138,14 @@ public struct MachOSigner {
         let requirements = options.adhoc
             ? Requirement.emptySet()
             : Requirement.set(designated: Requirement.designated(identifier: options.identifier,
-                                                                 teamID: options.teamID))
+                                                                 subjectCN: chain.first?.commonName ?? ""))
         cd.specialHashes[CSSlot.requirements] = Hasher.hash(options.hashKind, requirements.encoded)
         if let h = options.infoPlistHash { cd.specialHashes[CSSlot.infoPlist] = h }
         if let h = options.resourcesHash { cd.specialHashes[CSSlot.resourceDir] = h }
 
         var xmlBlob: Blob?
         var derBlob: Blob?
-        if let ents = options.entitlements, !ents.isEmpty {
+        if let ents = options.entitlements.map({ Entitlements.storable($0).kept }), !ents.isEmpty {
             xmlBlob = try Entitlements.xmlBlob(ents)
             derBlob = try Entitlements.derBlob(ents)
             cd.specialHashes[CSSlot.entitlements] = Hasher.hash(options.hashKind, xmlBlob!.encoded)
@@ -164,6 +165,17 @@ public struct MachOSigner {
             sb.add(CSSlot.signatureSlot, Blob.wrapper(Data()))
         }
         return sb.encoded()
+    }
+
+    /// Apple's flags for the executable segment: bit 0 marks the main program, and bit 4
+    /// ("allow unsigned") is set only for debuggable builds, i.e. `get-task-allow` = true.
+    /// `zsign` and Apple's tool do the same.
+    static func execSegFlags(isExecutable: Bool, entitlements: [String: Any]?) -> UInt64 {
+        guard isExecutable else { return 0 }
+        var flags: UInt64 = 0x1
+        if let allow = entitlements?["get-task-allow"] as? Bool, allow { flags |= 0x10 }
+        else if let n = entitlements?["get-task-allow"] as? NSNumber, n.boolValue { flags |= 0x10 }
+        return flags
     }
 
     func estimateSize(codeLimit: Int, options: Options) -> Int {

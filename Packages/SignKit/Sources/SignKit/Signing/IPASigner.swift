@@ -113,6 +113,15 @@ public final class IPASigner {
         }
         cdhash = try signer.sign(bundle: app, entitlements: entitlements.isEmpty ? nil : entitlements)
 
+        // Look the finished app over the way the iPhone's installer will. When iOS refuses an
+        // app it only ever says "integrity could not be verified"; this says what is actually
+        // wrong. Very large apps skip re-reading every page, since the signer has just
+        // computed those hashes from the final bytes.
+        onProgress?(0.77, "Checking the finished app")
+        let inspection = SignatureInspector.check(app: app, profile: identity?.profile,
+                                                  deep: unpackedSize < 200 << 20)
+        for problem in inspection.problems { warnings.append("Check failed — " + problem.description) }
+
         // 4. Pack back up
         onProgress?(0.8, "Packing the app back up")
         let writer = try ZipWriter(url: output)
