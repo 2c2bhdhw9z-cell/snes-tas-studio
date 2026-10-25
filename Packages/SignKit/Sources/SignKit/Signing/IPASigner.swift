@@ -39,9 +39,28 @@ public final class IPASigner {
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: work) }
 
-        // 1. Unpack
+        let inputSize = (try? fm.attributesOfItem(atPath: ipa.path)[.size] as? Int) ?? 0
+        let freeSpace = (try? fm.attributesOfFileSystem(forPath: work.path)[.systemFreeSize] as? Int) ?? 0
+
+        // 1. Open the zip and calculate the real peak space. A compressed 2 GB app
+        // can unpack much larger; guessing from the .ipa size is not safe.
         onProgress?(0.02, "Opening the app")
         let reader = try ZipReader(url: ipa)
+        let unpackedSize = reader.entries.reduce(Int64(0)) { total, entry in
+            total.addingReportingOverflow(Int64(entry.uncompressedSize)).overflow
+                ? Int64.max : total + Int64(entry.uncompressedSize)
+        }
+        let largestFile = Int64(reader.entries.map(\.uncompressedSize).max() ?? 0)
+        let safety = max(Int64(256 << 20), Int64(inputSize / 10))
+        let needed = unpackedSize.addingReportingOverflow(largestFile).overflow
+            ? Int64.max : unpackedSize + largestFile + safety
+        if freeSpace > 0, needed > Int64(freeSpace) {
+            let needText = ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)
+            let haveText = ByteCountFormatter.string(fromByteCount: Int64(freeSpace), countStyle: .file)
+            throw SignKitError.io("not enough room on the phone: this app needs about \(needText) free "
+                                  + "while it is being signed, and there is \(haveText).")
+        }
+
         try reader.extractAll(to: work) { f, name in
             self.onProgress?(0.02 + f * 0.25, "Unpacking \(name.split(separator: "/").last.map(String.init) ?? "")")
         }
@@ -79,7 +98,8 @@ public final class IPASigner {
         // 4. Pack back up
         onProgress?(0.8, "Packing the app back up")
         let writer = try ZipWriter(url: output)
-        try writer.addTree(at: payload, prefix: "Payload/", compress: options.compressOutput) { f, name in
+        try writer.addTree(at: payload, prefix: "Payload/", compress: options.compressOutput,
+                           removeAfterWriting: true) { f, name in
             self.onProgress?(0.8 + f * 0.19, "Packing \(name.split(separator: "/").last.map(String.init) ?? "")")
         }
         try writer.finish()
@@ -92,7 +112,7 @@ public final class IPASigner {
             displayName: (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String) ?? appName,
             version: (info["CFBundleShortVersionString"] as? String) ?? "",
             cdhash: cdhash,
-            bytes: size ?? 0,
+            bytes: size,
             duration: Date().timeIntervalSince(started),
             warnings: warnings
         )

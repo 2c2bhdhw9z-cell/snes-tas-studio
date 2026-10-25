@@ -121,6 +121,50 @@ public final class ZipReader {
         return nil
     }
 
+    /// Reads just the first `limit` bytes of an entry. Used to look at a huge app
+    /// binary's header without unpacking a gigabyte of it.
+    public func head(of entry: ZipEntry, limit: Int) throws -> Data {
+        let start = try dataOffset(of: entry)
+        if entry.method == 0 {
+            return try read(at: start, min(limit, entry.compressedSize))
+        }
+        // Feed the compressed bytes in until enough has come out.
+        var stream = z_stream()
+        guard inflateInit2_(&stream, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+            throw SignKitError.crypto("cannot start decompression")
+        }
+        defer { inflateEnd(&stream) }
+        var out = Data()
+        var fed = 0
+        var buffer = [UInt8](repeating: 0, count: 1 << 16)
+        while out.count < limit && fed < entry.compressedSize {
+            let want = min(1 << 18, entry.compressedSize - fed)
+            var input = try read(at: start + fed, want)
+            fed += want
+            var done = false
+            input.withUnsafeMutableBytes { inPtr in
+                stream.next_in = inPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                stream.avail_in = UInt32(inPtr.count)
+                while stream.avail_in > 0 && out.count < limit && !done {
+                    let produced = buffer.withUnsafeMutableBufferPointer { bp -> Int in
+                        stream.next_out = bp.baseAddress
+                        stream.avail_out = UInt32(bp.count)
+                        let status = CZlib.inflate(&stream, Z_NO_FLUSH)
+                        if status == Z_STREAM_END || (status != Z_OK && status != Z_BUF_ERROR) { done = true }
+                        return bp.count - Int(stream.avail_out)
+                    }
+                    if produced > 0 {
+                        out.append(contentsOf: buffer[0..<produced])
+                    } else if done {
+                        break
+                    }
+                }
+            }
+            if done { break }
+        }
+        return out.prefix(limit)
+    }
+
     /// Reads and decompresses one entry.
     public func data(for entry: ZipEntry) throws -> Data {
         let local = try read(at: entry.localHeaderOffset, 30)
@@ -131,6 +175,35 @@ public final class ZipReader {
         case 0: return raw
         case 8: return try Zip.inflate(raw, expected: entry.uncompressedSize)
         default: throw SignKitError.unsupported("compression method \(entry.method) in \(entry.name)")
+        }
+    }
+
+    /// Where an entry's bytes start in the file.
+    func dataOffset(of entry: ZipEntry) throws -> Int {
+        let local = try read(at: entry.localHeaderOffset, 30)
+        guard local.u32le(0) == 0x0403_4b50 else {
+            throw SignKitError.malformed("bad local header for \(entry.name)")
+        }
+        return entry.localHeaderOffset + 30 + Int(local.u16le(26)) + Int(local.u16le(28))
+    }
+
+    /// Unpacks one entry straight to disk without holding it in memory.
+    public func extract(_ entry: ZipEntry, to dest: URL) throws {
+        let start = try dataOffset(of: entry)
+        let fm = FileManager.default
+        try? fm.removeItem(at: dest)
+        guard fm.createFile(atPath: dest.path, contents: nil),
+              let outHandle = try? FileHandle(forWritingTo: dest) else {
+            throw SignKitError.io("cannot write \(dest.lastPathComponent)")
+        }
+        defer { try? outHandle.close() }
+        guard entry.method == 0 || entry.method == 8 else {
+            throw SignKitError.unsupported("compression method \(entry.method) in \(entry.name)")
+        }
+        let crc = try ZipStream.inflate(from: handle, offset: start, count: entry.compressedSize,
+                                        to: outHandle, stored: entry.method == 0)
+        guard crc == entry.crc32 else {
+            throw SignKitError.malformed("\(entry.name) came out damaged")
         }
     }
 
@@ -147,6 +220,17 @@ public final class ZipReader {
                 continue
             }
             try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+            // Anything sizeable goes straight to disk in chunks.
+            if !e.isSymlink && e.uncompressedSize > 8 << 20 {
+                try extract(e, to: dest)
+                let mode = e.unixMode & 0o7777
+                if mode != 0 {
+                    try? fm.setAttributes([.posixPermissions: NSNumber(value: mode)], ofItemAtPath: dest.path)
+                }
+                continue
+            }
+
             let d = try data(for: e)
             if e.isSymlink, let target = String(data: d, encoding: .utf8) {
                 try? fm.removeItem(at: dest)
@@ -165,7 +249,7 @@ public final class ZipReader {
 
 /// Writes a zip. Used to repack a signed app.
 public final class ZipWriter {
-    private var out: FileHandle
+    fileprivate var out: FileHandle
     private var offset = 0
     private var central = Data()
     private var count = 0
@@ -213,6 +297,7 @@ public final class ZipWriter {
         local.append(nameBytes)
         try write(local)
         try write(payload)
+        let payloadBytes = payload.count
 
         var attrs = UInt32(isSymlink ? 0xa000 | UInt32(mode & 0o7777) : 0x8000 | UInt32(mode & 0o7777)) << 16
         if name.hasSuffix("/") { attrs = (0x4000 | UInt32(mode & 0o7777)) << 16 | 0x10 }
@@ -226,14 +311,124 @@ public final class ZipWriter {
         central.put32le(crc)
         central.put32le(UInt32(min(payload.count, 0xffff_ffff)))
         central.put32le(UInt32(min(raw.count, 0xffff_ffff)))
+        var extra = Data()
+        if zip64 {
+            extra.put16le(0x0001)
+            extra.put16le(16)
+            extra.put64le(UInt64(raw.count))
+            extra.put64le(UInt64(payloadBytes))
+        }
+        if localOffset >= 0xffff_ffff {
+            if extra.isEmpty {
+                extra.put16le(0x0001)
+                extra.put16le(8)
+            } else {
+                extra.set16le(2, UInt16(Int(extra.u16le(2)) + 8))
+            }
+            extra.put64le(UInt64(localOffset))
+        }
         central.put16le(UInt16(nameBytes.count))
-        central.put16le(0)               // extra length (filled below for zip64)
+        central.put16le(UInt16(extra.count))
         central.put16le(0)               // comment
         central.put16le(0)               // disk
         central.put16le(0)               // internal attrs
         central.put32le(attrs)
         central.put32le(UInt32(min(localOffset, 0xffff_ffff)))
         central.append(nameBytes)
+        central.append(extra)
+        count += 1
+    }
+
+    /// Adds a file by streaming it through, so a very large app binary never has to
+    /// sit in memory. The header is written first and patched afterwards.
+    public func addFile(name: String, url: URL, mode: UInt16, compress: Bool) throws {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            throw SignKitError.io("cannot read \(url.lastPathComponent)")
+        }
+        defer { try? handle.close() }
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        let nameBytes = Data(name.utf8)
+        let localOffset = offset
+
+        let localZip64 = fileSize >= 0xffff_0000
+        var localExtra = Data()
+        if localZip64 {
+            localExtra.put16le(0x0001)
+            localExtra.put16le(16)
+            localExtra.put64le(UInt64(fileSize))
+            localExtra.put64le(0)                       // compressed size, patched later
+        }
+
+        var local = Data()
+        local.put32le(0x0403_4b50)
+        local.put16le(localZip64 ? 45 : 20)
+        local.put16le(0)
+        local.put16le(compress ? 8 : 0)
+        local.put16le(0); local.put16le(0)
+        local.put32le(0)                                // checksum, patched later
+        local.put32le(localZip64 ? 0xffff_ffff : 0)     // compressed size
+        local.put32le(localZip64 ? 0xffff_ffff : UInt32(fileSize))
+        local.put16le(UInt16(nameBytes.count))
+        local.put16le(UInt16(localExtra.count))
+        local.append(nameBytes)
+        local.append(localExtra)
+        try write(local)
+
+        let (crc, written, method) = try ZipStream.deflate(file: handle, size: fileSize,
+                                                           to: out, compress: compress)
+        offset += written
+
+        // Go back and fill in what we only knew once the data was written.
+        try out.seek(toOffset: UInt64(localOffset + 8))
+        var patch = Data()
+        patch.put16le(method)
+        patch.put16le(0); patch.put16le(0)
+        patch.put32le(crc)
+        patch.put32le(localZip64 ? 0xffff_ffff : UInt32(written))
+        try out.write(contentsOf: patch)
+        if localZip64 {
+            try out.seek(toOffset: UInt64(localOffset + 30 + nameBytes.count + 4))
+            var sizes = Data()
+            sizes.put64le(UInt64(fileSize))
+            sizes.put64le(UInt64(written))
+            try out.write(contentsOf: sizes)
+        }
+        try out.seek(toOffset: UInt64(offset))
+
+        // ZIP64 values must appear only for fixed fields carrying 0xffffffff, and
+        // in that same order. If only the offset crossed 4 GB, writing sizes first
+        // makes other unzip tools mistake the file size for its offset.
+        let needsZip64 = fileSize >= 0xffff_ffff || written >= 0xffff_ffff || localOffset >= 0xffff_ffff
+        var extra = Data()
+        var zip64Values = Data()
+        if fileSize >= 0xffff_ffff { zip64Values.put64le(UInt64(fileSize)) }
+        if written >= 0xffff_ffff { zip64Values.put64le(UInt64(written)) }
+        if localOffset >= 0xffff_ffff { zip64Values.put64le(UInt64(localOffset)) }
+        if !zip64Values.isEmpty {
+            extra.put16le(0x0001)
+            extra.put16le(UInt16(zip64Values.count))
+            extra.append(zip64Values)
+        }
+
+        let attrs = UInt32(0x8000 | UInt32(mode & 0o7777)) << 16
+        central.put32le(0x0201_4b50)
+        central.put16le(0x031e)
+        central.put16le(needsZip64 ? 45 : 20)
+        central.put16le(0)
+        central.put16le(method)
+        central.put16le(0); central.put16le(0)
+        central.put32le(crc)
+        central.put32le(UInt32(min(written, 0xffff_ffff)))
+        central.put32le(UInt32(min(fileSize, 0xffff_ffff)))
+        central.put16le(UInt16(nameBytes.count))
+        central.put16le(UInt16(extra.count))
+        central.put16le(0)
+        central.put16le(0)
+        central.put16le(0)
+        central.put32le(attrs)
+        central.put32le(UInt32(min(localOffset, 0xffff_ffff)))
+        central.append(nameBytes)
+        central.append(extra)
         count += 1
     }
 
@@ -243,6 +438,7 @@ public final class ZipWriter {
 
     /// Adds a whole directory tree, which is how a signed `.app` gets packed into `Payload/`.
     public func addTree(at root: URL, prefix: String, compress: Bool = true,
+                        removeAfterWriting: Bool = false,
                         progress: ((Double, String) -> Void)? = nil) throws {
         let fm = FileManager.default
         var files = [URL]()
@@ -265,8 +461,17 @@ public final class ZipWriter {
             } else {
                 let attrs = try fm.attributesOfItem(atPath: u.path)
                 let mode = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o644
-                try add(name: name, data: try Data(contentsOf: u, options: .mappedIfSafe),
-                        mode: mode, compress: compress)
+                let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+                if size > 8 << 20 {
+                    // Big files are streamed, so a multi-gigabyte binary never lands in memory.
+                    try addFile(name: name, url: u, mode: mode, compress: compress)
+                } else {
+                    try add(name: name, data: try Data(contentsOf: u, options: .mappedIfSafe),
+                            mode: mode, compress: compress)
+                }
+                // While packing a huge app, trade each unpacked file for its bytes in
+                // the output. Peak disk use stays near one unpacked copy, not two.
+                if removeAfterWriting { try? fm.removeItem(at: u) }
             }
         }
         progress?(1, "")

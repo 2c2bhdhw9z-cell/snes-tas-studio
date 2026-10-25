@@ -84,28 +84,24 @@ public final class BundleSigner {
         )
         if bundle.pathExtension == "framework" { options.entitlements = nil }
 
-        let signer = MachOSigner(key: adhoc ? nil : key, chain: adhoc ? [] : chain)
-        let signed = try signer.sign(data: try Data(contentsOf: binary, options: .mappedIfSafe),
-                                     options: options)
-        try write(signed, to: binary)
+        // Signed on disk, so even a two-gigabyte binary never sits in memory.
+        let signer = MachOFileSigner(key: adhoc ? nil : key, chain: adhoc ? [] : chain)
+        let cdhash = try signer.sign(fileAt: binary, options: options) { [weak self] f in
+            self?.report(0.85 + f * 0.14, "Signing \(bundle.lastPathComponent)")
+        }
         report(1.0, "Signed \(bundle.lastPathComponent)")
-
-        let slice = try MachOFile(data: signed).slices[0]
-        return signer.cdhash(for: slice) ?? Data()
+        return cdhash
     }
 
     /// Signs a bare `.dylib` sitting in the bundle (a tweak, or a Swift runtime library).
     @discardableResult
     public func signLooseBinary(at url: URL, identifier: String) throws -> Data {
-        let signer = MachOSigner(key: adhoc ? nil : key, chain: adhoc ? [] : chain)
         var options = MachOSigner.Options(identifier: identifier,
                                           teamID: adhoc ? nil : (chain.first?.teamID ?? profile?.teamID))
         options.hashKind = hashKind
         options.adhoc = adhoc
-        let signed = try signer.sign(data: try Data(contentsOf: url, options: .mappedIfSafe), options: options)
-        try write(signed, to: url)
-        let slice = try MachOFile(data: signed).slices[0]
-        return signer.cdhash(for: slice) ?? Data()
+        let signer = MachOFileSigner(key: adhoc ? nil : key, chain: adhoc ? [] : chain)
+        return try signer.sign(fileAt: url, options: options)
     }
 
     // MARK: - helpers

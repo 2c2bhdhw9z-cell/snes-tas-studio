@@ -30,7 +30,9 @@ struct StoredCertificate: Codable, Identifiable, Hashable {
     var teamID: String?
     var appleID: String?
     var expires: Date?
-    var password: String
+    /// Legacy builds stored this in JSON. New imports leave it nil and keep the
+    /// password in the iPhone Keychain; optional keeps old saved state readable.
+    var password: String? = nil
     var sha256: String
     /// The profile that goes with it, worked out automatically when either is imported.
     var profileID: UUID?
@@ -111,13 +113,18 @@ struct LibraryApp: Codable, Identifiable, Hashable {
     var bundleID: String
     var version: String
     var fileName: String
+    /// Absolute path when the library points at the same file shown on the File tab.
+    /// Older saved lists do not have this, so nil falls back to the private Apps folder.
+    var filePath: String? = nil
     var isSigned: Bool
     var signedWithCertificateID: UUID?
     var added: Date
     var bytes: Int
     var iconFileName: String?
 
-    var fileURL: URL { Paths.apps.appendingPathComponent(fileName) }
+    var fileURL: URL {
+        filePath.map { URL(fileURLWithPath: $0) } ?? Paths.apps.appendingPathComponent(fileName)
+    }
 
     var iconURL: URL? {
         iconFileName.map { Paths.apps.appendingPathComponent($0) }

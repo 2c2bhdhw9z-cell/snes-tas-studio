@@ -84,20 +84,33 @@ public enum CodeResources {
 
         var hashes = [(Data, Data)](repeating: (Data(), Data()), count: wanted.count)
         let root = bundle
-        if wanted.count > 4 {
+        // Small files go across all cores. Large files are streamed one at a time so
+        // a bundle containing several gigabyte-sized game files cannot fill memory.
+        let sizes = wanted.map { rel -> Int in
+            (try? fm.attributesOfItem(atPath: root.appendingPathComponent(rel).path)[.size] as? Int) ?? 0
+        }
+        let small = wanted.indices.filter { sizes[$0] <= 8 << 20 }
+        if small.count > 4 {
             hashes.withUnsafeMutableBufferPointer { out in
                 let buffer = out
-                DispatchQueue.concurrentPerform(iterations: wanted.count) { i in
+                DispatchQueue.concurrentPerform(iterations: small.count) { n in
+                    let i = small[n]
                     guard let data = try? Data(contentsOf: root.appendingPathComponent(wanted[i]),
                                                options: .mappedIfSafe) else { return }
                     buffer[i] = (sha1(data), sha256(data))
                 }
             }
         } else {
-            for (i, rel) in wanted.enumerated() {
-                let data = try Data(contentsOf: root.appendingPathComponent(rel), options: .mappedIfSafe)
+            for i in small {
+                let data = try Data(contentsOf: root.appendingPathComponent(wanted[i]), options: .mappedIfSafe)
                 hashes[i] = (sha1(data), sha256(data))
             }
+        }
+        for i in wanted.indices where sizes[i] > 8 << 20 {
+            hashes[i] = try hashesOfFile(root.appendingPathComponent(wanted[i]))
+        }
+        if let i = hashes.firstIndex(where: { $0.0.isEmpty || $0.1.isEmpty }) {
+            throw SignKitError.io("could not read \(wanted[i]) while listing the app's files")
         }
 
         for (rel, target) in symlinks {
@@ -131,6 +144,23 @@ public enum CodeResources {
             "rules2": rules2,
         ]
         return try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+    }
+
+    /// SHA-1 and SHA-256 in one streamed pass over a file.
+    static func hashesOfFile(_ url: URL) throws -> (Data, Data) {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            throw SignKitError.io("cannot read \(url.lastPathComponent)")
+        }
+        defer { try? handle.close() }
+        var h1 = Hasher(.sha1)
+        var h2 = Hasher(.sha256)
+        while true {
+            let chunk = handle.readData(ofLength: 4 << 20)
+            if chunk.isEmpty { break }
+            h1.update(chunk)
+            h2.update(chunk)
+        }
+        return (h1.finish(), h2.finish())
     }
 
     /// Writes the file into the bundle and returns its hash for the signature's slot 3.

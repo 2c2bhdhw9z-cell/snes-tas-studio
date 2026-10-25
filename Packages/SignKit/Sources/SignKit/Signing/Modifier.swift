@@ -21,10 +21,20 @@ struct Modifier {
         for rel in options.removeFiles {
             try? fm.removeItem(at: app.appendingPathComponent(rel))
         }
-        // An old signature is always thrown away; we write a fresh one.
-        try? fm.removeItem(at: app.appendingPathComponent("_CodeSignature"))
+        // Old signatures are always thrown away — everywhere, not just at the top —
+        // along with the App Store's leftovers, so nothing stale gets hashed in.
         try? fm.removeItem(at: app.appendingPathComponent("embedded.mobileprovision"))
-        try? fm.removeItem(at: app.appendingPathComponent("SC_Info"))
+        if let walker = fm.enumerator(at: app, includingPropertiesForKeys: nil) {
+            var junk = [URL]()
+            for case let url as URL in walker {
+                let name = url.lastPathComponent
+                if name == "_CodeSignature" || name == "SC_Info" || name == ".DS_Store"
+                    || name == "CodeResources" || name == "embedded.mobileprovision" {
+                    junk.append(url)
+                }
+            }
+            for url in junk { try? fm.removeItem(at: url) }
+        }
 
         // Info.plist edits.
         let infoURL = app.appendingPathComponent("Info.plist")
@@ -164,11 +174,9 @@ struct Modifier {
 
         for target in targets {
             guard fm.fileExists(atPath: target.path) else { continue }
-            var file = try MachOFile(data: try Data(contentsOf: target, options: .mappedIfSafe))
-            if let archs = options.keepArchitectures, file.isFat {
-                file.thin(keeping: archs)
-            }
-            try file.forEachSlice { slice in
+            let byteCount = (try? fm.attributesOfItem(atPath: target.path)[.size] as? Int) ?? 0
+
+            func edit(_ slice: inout MachOSlice) throws {
                 for name in options.removeLibraries { slice.removeDylib(name) }
                 for name in injectedNames {
                     try slice.injectDylib("\(options.injectPath)/\(name)")
@@ -182,6 +190,25 @@ struct Modifier {
                     if let major = parts.first { slice.setMinOS(major: major, minor: parts.count > 1 ? parts[1] : 0) }
                 }
             }
+
+            // For a huge thin binary every requested edit is in the first few KB.
+            // Write that header directly instead of loading gigabytes into memory.
+            if byteCount >= MachOFileSigner.diskThreshold {
+                let handle = try FileHandle(forReadingFrom: target)
+                let first = handle.readData(ofLength: 8)
+                try? handle.close()
+                let magic = first.u32be(0)
+                if magic != 0xcafebabe && magic != 0xcafebabf {
+                    try MachOFileSigner.editHeader(fileAt: target, edit)
+                    continue
+                }
+            }
+
+            var file = try MachOFile(data: try Data(contentsOf: target, options: .mappedIfSafe))
+            if let archs = options.keepArchitectures, file.isFat {
+                file.thin(keeping: archs)
+            }
+            try file.forEachSlice(edit)
             try file.encoded().write(to: target)
         }
 

@@ -49,16 +49,17 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { _ in
             tab = .sign
         }
+        // One place for "Imported successfully", the password prompt and any complaint.
+        .importFeedback()
     }
 }
 
 /// Handles files opened from elsewhere: Safari downloads, the share sheet, another app.
 /// Everything lands in Signer's own folder so it shows up on the File tab.
 enum Importer {
+    @MainActor
     static func handle(_ url: URL) {
         guard url.isFileURL else { return }
-        let dest = Paths.files.appendingPathComponent(url.lastPathComponent)
-        try? FileManager.default.removeItem(at: dest)
-        try? FileManager.default.copyItem(at: url, to: dest)
+        ImportCoordinator.shared.take([url])
     }
 }

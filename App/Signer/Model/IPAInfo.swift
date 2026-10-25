@@ -32,9 +32,12 @@ struct IPAInfo {
         var archs = [String]()
         var encrypted = false
         var tweaks = [String]()
+        // Only the first slice of the binary is read: an app's binary can be a
+        // gigabyte on its own, and the header is all we need.
         if let exec = info["CFBundleExecutable"] as? String,
            let binary = reader.entries.first(where: { $0.name == appDir + exec }),
-           let file = try? MachOFile(data: try reader.data(for: binary)) {
+           let head = try? reader.head(of: binary, limit: 256 << 10),
+           let file = try? MachOFile(data: head) {
             archs = file.archNames
             encrypted = file.slices.contains { $0.isEncrypted }
             tweaks = file.slices.first?.dylibs.filter {

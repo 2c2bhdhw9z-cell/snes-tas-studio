@@ -42,13 +42,7 @@ struct LibraryView: View {
                           allowsMultipleSelection: true) { result in
                 switch result {
                 case .success(let urls):
-                    var notes = [String]()
-                    for url in urls {
-                        do { notes.append(try Intake.take(url, password: nil)) }
-                        catch { notes.append(friendly(error)) }
-                    }
-                    if notes.count == 1 { banner = notes[0] }
-                    else if notes.count > 1 { banner = "\(notes.count) files added" }
+                    ImportCoordinator.shared.take(urls)
                 case .failure(let e):
                     self.errorMessage = e.localizedDescription
                 }

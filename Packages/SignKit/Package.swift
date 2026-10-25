@@ -13,6 +13,6 @@ let package = Package(
         .systemLibrary(name: "CZlib", path: "Sources/CZlib"),
         .target(name: "SignKit", dependencies: ["CZlib"]),
         .executableTarget(name: "signkit-cli", dependencies: ["SignKit"]),
-        .testTarget(name: "SignKitTests", dependencies: ["SignKit"]),
+        .testTarget(name: "SignKitTests", dependencies: ["SignKit"], exclude: ["Fixtures"]),
     ]
 )

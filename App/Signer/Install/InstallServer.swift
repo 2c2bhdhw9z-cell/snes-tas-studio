@@ -32,6 +32,7 @@ final class InstallServer: ObservableObject {
     private var port: UInt16 = 0
     private var bytesSent = 0
     private var connections: [NWConnection] = []
+    private var keepingAwake = false
 
     /// How the manifest reaches iOS.
     enum Route {
@@ -46,6 +47,8 @@ final class InstallServer: ObservableObject {
     func start(ipa: URL, bundleID: String, version: String, title: String,
                iconPNG: Data?, route: Route) async {
         stop()
+        KeepAwake.shared.begin("installing")
+        keepingAwake = true
         do {
             payloadURL = ipa
             payloadSize = (try? FileManager.default.attributesOfItem(atPath: ipa.path)[.size] as? Int) ?? 0 ?? 0
@@ -80,10 +83,15 @@ final class InstallServer: ObservableObject {
         } catch {
             stage = .failed(friendly(error))
             note("Could not start: \(friendly(error))")
+            stop()
         }
     }
 
     func stop() {
+        if keepingAwake {
+            KeepAwake.shared.end()
+            keepingAwake = false
+        }
         listener?.cancel()
         listener = nil
         connections.forEach { $0.cancel() }
@@ -128,18 +136,22 @@ final class InstallServer: ObservableObject {
             guard let self, let data, let request = String(data: data, encoding: .utf8) else {
                 conn.cancel(); return
             }
-            let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
-            Task { @MainActor in self.respond(to: path, on: conn) }
+            let firstLine = request.split(separator: "\n").first.map(String.init) ?? "GET / HTTP/1.1"
+            let pieces = firstLine.split(separator: " ")
+            let method = pieces.first.map(String.init) ?? "GET"
+            let path = pieces.count > 1 ? String(pieces[1]) : "/"
+            Task { @MainActor in self.respond(method: method, to: path, request: request, on: conn) }
         }
     }
 
-    private func respond(to path: String, on conn: NWConnection) {
+    private func respond(method: String, to path: String, request: String, on conn: NWConnection) {
         func send(_ body: Data, _ type: String) {
             var head = "HTTP/1.1 200 OK\r\n"
             head += "Content-Type: \(type)\r\n"
             head += "Content-Length: \(body.count)\r\n"
             head += "Connection: close\r\n\r\n"
-            conn.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in conn.cancel() })
+            let content = method == "HEAD" ? Data(head.utf8) : Data(head.utf8) + body
+            conn.send(content: content, completion: .contentProcessed { _ in conn.cancel() })
         }
 
         switch path {
@@ -149,9 +161,9 @@ final class InstallServer: ObservableObject {
         case "/icon.png":
             send(icon ?? Data(), "image/png")
         case "/app.ipa":
-            note("iOS is downloading the app")
-            stage = .downloading(0)
-            sendPayload(on: conn)
+            note(method == "HEAD" ? "iOS checked the app's size" : "iOS is downloading the app")
+            if method != "HEAD" { stage = .downloading(0) }
+            sendPayload(on: conn, request: request, headOnly: method == "HEAD")
         default:
             let body = Data("Signer".utf8)
             send(body, "text/plain")
@@ -160,30 +172,47 @@ final class InstallServer: ObservableObject {
 
     /// Sends the app a megabyte at a time, so even a very large app never has to sit
     /// in memory all at once.
-    private func sendPayload(on conn: NWConnection) {
+    private func sendPayload(on conn: NWConnection, request: String, headOnly: Bool) {
         guard let url = payloadURL, let handle = try? FileHandle(forReadingFrom: url) else {
             conn.cancel()
             stage = .failed("The signed app file went missing")
+            KeepAwake.shared.end()
             return
         }
-        var head = "HTTP/1.1 200 OK\r\n"
+        let requested = byteRange(in: request, total: payloadSize)
+        let start = requested?.lowerBound ?? 0
+        let end = requested?.upperBound ?? max(0, payloadSize - 1)
+        var remaining = max(0, end - start + 1)
+        try? handle.seek(toOffset: UInt64(start))
+
+        var head = requested == nil ? "HTTP/1.1 200 OK\r\n" : "HTTP/1.1 206 Partial Content\r\n"
         head += "Content-Type: application/octet-stream\r\n"
-        head += "Content-Length: \(payloadSize)\r\n"
+        head += "Accept-Ranges: bytes\r\n"
+        head += "Content-Length: \(remaining)\r\n"
+        if requested != nil { head += "Content-Range: bytes \(start)-\(end)/\(payloadSize)\r\n" }
         head += "Connection: close\r\n\r\n"
         conn.send(content: Data(head.utf8), completion: .contentProcessed { _ in })
+        if headOnly {
+            try? handle.close()
+            conn.send(content: nil, isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
+            return
+        }
 
         let chunkSize = 1 << 20
-        let total = payloadSize
+        var sent = 0
         func pump() {
-            let chunk = handle.readData(ofLength: chunkSize)
-            if chunk.isEmpty {
+            let chunk = handle.readData(ofLength: min(chunkSize, remaining))
+            if chunk.isEmpty || remaining == 0 {
                 try? handle.close()
-                conn.send(content: nil, isComplete: true, completion: .contentProcessed { _ in
-                    conn.cancel()
-                })
+                conn.send(content: nil, isComplete: true, completion: .contentProcessed { _ in conn.cancel() })
                 Task { @MainActor in
-                    self.stage = .handedOff
-                    self.note("The app was handed to iOS. Watch the home screen.")
+                    // A partial request may be followed by another one. Only call it
+                    // handed off once iOS reached the end of the app.
+                    if end + 1 >= self.payloadSize {
+                        self.stage = .handedOff
+                        self.note("The app was handed to iOS. Watch the home screen.")
+                        self.stop()
+                    }
                 }
                 return
             }
@@ -191,19 +220,47 @@ final class InstallServer: ObservableObject {
                 guard error == nil else {
                     try? handle.close()
                     conn.cancel()
+                    Task { @MainActor in
+                        self?.stage = .failed("iOS stopped downloading the app")
+                        self?.stop()
+                    }
                     return
                 }
+                remaining -= chunk.count
+                sent += chunk.count
                 Task { @MainActor in
                     guard let self else { return }
-                    self.bytesSent += chunk.count
-                    if total > 0 {
-                        self.stage = .downloading(Double(self.bytesSent) / Double(total))
+                    self.bytesSent = start + sent
+                    if self.payloadSize > 0 {
+                        self.stage = .downloading(min(1, Double(self.bytesSent) / Double(self.payloadSize)))
                     }
                     pump()
                 }
             })
         }
         pump()
+    }
+
+    /// Reads `Range: bytes=start-end`, which iOS uses to resume large downloads.
+    private func byteRange(in request: String, total: Int) -> ClosedRange<Int>? {
+        guard total > 0 else { return nil }
+        for rawLine in request.split(separator: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard line.lowercased().hasPrefix("range:") else { continue }
+            guard let marker = line.range(of: "bytes=", options: .caseInsensitive) else { return nil }
+            let value = line[marker.upperBound...].split(separator: ",").first ?? ""
+            let halves = value.split(separator: "-", omittingEmptySubsequences: false)
+            guard halves.count == 2 else { return nil }
+            if halves[0].isEmpty, let suffix = Int(halves[1]) {
+                let start = max(0, total - suffix)
+                return start...(total - 1)
+            }
+            guard let start = Int(halves[0]), start >= 0, start < total else { return nil }
+            let end = halves[1].isEmpty ? total - 1 : min(Int(halves[1]) ?? (total - 1), total - 1)
+            guard end >= start else { return nil }
+            return start...end
+        }
+        return nil
     }
 
     // MARK: - helpers

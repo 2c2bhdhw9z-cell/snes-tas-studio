@@ -9,6 +9,7 @@ struct SettingsView: View {
     @AppStorage("installHelperURL") private var helperURL = InstallServer.defaultHelper
     @AppStorage("installLocalHTTPS") private var useLocalHTTPS = false
     @AppStorage("compressOutput") private var compressOutput = false
+    @AppStorage("keepLongJobsRunning") private var keepLongJobsRunning = true
     @State private var showWebCertPicker = false
     @State private var webCertPassword = ""
 
@@ -68,6 +69,10 @@ struct SettingsView: View {
                 }
 
                 Section("Signing") {
+                    Toggle("Keep long jobs running", isOn: $keepLongJobsRunning)
+                    Text("Keeps signing or installing a huge app alive if the screen locks or you "
+                         + "switch away. It runs only while a job is active.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Toggle("Squeeze the finished app", isOn: $compressOutput)
                     Text(compressOutput
                          ? "Smaller file, slower signing."
@@ -94,7 +99,8 @@ struct SettingsView: View {
             .fileImporter(isPresented: $showWebCertPicker,
                           allowedContentTypes: [.item]) { result in
                 if case .success(let url) = result,
-                   let data = try? Data(contentsOf: url) {
+                   let local = try? Intake.keep(url),
+                   let data = try? Data(contentsOf: local) {
                     try? data.write(to: store.root.appendingPathComponent("local-https.p12"))
                 }
             }

@@ -37,6 +37,10 @@ extension Data {
     }
 
     mutating func put16le(_ v: UInt16) { append(UInt8(v & 0xff)); append(UInt8(v >> 8)) }
+    mutating func set16le(_ o: Int, _ v: UInt16) {
+        self[startIndex + o] = UInt8(v & 0xff)
+        self[startIndex + o + 1] = UInt8(v >> 8)
+    }
     mutating func put32le(_ v: UInt32) { for i in 0..<4 { append(UInt8((v >> (8 * UInt32(i))) & 0xff)) } }
     mutating func put64le(_ v: UInt64) { for i in 0..<8 { append(UInt8((v >> (8 * UInt64(i))) & 0xff)) } }
     mutating func put32be(_ v: UInt32) { for i in (0..<4).reversed() { append(UInt8((v >> (8 * UInt32(i))) & 0xff)) } }

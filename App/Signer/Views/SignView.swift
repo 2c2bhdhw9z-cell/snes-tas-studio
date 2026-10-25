@@ -44,13 +44,21 @@ struct SignView: View {
             .navigationTitle("Sign")
             .fileImporter(isPresented: $showPicker, allowedContentTypes: [.item]) { result in
                 if case .success(let url) = result {
-                    if let imported = try? SigningRunner.importIPA(url) { select(imported) }
+                    if let local = try? Intake.keep(url),
+                       let imported = try? SigningRunner.importIPA(local) {
+                        select(imported)
+                    } else {
+                        ImportCoordinator.shared.take([url])
+                    }
                 }
             }
             .fileImporter(isPresented: $showTweakPicker,
                           allowedContentTypes: [.item],
                           allowsMultipleSelection: true) { result in
-                if case .success(let urls) = result { tweaks.append(contentsOf: urls) }
+                if case .success(let urls) = result {
+                    // Copy them in first, or they cannot be read later.
+                    tweaks.append(contentsOf: urls.compactMap { try? Intake.keep($0) })
+                }
             }
             .onAppear { if let app, info == nil { select(app) } }
             .sheet(item: $installing) { (app: LibraryApp) in

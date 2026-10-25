@@ -12,6 +12,8 @@ final class SigningRunner: ObservableObject {
 
     func run(ipa: URL, options: SigningOptions, certificate: StoredCertificate?) async {
         isRunning = true
+        KeepAwake.shared.begin("signing")
+        defer { KeepAwake.shared.end() }
         fraction = 0
         message = "Getting ready"
         errorMessage = nil
@@ -60,16 +62,21 @@ final class SigningRunner: ObservableObject {
     static func importIPA(_ url: URL) throws -> LibraryApp {
         let store = Store.shared
         let info = try IPAInfo.read(url)
-        let name = "import-\(UUID().uuidString.prefix(8)).ipa"
-        let dest = store.appsDir.appendingPathComponent(name)
-        try FileManager.default.copyItem(at: url, to: dest)
+        let inFileList = url.standardizedFileURL.path.hasPrefix(Paths.files.standardizedFileURL.path + "/")
+        let name = inFileList ? url.lastPathComponent : "import-\(UUID().uuidString.prefix(8)).ipa"
+        let dest = inFileList ? url : store.appsDir.appendingPathComponent(name)
+        if !inFileList {
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.copyItem(at: url, to: dest)
+        }
         var iconName: String?
         if let png = info.iconPNG {
             iconName = name + ".png"
             try? png.write(to: store.appsDir.appendingPathComponent(iconName!))
         }
         let app = LibraryApp(id: UUID(), name: info.name, bundleID: info.bundleID,
-                             version: info.version, fileName: name, isSigned: false,
+                             version: info.version, fileName: name,
+                             filePath: inFileList ? dest.path : nil, isSigned: false,
                              signedWithCertificateID: nil, added: Date(),
                              bytes: info.bytes, iconFileName: iconName)
         store.addToLibrary(app)

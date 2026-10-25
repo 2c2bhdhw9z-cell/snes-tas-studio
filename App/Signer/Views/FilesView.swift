@@ -13,8 +13,6 @@ struct FilesView: View {
     @State private var entries: [FileEntry] = []
     @State private var search = ""
     @State private var chosen: FileEntry?
-    @State private var askingPassword: FileEntry?
-    @State private var password = ""
     @State private var viewing: FileEntry?
     @State private var hexing: FileEntry?
     @State private var banner: String?
@@ -55,8 +53,11 @@ struct FilesView: View {
                 }
                 .onDelete { indexes in
                     for index in indexes {
-                        try? FileManager.default.removeItem(at: shown[index].url)
+                        let entry = shown[index]
+                        store.library.removeAll { $0.fileURL.standardizedFileURL == entry.url.standardizedFileURL }
+                        try? FileManager.default.removeItem(at: entry.url)
                     }
+                    store.save()
                     reload()
                 }
             }
@@ -78,6 +79,7 @@ struct FilesView: View {
             }
             .refreshable { reload() }
             .onAppear { reload() }
+            .onReceive(NotificationCenter.default.publisher(for: .filesChanged)) { _ in reload() }
             .overlay(alignment: .bottom) {
                 if let banner {
                     Text(banner)
@@ -96,11 +98,11 @@ struct FilesView: View {
                     switch entry.kind {
                     case .p12:
                         Button("Import Certificate Management") {
-                            password = ""
-                            askingPassword = entry
+                            ImportCoordinator.shared.password = ""
+                            ImportCoordinator.shared.pendingCertificate = entry.url
                         }
                     case .profile:
-                        Button("Import") { importProfile(entry) }
+                        Button("Import") { ImportCoordinator.shared.take([entry.url]) }
                     case .ipa:
                         Button("Sign this app") { addToLibrary(entry, thenSign: true) }
                         Button("Add to My apps") { addToLibrary(entry, thenSign: false) }
@@ -110,22 +112,13 @@ struct FilesView: View {
                     Button("View") { viewing = entry }
                     Button("HEX Editor") { hexing = entry }
                     Button("Delete", role: .destructive) {
+                        store.library.removeAll { $0.fileURL.standardizedFileURL == entry.url.standardizedFileURL }
+                        store.save()
                         try? FileManager.default.removeItem(at: entry.url)
                         reload()
                     }
                     Button("Cancel", role: .cancel) {}
                 }
-            }
-            .alert("Certificate Password", isPresented: Binding(
-                get: { askingPassword != nil }, set: { if !$0 { askingPassword = nil } })) {
-                SecureField("Please enter the certificate password", text: $password)
-                Button("Cancel", role: .cancel) { askingPassword = nil }
-                Button("OK") {
-                    if let entry = askingPassword { importCertificate(entry, password: password) }
-                    askingPassword = nil
-                }
-            } message: {
-                Text("Leave it empty if the certificate has no password.")
             }
             .sheet(item: $viewing) { (entry: FileEntry) in
                 FileViewer(entry: entry, hex: false)
@@ -138,13 +131,12 @@ struct FilesView: View {
             .fileImporter(isPresented: $showSystemPicker, allowedContentTypes: [.item],
                           allowsMultipleSelection: true) { result in
                 if case .success(let urls) = result {
-                    var notes = [String]()
-                    for url in urls {
-                        do { notes.append(try Intake.take(url, password: nil)) }
-                        catch { notes.append((error as? SignKitError)?.description ?? error.localizedDescription) }
+                    ImportCoordinator.shared.take(urls)
+                    // Give the copy a moment, then show the new files.
+                    Task {
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        reload()
                     }
-                    reload()
-                    if let first = notes.first { show(notes.count == 1 ? first : "\(notes.count) files added") }
                 }
             }
         }
@@ -165,30 +157,6 @@ struct FilesView: View {
         }
     }
 
-    func importCertificate(_ entry: FileEntry, password: String) {
-        do {
-            let cert = try store.importCertificate(p12: entry.url, password: password)
-            store.selectedCertificateID = cert.id
-            store.save()
-            show("Imported successfully")
-        } catch let e as SignKitError {
-            show(e.description, error: true)
-        } catch {
-            show(error.localizedDescription, error: true)
-        }
-    }
-
-    func importProfile(_ entry: FileEntry) {
-        do {
-            _ = try store.importProfile(entry.url)
-            show("Imported successfully")
-        } catch let e as SignKitError {
-            show(e.description, error: true)
-        } catch {
-            show(error.localizedDescription, error: true)
-        }
-    }
-
     func addToLibrary(_ entry: FileEntry, thenSign: Bool) {
         do {
             let app = try SigningRunner.importIPA(entry.url)
@@ -204,6 +172,7 @@ struct FilesView: View {
 
 extension Notification.Name {
     static let signThisApp = Notification.Name("signThisApp")
+    static let filesChanged = Notification.Name("filesChanged")
 }
 
 /// One row in the file list.
@@ -356,12 +325,15 @@ struct FileViewer: View {
         }
     }
 
-    /// Text if it reads as text, otherwise a hex dump of the first part.
+    /// Looks at no more than the first 64 KB — opening a two-gigabyte file must
+    /// never pull the whole thing into memory.
     func body(of url: URL) -> String {
-        guard let data = try? Data(contentsOf: url) else { return "Could not read this file." }
-        let slice = data.prefix(64 * 1024)
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "Could not read this file." }
+        let slice = handle.readData(ofLength: 64 * 1024)
+        try? handle.close()
+        let total = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? slice.count) ?? slice.count
         if !hex, let text = String(data: slice, encoding: .utf8), !text.isEmpty {
-            return text
+            return text + (total > slice.count ? "\n\n… \(ByteCountFormatter.string(fromByteCount: Int64(total - slice.count), countStyle: .file)) more" : "")
         }
         var out = ""
         var offset = 0
@@ -374,8 +346,8 @@ struct FileViewer: View {
             out += String(format: "%08x  ", offset) + hexPart + "  " + textPart + "\n"
             offset += 16
         }
-        if data.count > slice.count {
-            out += "\n… \(ByteCountFormatter.string(fromByteCount: Int64(data.count - slice.count), countStyle: .file)) more"
+        if total > slice.count {
+            out += "\n… \(ByteCountFormatter.string(fromByteCount: Int64(total - slice.count), countStyle: .file)) more"
         }
         return out
     }

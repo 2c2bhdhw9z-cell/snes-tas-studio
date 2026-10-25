@@ -34,6 +34,28 @@ final class Store: ObservableObject {
         var library: [LibraryApp] = []
         var sources: [Source] = []
         var selectedCertificateID: UUID?
+
+        enum CodingKeys: String, CodingKey {
+            case certificates, profiles, library, sources, selectedCertificateID
+        }
+
+        init(certificates: [StoredCertificate] = [], profiles: [StoredProfile] = [],
+             library: [LibraryApp] = [], sources: [Source] = [], selectedCertificateID: UUID? = nil) {
+            self.certificates = certificates
+            self.profiles = profiles
+            self.library = library
+            self.sources = sources
+            self.selectedCertificateID = selectedCertificateID
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            certificates = try c.decodeIfPresent([StoredCertificate].self, forKey: .certificates) ?? []
+            profiles = try c.decodeIfPresent([StoredProfile].self, forKey: .profiles) ?? []
+            library = try c.decodeIfPresent([LibraryApp].self, forKey: .library) ?? []
+            sources = try c.decodeIfPresent([Source].self, forKey: .sources) ?? []
+            selectedCertificateID = try c.decodeIfPresent(UUID.self, forKey: .selectedCertificateID)
+        }
     }
 
     func load() {
@@ -73,7 +95,8 @@ final class Store: ObservableObject {
         }
         // Already have it? Just update the password and keep going.
         if let existing = certificates.firstIndex(where: { $0.sha256 == cert.sha256Fingerprint }) {
-            certificates[existing].password = password
+            try SecretStore.set(password, for: certificates[existing].id)
+            certificates[existing].password = nil
             save()
             return certificates[existing]
         }
@@ -89,9 +112,10 @@ final class Store: ObservableObject {
             teamID: cert.teamID,
             appleID: cert.appleID,
             expires: cert.notAfter,
-            password: password,
+            password: nil,
             sha256: cert.sha256Fingerprint
         )
+        try SecretStore.set(password, for: id)
         // Pair it with a profile already imported, if one matches.
         if let match = profiles.first(where: { $0.certificateFingerprints.contains(stored.sha256) }) {
             stored.profileID = match.id
@@ -136,6 +160,7 @@ final class Store: ObservableObject {
     }
 
     func deleteCertificate(_ cert: StoredCertificate) {
+        SecretStore.delete(for: cert.id)
         try? FileManager.default.removeItem(at: certificatesDir.appendingPathComponent(cert.id.uuidString))
         certificates.removeAll { $0.id == cert.id }
         if selectedCertificateID == cert.id { selectedCertificateID = certificates.first?.id }
@@ -163,9 +188,14 @@ final class Store: ObservableObject {
     /// Loads the signing identity: the certificate plus its paired profile.
     func identity(for cert: StoredCertificate) throws -> IPASigner.Identity {
         let paired = profile(for: cert)
+        let password = SecretStore.get(for: cert.id) ?? cert.password ?? ""
+        // Migrate a password left by an older build into the Keychain.
+        if SecretStore.get(for: cert.id) == nil, let legacy = cert.password {
+            try? SecretStore.set(legacy, for: cert.id)
+        }
         return try IPASigner.Identity.load(
             p12: p12URL(for: cert),
-            password: cert.password,
+            password: password,
             profile: paired.map { profileURL(for: $0) }
         )
     }
@@ -179,7 +209,9 @@ final class Store: ObservableObject {
     }
 
     func deleteApp(_ app: LibraryApp) {
-        try? FileManager.default.removeItem(at: app.fileURL)
+        // If My apps points at the same file shown on the File tab, removing the
+        // library entry must not silently delete the user's file.
+        if app.filePath == nil { try? FileManager.default.removeItem(at: app.fileURL) }
         if let icon = app.iconURL { try? FileManager.default.removeItem(at: icon) }
         library.removeAll { $0.id == app.id }
         save()

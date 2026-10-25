@@ -164,41 +164,22 @@ final class SourceLoader: ObservableObject {
         downloadProgress = 0
         defer { downloadProgress = nil; downloadName = nil }
 
-        let (temp, response) = try await URLSession.shared.download(from: url) { [weak self] fraction in
-            Task { @MainActor in self?.downloadProgress = fraction }
-        }
+        // Foundation streams this straight to a temporary file. Do not turn it into
+        // Data — source apps can be several gigabytes.
+        downloadProgress = 0.05
+        let (temp, response) = try await URLSession.shared.download(from: url)
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             throw SignKitError.io("the download failed with code \(http.statusCode)")
         }
-        let named = temp.deletingLastPathComponent().appendingPathComponent("\(app.name).ipa")
+        downloadProgress = 0.9
+        let clean = app.name.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let named = Paths.files.appendingPathComponent("\(clean)-\(UUID().uuidString.prefix(6)).ipa")
         try? FileManager.default.removeItem(at: named)
+        // The system already downloaded to a file in our sandbox; moving it into the
+        // File tab is instant and never creates a second multi-gigabyte copy.
         try FileManager.default.moveItem(at: temp, to: named)
-        defer { try? FileManager.default.removeItem(at: named) }
+        downloadProgress = 1
         return try SigningRunner.importIPA(named)
-    }
-}
-
-extension URLSession {
-    /// Downloads with progress, without needing a delegate class.
-    func download(from url: URL, onProgress: @escaping (Double) -> Void) async throws -> (URL, URLResponse) {
-        let (bytes, response) = try await self.bytes(from: url)
-        let total = response.expectedContentLength
-        var data = Data()
-        data.reserveCapacity(total > 0 ? Int(total) : 1 << 20)
-        var lastReport = Date.distantPast
-        for try await byte in bytes {
-            data.append(byte)
-            if total > 0, Date().timeIntervalSince(lastReport) > 0.2 {
-                lastReport = Date()
-                onProgress(Double(data.count) / Double(total))
-            }
-        }
-        onProgress(1)
-        let temp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("download-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
-        let file = temp.appendingPathComponent("app.ipa")
-        try data.write(to: file)
-        return (file, response)
     }
 }

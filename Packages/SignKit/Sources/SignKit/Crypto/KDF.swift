@@ -11,7 +11,6 @@ public enum KDF {
         for u in Array(password.utf16) { pw.put16le(u.byteSwapped) }
         if !password.isEmpty || true { pw.append(contentsOf: [0, 0]) }
 
-        let u = hash.size              // digest length
         let v = 64                     // block size for SHA-1/SHA-256
         let d = Data(repeating: id, count: v)
 
