@@ -125,15 +125,49 @@ struct SourceFeed {
 }
 
 /// Fetches sources and downloads apps from them.
+///
+/// One shared instance, because My apps needs to know what the sources offer in order to say
+/// an app has an update waiting, not just the Sources screen.
 @MainActor
 final class SourceLoader: ObservableObject {
+    static let shared = SourceLoader()
+
     @Published var feeds: [UUID: SourceFeed] = [:]
     @Published var loading: Set<UUID> = []
     @Published var failures: [UUID: String] = [:]
     @Published var downloadProgress: Double?
     @Published var downloadName: String?
+    /// The newest copy of each app ID across every source, ready to compare against My apps.
+    @Published private(set) var offers: [String: SourceApp] = [:]
+
+    /// The update waiting for an app, or nil when there is none. Matching is by app ID, which
+    /// signing keeps as the app's own (26 October), so this lines up with what is installed.
+    func update(for app: LibraryApp) -> SourceApp? {
+        guard let offer = offers[app.bundleID], offer.downloadURL != nil else { return nil }
+        return Version.isNewer(offer.version, than: app.version) ? offer : nil
+    }
+
+    /// The newest copy of this app already in My apps, if any.
+    func installed(_ offer: SourceApp, in library: [LibraryApp]) -> LibraryApp? {
+        library.filter { $0.bundleID == offer.bundleID }
+            .max { Version.compare($0.version, $1.version) == .orderedAscending }
+    }
+
+    private func rebuildOffers() {
+        var best: [String: SourceApp] = [:]
+        for feed in feeds.values {
+            for app in feed.apps where app.downloadURL != nil {
+                if let have = best[app.bundleID],
+                   !Version.isNewer(app.version, than: have.version) { continue }
+                best[app.bundleID] = app
+            }
+        }
+        offers = best
+    }
 
     func refresh(_ source: Source) async {
+        // Both the root screen (at launch) and the Sources screen ask; only do it once.
+        guard !loading.contains(source.id) else { return }
         loading.insert(source.id)
         failures[source.id] = nil
         defer { loading.remove(source.id) }
@@ -146,6 +180,7 @@ final class SourceLoader: ObservableObject {
                 throw SignKitError.io("the source answered with code \(http.statusCode)")
             }
             feeds[source.id] = try SourceFeed.parse(data, from: source.url)
+            rebuildOffers()
         } catch {
             failures[source.id] = (error as? SignKitError)?.description ?? error.localizedDescription
         }

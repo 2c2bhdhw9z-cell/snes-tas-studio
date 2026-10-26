@@ -59,6 +59,9 @@ struct RootView: View {
                 IPASigner.clearLeftovers()
             }.value
             if freed > 0 { store.leftoversFreed = freed }
+            // Reading the sources at launch is what lets My apps say an update is waiting
+            // without opening the Sources tab first.
+            await SourceLoader.shared.refreshAll(store.sources)
         }
         // One place for "Imported successfully", the password prompt and any complaint.
         .importFeedback()

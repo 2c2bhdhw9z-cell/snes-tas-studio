@@ -4,7 +4,8 @@ import SignKit
 /// Sources: lists of apps you can add by address, browse and download.
 struct SourcesView: View {
     @EnvironmentObject var store: Store
-    @StateObject private var loader = SourceLoader()
+    // Shared, so My apps knows what the sources offer and can say an update is waiting.
+    @ObservedObject private var loader = SourceLoader.shared
     @State private var newAddress = ""
     @State private var adding = false
     @State private var message: String?
@@ -93,6 +94,7 @@ struct SourcesView: View {
 struct SourceAppsView: View {
     let source: Source
     @ObservedObject var loader: SourceLoader
+    @ObservedObject private var updates = Updates.shared
     @EnvironmentObject var store: Store
     @State private var search = ""
     @State private var message: String?
@@ -127,14 +129,36 @@ struct SourceAppsView: View {
                         }
                     }
                     Spacer()
-                    if downloading == app.id {
+                    if downloading == app.id || updates.isBusy(with: app.bundleID) {
                         ProgressView()
+                    } else if let have = loader.installed(app, in: store.library) {
+                        if Version.isNewer(app.version, than: have.version) {
+                            // One tap: download, sign with the chosen certificate, install.
+                            Button("Update") {
+                                Task { await updates.run(app, replacing: have) }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(app.downloadURL == nil || updates.isBusy)
+                        } else {
+                            Text("Added").font(.caption).foregroundStyle(.secondary)
+                        }
                     } else {
                         Button("Get") { get(app) }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
                             .disabled(app.downloadURL == nil)
                     }
+                }
+            }
+            if let stage = updates.stage {
+                Section { Label(stage, systemImage: "arrow.down.circle").font(.caption) }
+            }
+            if let problem = updates.error {
+                Section {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.red)
+                    Button("OK") { updates.error = nil }.font(.caption)
                 }
             }
         }

@@ -10,6 +10,8 @@ import SignKit
 /// from the list: tap Sign on an app, or "Sign an app" at the top to pick a file first.
 struct LibraryView: View {
     @EnvironmentObject var store: Store
+    @ObservedObject private var loader = SourceLoader.shared
+    @ObservedObject private var updates = Updates.shared
     @State private var path: [Route] = []
     @State private var banner: String?
 
@@ -67,6 +69,11 @@ struct LibraryView: View {
         }
     }
 
+    /// Apps with a newer version waiting in one of the sources.
+    var updatable: [LibraryApp] {
+        store.library.filter { loader.update(for: $0) != nil }
+    }
+
     var list: some View {
         List {
             Section {
@@ -77,12 +84,38 @@ struct LibraryView: View {
                         .font(.body.weight(.medium))
                 }
             }
+            if let problem = updates.error {
+                Section {
+                    Label(problem, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.red)
+                    Button("OK") { updates.error = nil }
+                        .font(.caption)
+                }
+            }
             Section {
                 ForEach(store.library) { app in
                     AppRow(app: app,
+                           offer: loader.update(for: app),
+                           busy: updates.isBusy(with: app.bundleID),
+                           stage: updates.stage,
+                           fraction: updates.runner.isRunning ? updates.runner.fraction : nil,
+                           // One update at a time: signing a big app uses the whole phone.
+                           blocked: updates.isBusy && !updates.isBusy(with: app.bundleID),
                            sign: { path.append(.sign(app)) },
-                           install: { store.pendingInstall = app })
+                           install: { store.pendingInstall = app },
+                           updateNow: {
+                               guard let offer = loader.update(for: app) else { return }
+                               Task { await updates.run(offer, replacing: app) }
+                           })
                         .contextMenu {
+                            if let offer = loader.update(for: app) {
+                                Button {
+                                    Task { await updates.run(offer, replacing: app) }
+                                } label: {
+                                    Label("Update to \(offer.version)", systemImage: "arrow.down.circle")
+                                }
+                                .disabled(updates.isBusy)
+                            }
                             Button {
                                 path.append(.sign(app))
                             } label: {
@@ -106,7 +139,13 @@ struct LibraryView: View {
                     indexes.map { store.library[$0] }.forEach(store.deleteApp)
                 }
             } header: {
-                Text("\(store.library.count) app" + (store.library.count == 1 ? "" : "s"))
+                HStack {
+                    Text("\(store.library.count) app" + (store.library.count == 1 ? "" : "s"))
+                    if !updatable.isEmpty {
+                        Text("· \(updatable.count) update" + (updatable.count == 1 ? "" : "s"))
+                            .foregroundStyle(.tint)
+                    }
+                }
             }
         }
     }
@@ -140,8 +179,16 @@ struct LibraryView: View {
 
 struct AppRow: View {
     let app: LibraryApp
+    /// A newer version waiting in a source, if there is one.
+    var offer: SourceApp? = nil
+    var busy: Bool = false
+    var stage: String? = nil
+    var fraction: Double? = nil
+    /// Another app's update is running, so this one cannot start yet.
+    var blocked: Bool = false
     let sign: () -> Void
     let install: () -> Void
+    var updateNow: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 12) {
@@ -151,13 +198,34 @@ struct AppRow: View {
                 Text("\(app.version.isEmpty ? "no version" : app.version) · \(app.sizeText)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(app.bundleID)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                if busy {
+                    if let stage {
+                        Text(stage).font(.caption2).foregroundStyle(.tint).lineLimit(1)
+                    }
+                    if let fraction {
+                        ProgressView(value: fraction).frame(maxWidth: 160)
+                    }
+                } else if let offer {
+                    Text("\(offer.version) waiting"
+                         + (offer.sizeText.map { " · \($0)" } ?? ""))
+                        .font(.caption2)
+                        .foregroundStyle(.tint)
+                } else {
+                    Text(app.bundleID)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
             }
             Spacer()
-            if app.isSigned {
+            if busy {
+                ProgressView()
+            } else if offer != nil {
+                Button("Update", action: updateNow)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(blocked)
+            } else if app.isSigned {
                 Button("Install", action: install)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
