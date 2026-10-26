@@ -22,6 +22,7 @@ struct SignView: View {
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
     @State private var installing: LibraryApp?
+    @AppStorage("installAfterSigning") private var installAfterSigning = true
 
     init(preselected: LibraryApp? = nil) {
         _app = State(initialValue: preselected)
@@ -111,9 +112,15 @@ struct SignView: View {
             if let pattern = pairedPattern, !pattern.hasSuffix("*") {
                 Button("Use the ID my certificate allows") { bundleID = pattern }
                     .font(.caption)
-                Text("Your profile only allows the ID \(pattern). Signer will use that ID for you, "
-                     + "and remove any extras the profile can't cover.")
+                Text("Your profile only allows the ID \(pattern), so Signer gives this app that ID. "
+                     + "Its extras keep working — they share the ID.")
                     .font(.caption).foregroundStyle(.secondary)
+                Label("iPhone treats two apps with the same ID as one app, so installing this one "
+                      + "REPLACES the last app you signed with this certificate"
+                      + (lastSignedWithThisID.map { ", which was \($0)" } ?? "")
+                      + ". A certificate with a wildcard ID (ending in *) can hold many apps at once.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
             }
         }
     }
@@ -187,7 +194,9 @@ struct SignView: View {
                     ForEach(result.warnings, id: \.self) {
                         Text($0).font(.caption).foregroundStyle(.orange)
                     }
-                    Text("It is in My apps too.")
+                    Text(installAfterSigning
+                         ? "It is in My apps too. Installing starts on its own; if the sheet is gone, use the button below."
+                         : "It is in My apps too.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let signed = store.library.first, signed.isSigned {
@@ -217,6 +226,15 @@ struct SignView: View {
     var pairedPattern: String? {
         guard let cert = store.selectedCertificate else { return nil }
         return store.profile(for: cert)?.bundleIDPattern
+    }
+
+    /// The last app signed with this certificate's one ID — the one iPhone will replace.
+    /// Its own name, not this app's, and never this app itself.
+    var lastSignedWithThisID: String? {
+        guard let pattern = pairedPattern, !pattern.hasSuffix("*") else { return nil }
+        return store.library
+            .filter { $0.isSigned && $0.bundleID == pattern && $0.name != (info?.name ?? name) }
+            .max(by: { $0.added < $1.added })?.name
     }
 
     // MARK: actions
@@ -260,5 +278,9 @@ struct SignView: View {
         options.compressOutput = compressOutput
         options.adhoc = store.selectedCertificate == nil
         await runner.run(ipa: app.fileURL, options: options, certificate: store.selectedCertificate)
+        // Straight into installing, the way ESign does, unless the switch in Settings says not to.
+        if installAfterSigning, runner.finished != nil, let signed = store.library.first, signed.isSigned {
+            installing = signed
+        }
     }
 }

@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("compressOutput") private var compressOutput = false
     @AppStorage("keepLongJobsRunning") private var keepLongJobsRunning = true
     @AppStorage(SigningRunner.traceKey) private var writeTrace = true
+    @AppStorage("installAfterSigning") private var installAfterSigning = true
     @State private var webCertPassword = ""
 
     var body: some View {
@@ -73,6 +74,10 @@ struct SettingsView: View {
                 }
 
                 Section("Signing") {
+                    Toggle("Install as soon as it is signed", isOn: $installAfterSigning)
+                    Text("Goes straight to installing when signing finishes, the way ESign does. "
+                         + "Off leaves the app in My apps for you to install when you like.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Toggle("Keep long jobs running", isOn: $keepLongJobsRunning)
                     Text("Keeps signing or installing a huge app alive if the screen locks or you "
                          + "switch away. It runs only while a job is active.")
