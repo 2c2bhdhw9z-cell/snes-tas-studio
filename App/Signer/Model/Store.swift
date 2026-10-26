@@ -19,6 +19,10 @@ final class Store: ObservableObject {
     var filesDir: URL { Paths.files }
     var tweaksDir: URL { Paths.tweaks }
 
+    /// Gigabytes freed at launch from a signing run iOS killed, if any. Shown in Settings
+    /// so the space is not just silently reclaimed.
+    @Published var leftoversFreed: Int64 = 0
+
     private init() {
         Paths.createAll()
         load()

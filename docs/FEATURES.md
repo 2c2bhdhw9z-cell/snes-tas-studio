@@ -32,6 +32,9 @@ BuildBox, BatSign, ABox, SideStore. Each line below is a feature one of them has
 | File tab, imports from anywhere | ESign, GBox | `Views/FilesView.swift` |
 | Install as soon as it is signed | ESign | 26 Oct |
 | A trace file for a job iOS kills | nobody | `Util/Trace.swift` |
+| Signer's own look: light, dark, or follow the phone | ESign, Feather, KSign | `Model/Appearance.swift`, 26 Oct |
+| Apps and signing on one screen, no empty Sign tab | GBox, KSign | `Views/LibraryView.swift`, 26 Oct |
+| Clears the gigabytes a killed signing run leaves behind | nobody | `IPASigner.clearLeftovers`, 26 Oct |
 
 ## Still to build, in the order it is worth doing
 

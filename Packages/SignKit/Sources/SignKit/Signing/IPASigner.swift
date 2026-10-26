@@ -164,4 +164,37 @@ public final class IPASigner {
             warnings: warnings
         )
     }
+
+    /// Throws away work folders left by a run that never finished.
+    ///
+    /// Signing unpacks the whole app into a temporary folder and deletes it when it is done,
+    /// or when it fails - but not when iOS kills the app part-way through, which is exactly
+    /// what happened to the owner's PUBG twice: a 3.7 GB app leaves 3.7 GB of unpacked files
+    /// sitting in the temporary folder, invisible, and the next try leaves another.
+    /// Nothing is signing when the app starts, so anything still here is dead.
+    /// Returns how many bytes were freed.
+    @discardableResult
+    public static func clearLeftovers() -> Int64 {
+        let fm = FileManager.default
+        let temp = fm.temporaryDirectory
+        guard let names = try? fm.contentsOfDirectory(atPath: temp.path) else { return 0 }
+        var freed: Int64 = 0
+        for name in names where name.hasPrefix("signkit-") {
+            let folder = temp.appendingPathComponent(name)
+            freed += IPASigner.sizeOnDisk(of: folder)
+            try? fm.removeItem(at: folder)
+        }
+        return freed
+    }
+
+    private static func sizeOnDisk(of folder: URL) -> Int64 {
+        let fm = FileManager.default
+        guard let walker = fm.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey],
+                                         options: []) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in walker {
+            total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
+        return total
+    }
 }

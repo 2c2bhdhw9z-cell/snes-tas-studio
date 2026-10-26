@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("keepLongJobsRunning") private var keepLongJobsRunning = true
     @AppStorage(SigningRunner.traceKey) private var writeTrace = true
     @AppStorage("installAfterSigning") private var installAfterSigning = true
+    @AppStorage(AppTheme.key) private var theme = AppTheme.system.rawValue
     @State private var webCertPassword = ""
 
     var body: some View {
@@ -38,6 +39,18 @@ struct SettingsView: View {
                             }
                         }
                     }
+                }
+
+                Section("Appearance") {
+                    Picker("Theme", selection: $theme) {
+                        ForEach(AppTheme.allCases) { choice in
+                            Label(choice.label, systemImage: choice.symbol).tag(choice.rawValue)
+                        }
+                    }
+                    Text(AppTheme.named(theme) == .system
+                         ? "Follows your phone's Light or Dark setting, including its night schedule."
+                         : "Signer stays \(AppTheme.named(theme).label.lowercased()) whatever the phone is set to.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
                 Section("Installing") {
@@ -110,6 +123,11 @@ struct SettingsView: View {
                 Section("Storage") {
                     LabeledContent("Apps kept", value: "\(store.library.count)")
                     LabeledContent("Space used", value: storageText)
+                    if store.leftoversFreed > 0 {
+                        Text("Freed \(ByteCountFormatter.string(fromByteCount: store.leftoversFreed, countStyle: .file)) "
+                             + "left over from a signing run that was cut short.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Button("Delete every app in My apps", role: .destructive) {
                         store.library.forEach(store.deleteApp)
                     }

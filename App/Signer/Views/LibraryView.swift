@@ -1,32 +1,39 @@
 import SwiftUI
+import Combine
 import UIKit
 import UniformTypeIdentifiers
 import SignKit
 
-/// The apps on this phone's list: imported ones and ones we signed.
+/// The apps on this phone, and signing them — one screen.
+///
+/// There used to be a separate Sign tab that opened with nothing chosen. Signing now starts
+/// from the list: tap Sign on an app, or "Sign an app" at the top to pick a file first.
 struct LibraryView: View {
     @EnvironmentObject var store: Store
-    @State private var installing: LibraryApp?
-    @State private var errorMessage: String?
+    @State private var path: [Route] = []
     @State private var banner: String?
 
+    /// Where the list can go. Only one place so far: the Sign screen, on an app or on nothing.
+    enum Route: Hashable {
+        case sign(LibraryApp?)
+    }
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if store.library.isEmpty {
                     emptyState
                 } else {
-                    List {
-                        ForEach(store.library) { app in
-                            AppRow(app: app) { installing = app }
-                        }
-                        .onDelete { indexes in
-                            indexes.map { store.library[$0] }.forEach(store.deleteApp)
-                        }
-                    }
+                    list
                 }
             }
             .navigationTitle("My apps")
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                case .sign(let app):
+                    SignView(preselected: app)
+                }
+            }
             .toolbar {
                 Button {
                     DocumentPicker.present { urls in
@@ -36,9 +43,6 @@ struct LibraryView: View {
                 } label: {
                     Label("Add an app", systemImage: "plus")
                 }
-            }
-            .sheet(item: $installing) { (app: LibraryApp) in
-                InstallView(app: app)
             }
             .overlay(alignment: .bottom) {
                 if let banner {
@@ -53,10 +57,56 @@ struct LibraryView: View {
                         }
                 }
             }
-            .alert("That did not work", isPresented: .constant(errorMessage != nil)) {
-                Button("OK") { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "")
+            // A file tapped on the File tab with "Sign this app" lands here.
+            .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
+                let chosen = (note.object as? UUID).flatMap { id in
+                    store.library.first { $0.id == id }
+                } ?? store.library.first
+                path = [.sign(chosen)]
+            }
+        }
+    }
+
+    var list: some View {
+        List {
+            Section {
+                Button {
+                    path.append(.sign(nil))
+                } label: {
+                    Label("Sign an app", systemImage: "signature")
+                        .font(.body.weight(.medium))
+                }
+            }
+            Section {
+                ForEach(store.library) { app in
+                    AppRow(app: app,
+                           sign: { path.append(.sign(app)) },
+                           install: { store.pendingInstall = app })
+                        .contextMenu {
+                            Button {
+                                path.append(.sign(app))
+                            } label: {
+                                Label(app.isSigned ? "Sign again" : "Sign", systemImage: "signature")
+                            }
+                            if app.isSigned {
+                                Button {
+                                    store.pendingInstall = app
+                                } label: {
+                                    Label("Install", systemImage: "arrow.down.app")
+                                }
+                            }
+                            Button(role: .destructive) {
+                                store.deleteApp(app)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                }
+                .onDelete { indexes in
+                    indexes.map { store.library[$0] }.forEach(store.deleteApp)
+                }
+            } header: {
+                Text("\(store.library.count) app" + (store.library.count == 1 ? "" : "s"))
             }
         }
     }
@@ -74,6 +124,12 @@ struct LibraryView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
+            Button {
+                path.append(.sign(nil))
+            } label: {
+                Label("Sign an app", systemImage: "signature")
+            }
+            .buttonStyle(.borderedProminent)
         }
     }
 
@@ -84,6 +140,7 @@ struct LibraryView: View {
 
 struct AppRow: View {
     let app: LibraryApp
+    let sign: () -> Void
     let install: () -> Void
 
     var body: some View {
@@ -105,24 +162,23 @@ struct AppRow: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
             } else {
-                NavigationLink {
-                    SignView(preselected: app)
-                } label: {
-                    Text("Sign")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                Button("Sign", action: sign)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
             }
         }
     }
 }
 
+/// An app's icon in a row. Reading and decoding happens once, off the main thread
+/// (see `IconCache`); the row body only draws what is already there.
 struct AppIcon: View {
     let url: URL?
+    @State private var image: UIImage?
 
     var body: some View {
         Group {
-            if let url, let data = try? Data(contentsOf: url), let image = UIImage(data: data) {
+            if let image {
                 Image(uiImage: image).resizable()
             } else {
                 Image(systemName: "app.dashed").resizable().foregroundStyle(.secondary)
@@ -130,7 +186,16 @@ struct AppIcon: View {
         }
         .frame(width: 44, height: 44)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .task(id: url) {
+            guard let url else {
+                image = nil
+                return
+            }
+            if let hit = IconCache.shared.cached(url) {
+                image = hit
+            } else {
+                image = await IconCache.shared.load(url)
+            }
+        }
     }
 }
-
-

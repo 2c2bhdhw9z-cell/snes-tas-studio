@@ -238,7 +238,11 @@ final class InstallServer: ObservableObject {
         let chunkSize = 1 << 20
         var sent = 0
         func pump() {
-            let chunk = handle.readData(ofLength: min(chunkSize, remaining))
+            // Each read hands back a block iOS owns until the autorelease pool drains, and this
+            // loop runs thousands of times for a big app (a 4 GB game is 4000 blocks). Letting
+            // each block go as it is sent keeps installing flat on memory instead of growing
+            // with the app's size - the same fix the signing loops needed (SignKit's withPool).
+            let chunk = autoreleasepool { handle.readData(ofLength: min(chunkSize, remaining)) }
             if chunk.isEmpty || remaining == 0 {
                 try? handle.close()
                 conn.send(content: nil, isComplete: true, completion: .contentProcessed { _ in conn.cancel() })

@@ -135,8 +135,17 @@ struct FilesView: View {
 
     // MARK: - doing things
 
+    /// Listing a folder means asking iOS about every file in it, and counting what is inside
+    /// every folder in it. Off the main thread, so a folder with hundreds of files does not
+    /// freeze the screen while it is read.
     func reload() {
-        entries = FileEntry.list(in: directory)
+        let folder = directory
+        Task { @MainActor in
+            let found = await Task.detached(priority: .userInitiated) {
+                FileEntry.list(in: folder)
+            }.value
+            entries = found
+        }
     }
 
     func show(_ text: String, error: Bool = false) {
@@ -151,7 +160,7 @@ struct FilesView: View {
     func addToLibrary(_ entry: FileEntry, thenSign: Bool) {
         do {
             let app = try SigningRunner.importIPA(entry.url)
-            show(thenSign ? "Added — open the Sign tab" : "Added to My apps")
+            show(thenSign ? "Opening it in My apps…" : "Added to My apps")
             if thenSign { NotificationCenter.default.post(name: .signThisApp, object: app.id) }
         } catch let e as SignKitError {
             show(e.description, error: true)
@@ -254,21 +263,34 @@ struct FileRow: View {
 }
 
 /// Looks inside a file: the useful details, the text, or the raw bytes.
+///
+/// Reading happens once, off the main thread. It used to happen inside `body`, which SwiftUI
+/// runs again at will: opening a 4 GB app meant unpacking its Info.plist on the main thread
+/// every redraw, and the hex view re-read 64 KB off disk each time.
 struct FileViewer: View {
     @Environment(\.dismiss) var dismiss
     let entry: FileEntry
     let hex: Bool
+    @State private var shown: Shown?
+
+    struct Shown: Sendable {
+        let text: String
+        let monospaced: Bool
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    if !hex, let summary = details {
-                        Text(summary).font(.callout).textSelection(.enabled)
-                    } else {
-                        Text(body(of: entry.url))
-                            .font(.footnote.monospaced())
+                    if let shown {
+                        Text(shown.text)
+                            .font(shown.monospaced ? .footnote.monospaced() : .callout)
                             .textSelection(.enabled)
+                    } else {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("Reading…").foregroundStyle(.secondary)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -278,13 +300,26 @@ struct FileViewer: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Done") { dismiss() } }
         }
+        .task {
+            let url = entry.url
+            let kind = entry.kind
+            let bytes = entry.bytes
+            let raw = hex
+            let result = await Task.detached(priority: .userInitiated) { () -> Shown in
+                if !raw, let summary = FileViewer.details(url: url, kind: kind, bytes: bytes) {
+                    return Shown(text: summary, monospaced: false)
+                }
+                return Shown(text: FileViewer.body(of: url, hex: raw), monospaced: true)
+            }.value
+            await MainActor.run { shown = result }
+        }
     }
 
     /// For a certificate or profile, show what is actually in it.
-    var details: String? {
-        switch entry.kind {
+    static func details(url: URL, kind: FileEntry.Kind, bytes: Int) -> String? {
+        switch kind {
         case .profile:
-            guard let p = try? ProvisioningProfile(url: entry.url) else { return nil }
+            guard let p = try? ProvisioningProfile(url: url) else { return nil }
             var lines = ["Profile: \(p.name ?? "-")"]
             if let team = p.teamName { lines.append("Team: \(team) (\(p.teamID ?? "-"))") }
             if let pattern = p.bundleIDPattern { lines.append("Apps allowed: \(pattern)") }
@@ -298,7 +333,7 @@ struct FileViewer: View {
             }
             return lines.joined(separator: "\n")
         case .ipa:
-            guard let info = try? IPAInfo.read(entry.url) else { return nil }
+            guard let info = try? IPAInfo.read(url) else { return nil }
             var lines = ["App: \(info.name)", "ID: \(info.bundleID)",
                          "Version: \(info.version) (\(info.build))"]
             if let min = info.minimumOS { lines.append("Needs iOS: \(min)") }
@@ -310,7 +345,7 @@ struct FileViewer: View {
             return lines.joined(separator: "\n")
         case .p12:
             return "A certificate file. Tap Import on it to use it for signing.\n"
-                + "Size: \(ByteCountFormatter.string(fromByteCount: Int64(entry.bytes), countStyle: .file))"
+                + "Size: \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"
         case .other:
             return nil
         }
@@ -318,9 +353,9 @@ struct FileViewer: View {
 
     /// Looks at no more than the first 64 KB — opening a two-gigabyte file must
     /// never pull the whole thing into memory.
-    func body(of url: URL) -> String {
+    static func body(of url: URL, hex: Bool) -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "Could not read this file." }
-        let slice = handle.readData(ofLength: 64 * 1024)
+        let slice = autoreleasepool { handle.readData(ofLength: 64 * 1024) }
         try? handle.close()
         let total = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? slice.count
         if !hex, let text = String(data: slice, encoding: .utf8), !text.isEmpty {

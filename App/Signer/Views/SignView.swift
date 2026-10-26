@@ -22,39 +22,28 @@ struct SignView: View {
     @State private var separateCopy = false
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
-    @State private var installing: LibraryApp?
     @AppStorage("installAfterSigning") private var installAfterSigning = true
 
     init(preselected: LibraryApp? = nil) {
         _app = State(initialValue: preselected)
     }
 
+    // Opened from My apps, so it is pushed into that screen's stack — no stack of its own,
+    // and installing is the root screen's single sheet (`Store.pendingInstall`).
     var body: some View {
-        NavigationStack {
-            Form {
-                appSection
-                if info != nil {
-                    detailsSection
-                    switchesSection
-                    tweaksSection
-                }
-                certificateSection
-                actionSection
+        Form {
+            appSection
+            if info != nil {
+                detailsSection
+                switchesSection
+                tweaksSection
             }
-            .navigationTitle("Sign")
-            .onAppear { if let app, info == nil { select(app) } }
-            .sheet(item: $installing) { (app: LibraryApp) in
-                InstallView(app: app)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
-                if let id = note.object as? UUID,
-                   let found = store.library.first(where: { $0.id == id }) {
-                    select(found)
-                } else if let newest = store.library.first {
-                    select(newest)
-                }
-            }
+            certificateSection
+            actionSection
         }
+        .navigationTitle("Sign")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { if let app, info == nil { select(app) } }
     }
 
     // MARK: sections
@@ -203,7 +192,7 @@ struct SignView: View {
                 }
                 if let signed = store.library.first, signed.isSigned {
                     Button {
-                        installing = signed
+                        store.pendingInstall = signed
                     } label: {
                         Label("Install it now", systemImage: "arrow.down.app")
                             .frame(maxWidth: .infinity)

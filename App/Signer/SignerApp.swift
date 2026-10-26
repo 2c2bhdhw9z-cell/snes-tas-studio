@@ -20,8 +20,9 @@ struct SignerApp: App {
 struct RootView: View {
     @EnvironmentObject var store: Store
     @State private var tab = Tab.files
+    @AppStorage(AppTheme.key) private var theme = AppTheme.system.rawValue
 
-    enum Tab: Hashable { case files, apps, sign, sources, settings }
+    enum Tab: Hashable { case files, apps, sources, settings }
 
     var body: some View {
         TabView(selection: $tab) {
@@ -29,13 +30,11 @@ struct RootView: View {
                 .tabItem { Label("File", systemImage: "folder") }
                 .tag(Tab.files)
 
+            // Signing lives inside My apps: the list is where apps are, so the Sign screen
+            // opens from the app you picked instead of being a tab that starts empty.
             LibraryView()
                 .tabItem { Label("My apps", systemImage: "square.grid.2x2") }
                 .tag(Tab.apps)
-
-            SignView()
-                .tabItem { Label("Sign", systemImage: "signature") }
-                .tag(Tab.sign)
 
             SourcesView()
                 .tabItem { Label("Sources", systemImage: "antenna.radiowaves.left.and.right") }
@@ -45,9 +44,21 @@ struct RootView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
                 .tag(Tab.settings)
         }
-        // Tapping "Sign this app" on a file jumps straight to the Sign tab.
+        // Tapping "Sign this app" on a file goes to My apps, which opens the Sign screen
+        // on that app (LibraryView listens for the same thing).
         .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { _ in
-            tab = .sign
+            tab = .apps
+        }
+        // Light, dark, or follow the phone. nil is "follow the phone".
+        .preferredColorScheme(AppTheme.named(theme).colorScheme)
+        // A signing run iOS killed part-way through leaves the whole unpacked app in the
+        // temporary folder - 3.7 GB for the owner's PUBG, twice, and nothing ever deleted it.
+        // Nothing is signing at launch, so clear it, in the background.
+        .task {
+            let freed = await Task.detached(priority: .background) {
+                IPASigner.clearLeftovers()
+            }.value
+            if freed > 0 { store.leftoversFreed = freed }
         }
         // One place for "Imported successfully", the password prompt and any complaint.
         .importFeedback()
