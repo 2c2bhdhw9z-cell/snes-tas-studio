@@ -66,7 +66,8 @@ enum Intake {
             let total = (try? fm.attributesOfItem(atPath: source.path)[.size] as? Int) ?? 0
             var copied = 0
             while true {
-                let chunk = input.readData(ofLength: 4 << 20)
+                // Each block let go as it is written: see SignKit's CodeResources.hashesOfFile.
+                let chunk = autoreleasepool { input.readData(ofLength: 4 << 20) }
                 if chunk.isEmpty { break }
                 try output.write(contentsOf: chunk)
                 copied += chunk.count

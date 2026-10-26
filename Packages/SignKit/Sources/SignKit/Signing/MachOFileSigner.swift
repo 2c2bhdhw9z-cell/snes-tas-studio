@@ -114,10 +114,15 @@ public struct MachOFileSigner {
             var copied = headerSize
             while copied < bodyEnd {
                 let want = min(4 << 20, bodyEnd - copied)
-                let chunk = input.readData(ofLength: want)
-                if chunk.isEmpty { break }
-                try output.write(contentsOf: chunk)
-                copied += chunk.count
+                // Each block let go as it is written: see CodeResources.hashesOfFile.
+                let got = try withPool { () -> Int in
+                    let chunk = input.readData(ofLength: want)
+                    if chunk.isEmpty { return 0 }
+                    try output.write(contentsOf: chunk)
+                    return chunk.count
+                }
+                if got == 0 { break }
+                copied += got
                 progress?(Double(copied) / Double(bodyEnd) * 0.5)
             }
             if codeLimit > copied {
@@ -256,8 +261,11 @@ public struct MachOFileSigner {
 
         while offset < limit {
             let want = min(batchPages * pageSize, limit - offset)
+            // The block is hashed and let go inside the pool; only its page hashes come out.
+            // See CodeResources.hashesOfFile for why this matters on a big app.
+            let (batch, read): ([Data], Int) = withPool {
             let chunk = handle.readData(ofLength: want)
-            guard !chunk.isEmpty else { break }
+            guard !chunk.isEmpty else { return ([], 0) }
             let pages = (chunk.count + pageSize - 1) / pageSize
             var batch = [Data](repeating: Data(), count: pages)
             chunk.withUnsafeBytes { raw in
@@ -273,8 +281,11 @@ public struct MachOFileSigner {
                     }
                 }
             }
+            return (batch, chunk.count)
+            }
+            if read == 0 { break }
             hashes.append(contentsOf: batch)
-            offset += chunk.count
+            offset += read
             progress?(0.5 + Double(offset) / Double(limit) * 0.5)
         }
         return hashes

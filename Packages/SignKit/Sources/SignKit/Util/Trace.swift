@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// A breadcrumb file written while a job runs, so that if the app is closed by iOS part-way
 /// through — out of memory, or anything else that leaves no error behind — the file still says
@@ -135,20 +138,48 @@ public enum Trace {
         return "closed unexpectedly at — " + (steps.last ?? last)
     }
 
-    /// One line without its time stamp (the stamp is one padded word).
+    /// One line without its time stamp and memory figure.
     private static func body(_ line: String) -> String {
         var rest = Substring(line)
         while rest.first == " " { rest = rest.dropFirst() }
-        if let space = rest.firstIndex(of: " ") { rest = rest[rest.index(after: space)...] }
+        if let space = rest.firstIndex(of: " ") { rest = rest[rest.index(after: space)...] }   // the time
+        if rest.first == "[", let close = rest.firstIndex(of: "]") {                            // the memory
+            rest = rest[rest.index(after: close)...]
+            while rest.first == " " { rest = rest.dropFirst() }
+        }
         return String(rest)
     }
 
     // MARK: - inside the lock
 
+    /// How much memory this app is using right now, in bytes, or 0 when it cannot be read.
+    /// On the phone this is the figure iOS kills an app over, so every trace line carries it:
+    /// a run that dies with this climbing was killed for memory, and one that dies with it flat
+    /// was not.
+    public static func memoryNow() -> Int {
+        #if canImport(Darwin)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Int(info.phys_footprint) : 0
+        #else
+        // Linux (the test machine): resident pages out of /proc.
+        guard let text = try? String(contentsOfFile: "/proc/self/statm", encoding: .utf8),
+              let pages = text.split(separator: " ").dropFirst().first.flatMap({ Int($0) }) else { return 0 }
+        return pages * 4096
+        #endif
+    }
+
     private static func writeLocked(_ text: String) {
         guard let h = state.handle else { return }
         let stamp = String(format: "%7.2fs ", Date().timeIntervalSince(state.started))
-        guard let data = (stamp + text + "\n").data(using: .utf8) else { return }
+        let memory = memoryNow()
+        let used = memory > 0 ? String(format: "[%5.0f MB] ", Double(memory) / 1_048_576) : ""
+        guard let data = (stamp + used + text + "\n").data(using: .utf8) else { return }
         h.write(data)
         // A killed app's buffers are lost, so every line goes to the disk now.
         try? h.synchronize()
@@ -170,4 +201,17 @@ final class Locked<Value>: @unchecked Sendable {
         defer { lock.unlock() }
         return body(&value)
     }
+}
+
+/// Runs `body` inside an autorelease pool on the phone, and plainly on Linux (which has no such
+/// thing). Every loop that reads a file a block at a time goes through this: without it, iOS
+/// keeps every block read until the whole job ends, and a game with gigabytes of data files
+/// grows the app until iOS kills it. See `CodeResources.hashesOfFile`.
+@inline(__always)
+func withPool<T>(_ body: () throws -> T) rethrows -> T {
+    #if canImport(Darwin)
+    return try autoreleasepool { try body() }
+    #else
+    return try body()
+    #endif
 }

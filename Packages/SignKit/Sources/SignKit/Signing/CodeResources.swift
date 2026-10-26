@@ -166,11 +166,19 @@ public enum CodeResources {
         defer { try? handle.close() }
         var h1 = Hasher(.sha1)
         var h2 = Hasher(.sha256)
-        while true {
-            let chunk = handle.readData(ofLength: 4 << 20)
-            if chunk.isEmpty { break }
-            h1.update(chunk)
-            h2.update(chunk)
+        var done = false
+        while !done {
+            // Each block is read, hashed and then let go inside its own pool. Without this, iOS
+            // holds every block read until the whole job ends: a game with three gigabytes of
+            // data files grows the app by three gigabytes and iOS kills it part-way through
+            // (the owner's PUBG sign, 26 October, died at the thirteenth large file both times).
+            // On Linux there is nothing to hold, which is why it never showed up in testing.
+            try withPool {
+                let chunk = handle.readData(ofLength: 4 << 20)
+                if chunk.isEmpty { done = true; return }
+                h1.update(chunk)
+                h2.update(chunk)
+            }
         }
         return (h1.finish(), h2.finish())
     }

@@ -18,14 +18,20 @@ public enum ZipStream {
         if stored {
             while remaining > 0 {
                 let want = min(chunk, remaining)
-                let data = source.readData(ofLength: want)
-                guard !data.isEmpty else { break }
-                crc = data.withUnsafeBytes { p in
-                    UInt32(CZlib.crc32(uLong(crc), p.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                                       UInt32(data.count)))
+                // Read, write, and let the block go: see the note in CodeResources.hashesOfFile.
+                // Only the count leaves the pool, never the block itself.
+                let got = try withPool { () -> Int in
+                    let d = source.readData(ofLength: want)
+                    guard !d.isEmpty else { return 0 }
+                    crc = d.withUnsafeBytes { p in
+                        UInt32(CZlib.crc32(uLong(crc), p.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                           UInt32(d.count)))
+                    }
+                    try destination.write(contentsOf: d)
+                    return d.count
                 }
-                try destination.write(contentsOf: data)
-                remaining -= data.count
+                if got == 0 { break }
+                remaining -= got
             }
             return crc
         }
@@ -41,9 +47,9 @@ public enum ZipStream {
 
         while remaining > 0 && status != Z_STREAM_END {
             let want = min(chunk, remaining)
+            let got = try withPool { () -> Int in
             var input = source.readData(ofLength: want)
-            guard !input.isEmpty else { break }
-            remaining -= input.count
+            guard !input.isEmpty else { return 0 }
 
             try input.withUnsafeMutableBytes { inPtr in
                 stream.next_in = inPtr.baseAddress?.assumingMemoryBound(to: UInt8.self)
@@ -70,6 +76,10 @@ public enum ZipStream {
                     if produced == 0 && status != Z_STREAM_END { break }
                 } while stream.avail_in > 0 || status == Z_OK
             }
+            return input.count
+            }
+            if got == 0 { break }
+            remaining -= got
         }
         return crc
     }
@@ -84,14 +94,18 @@ public enum ZipStream {
 
         if !compress {
             while true {
-                let data = source.readData(ofLength: chunk)
-                if data.isEmpty { break }
-                crc = data.withUnsafeBytes { p in
-                    UInt32(CZlib.crc32(uLong(crc), p.baseAddress?.assumingMemoryBound(to: UInt8.self),
-                                       UInt32(data.count)))
+                let got = try withPool { () -> Int in
+                    let data = source.readData(ofLength: chunk)
+                    if data.isEmpty { return 0 }
+                    crc = data.withUnsafeBytes { p in
+                        UInt32(CZlib.crc32(uLong(crc), p.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                                           UInt32(data.count)))
+                    }
+                    try destination.write(contentsOf: data)
+                    return data.count
                 }
-                try destination.write(contentsOf: data)
-                written += data.count
+                if got == 0 { break }
+                written += got
             }
             return (crc, written, 0)
         }
@@ -107,6 +121,7 @@ public enum ZipStream {
         var finished = false
 
         while !finished {
+            try withPool {
             var input = source.readData(ofLength: chunk)
             let isLast = input.count < chunk
             if !input.isEmpty {
@@ -135,6 +150,7 @@ public enum ZipStream {
                 } while stream.avail_in > 0 || (isLast && !finished)
             }
             if isLast { finished = true }
+            }
         }
         return (crc, written, 8)
     }
