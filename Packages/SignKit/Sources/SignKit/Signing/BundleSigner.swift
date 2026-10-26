@@ -53,7 +53,17 @@ public final class BundleSigner {
                 let kind = url.pathExtension
                 if kind == "appex" || kind == "app", let ents = entitlements,
                    let childInfo = try? infoPlist(of: url), let childID = childInfo["CFBundleIdentifier"] as? String {
-                    childEnts = profile?.entitlements(forBundleID: childID) ?? ents
+                    // An extension normally carries its own app identifier. A profile made for one
+                    // exact app ID does not cover the extension's own ID, so it shares the app's
+                    // identifier instead — what zsign (so ESign and GBox) does, and what iOS
+                    // accepts: its bundle id still sits under the app's, and its identifier
+                    // matches the profile. Removing the extension instead would break any app
+                    // that needs it (Continuum's JIT helper, a widget).
+                    if let p = profile, p.allows(bundleID: childID) {
+                        childEnts = p.entitlements(forBundleID: childID)
+                    } else {
+                        childEnts = ents
+                    }
                 }
                 cdHashes[rel] = try child.sign(bundle: url, entitlements: childEnts)
             } else {

@@ -137,36 +137,81 @@ final class IPASignerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
     }
 
-    /// A profile made for exactly one app ID: the app must take that ID, and its
-    /// extensions must go, or iOS refuses the install. (Real profile from ESign.)
-    func testOneIDProfileSwitchesTheAppIDAndDropsExtensions() throws {
-        let profilePath = "/projects/sandbox/research/ipa/x/ESign/Payload/ESign.app/embedded.mobileprovision"
-        let ipaPath = "/projects/sandbox/research/ipa/SideStore.ipa"
-        guard FileManager.default.fileExists(atPath: profilePath),
-              FileManager.default.fileExists(atPath: ipaPath) else { throw XCTSkip("samples missing") }
+    /// A profile made for exactly one app ID: the app takes that ID, and its extensions are
+    /// KEPT, moved under the new ID and signed with the app's own identifier. That is what
+    /// zsign (so ESign and GBox) does, and what iOS accepts: removing them instead broke
+    /// Continuum's JIT helper, which the app then reported as missing.
+    func testOneIDProfileSwitchesTheAppIDAndKeepsExtensionsUnderIt() throws {
+        let input = try sample()
+        // The stand-in certificate's profile: one exact app ID, like a bought certificate's.
         let identity = try IPASigner.Identity.load(
-            p12: IPASignerTests.fixtures.appendingPathComponent("testcert.p12"),
-            password: "hunter2", profile: URL(fileURLWithPath: profilePath))
-        let allowed = try XCTUnwrap(identity.profile?.bundleIDPattern)
+            p12: IPASignerTests.fixtures.appendingPathComponent("standin.p12"), password: "hunter2",
+            profile: IPASignerTests.fixtures.appendingPathComponent("standin.mobileprovision"))
+        let profile = try XCTUnwrap(identity.profile)
+        let allowed = try XCTUnwrap(profile.bundleIDPattern)
         XCTAssertFalse(allowed.hasSuffix("*"), "this test needs a one-ID profile")
+        let team = try XCTUnwrap(profile.teamID)
 
         let dir = try temp()
         defer { try? FileManager.default.removeItem(at: dir) }
+
+        // The sample app with an extension added, standing in for a widget or a helper.
+        let work = dir.appendingPathComponent("work")
+        try ZipReader(url: input).extractAll(to: work)
+        let payload = work.appendingPathComponent("Payload")
+        let appName = try XCTUnwrap((try FileManager.default.contentsOfDirectory(atPath: payload.path))
+            .first { $0.hasSuffix(".app") })
+        let app = payload.appendingPathComponent(appName)
+        let hostInfo = try PropertyListSerialization.propertyList(
+            from: try Data(contentsOf: app.appendingPathComponent("Info.plist")), format: nil) as? [String: Any] ?? [:]
+        let hostID = try XCTUnwrap(hostInfo["CFBundleIdentifier"] as? String)
+        let hostExec = try XCTUnwrap(hostInfo["CFBundleExecutable"] as? String)
+        let appex = app.appendingPathComponent("PlugIns/Helper.appex")
+        try FileManager.default.createDirectory(at: appex, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: app.appendingPathComponent(hostExec),
+                                         to: appex.appendingPathComponent("Helper"))
+        let appexInfo: [String: Any] = [
+            "CFBundleIdentifier": hostID + ".Helper",
+            "CFBundleExecutable": "Helper",
+            "CFBundleName": "Helper",
+            "NSExtension": ["NSExtensionPointIdentifier": "com.apple.widgetkit-extension"],
+        ]
+        try PropertyListSerialization.data(fromPropertyList: appexInfo, format: .xml, options: 0)
+            .write(to: appex.appendingPathComponent("Info.plist"))
+        let withExtension = dir.appendingPathComponent("with-extension.ipa")
+        let packer = try ZipWriter(url: withExtension)
+        try packer.addTree(at: payload, prefix: "Payload/", compress: false)
+        try packer.finish()
+
         let output = dir.appendingPathComponent("out.ipa")
         var options = SigningOptions()
         options.compressOutput = false
-        let result = try IPASigner().sign(ipa: URL(fileURLWithPath: ipaPath), to: output,
-                                          identity: identity, options: options)
+        let result = try IPASigner().sign(ipa: withExtension, to: output, identity: identity, options: options)
 
         XCTAssertEqual(result.bundleID, allowed)
         XCTAssertTrue(result.warnings.contains { $0.contains(allowed) }, "the user must be told")
-        let names = try ZipReader(url: output).entries.map(\.name)
-        XCTAssertFalse(names.contains { $0.contains(".appex/") }, "extensions must be removed")
+        XCTAssertFalse(result.warnings.contains { $0.contains("Check failed") },
+                       "the finished app must pass its own check: \(result.warnings)")
 
+        let names = try ZipReader(url: output).entries.map(\.name)
+        XCTAssertTrue(names.contains { $0.contains("Helper.appex/") }, "the extension must be kept")
         let info = try PropertyListSerialization.propertyList(
             from: try read(output, ".app/Info.plist"), format: nil) as? [String: Any]
         XCTAssertEqual(info?["CFBundleIdentifier"] as? String, allowed)
-        XCTAssertTrue(names.contains { $0.hasSuffix(".app/embedded.mobileprovision") })
+        // The extension sits under the app's new ID ...
+        let exInfo = try PropertyListSerialization.propertyList(
+            from: try read(output, "Helper.appex/Info.plist"), format: nil) as? [String: Any]
+        XCTAssertEqual(exInfo?["CFBundleIdentifier"] as? String, allowed + ".Helper")
+        // ... and carries the app's identifier, the only one the profile allows.
+        let reader = try ZipReader(url: output)
+        let binary = try XCTUnwrap(reader.entries.first { $0.name.hasSuffix("Helper.appex/Helper") })
+        let slice = try MachOFile(data: try reader.data(for: binary)).slices[0]
+        let sig = try XCTUnwrap(slice.existingSignature)
+        let blobs = try XCTUnwrap(SignatureInspector.parseBlobs(sig))
+        let xml = try XCTUnwrap(blobs[CSSlot.entitlements])
+        let ents = try PropertyListSerialization.propertyList(
+            from: xml.sub(8, xml.count - 8), format: nil) as? [String: Any] ?? [:]
+        XCTAssertEqual(ents["application-identifier"] as? String, "\(team).\(allowed)")
     }
 
     func testRefusesSomethingThatIsNotAnApp() throws {

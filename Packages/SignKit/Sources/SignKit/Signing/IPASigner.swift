@@ -83,12 +83,15 @@ public final class IPASigner {
                 options.bundleID = allowed
                 warnings.append("Your profile only allows the app ID \(allowed), so the app was signed with that ID.")
             }
-            // Extensions each have their own app ID. A one-ID profile cannot cover them,
-            // and iOS then refuses the whole install, so they have to go.
+            // Extensions each have their own app ID, which a one-ID profile does not name.
+            // They are KEPT anyway: their bundle ids move under the app's new id and they are
+            // signed with the app's own identifier, which is what zsign (ESign, GBox) does and
+            // what iOS accepts. Removing them used to break the apps that need them — a widget,
+            // or Continuum's JIT helper, which iOS then reports as missing.
             if !profile.isWildcard, !options.removeExtensions, Modifier.hasExtensions(app) {
-                options.removeExtensions = true
-                warnings.append("Its extras (widgets, extensions) were removed: your profile allows only one app ID, "
-                                + "and iOS refuses the whole install if they stay.")
+                warnings.append("Its extras (widgets, extensions) share the app's ID, because your profile "
+                                + "allows only one. They are kept; turn on \"Remove the extras bundled with it\" "
+                                + "if an app will not install.")
             }
         }
         try Modifier(options: options, warnings: { self.warnings.append($0) }).apply(to: app)

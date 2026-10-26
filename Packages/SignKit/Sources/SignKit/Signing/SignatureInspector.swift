@@ -83,9 +83,13 @@ public enum SignatureInspector {
 
         // 3. Every app and extension needs a profile that covers it.
         if let profile {
+            let hostID = (try? PropertyListSerialization.propertyList(
+                from: Data(contentsOf: app.appendingPathComponent("Info.plist")), format: nil) as? [String: Any])?
+                .flatMap { $0["CFBundleIdentifier"] as? String }
             for bundle in bundles {
-                checkProfile(profile, bundle: bundle, name: bundle == app ? "the app" : relative(bundle),
-                             leaf: leafFound, now: now, report: &report)
+                let isApp = bundle == app
+                checkProfile(profile, bundle: bundle, name: isApp ? "the app" : relative(bundle),
+                             leaf: leafFound, now: now, hostAppID: isApp ? nil : hostID, report: &report)
             }
         }
         return report
@@ -458,8 +462,11 @@ public enum SignatureInspector {
 
     // MARK: - the profile
 
+    /// - Parameter hostAppID: the surrounding app's bundle id when `bundle` is an extension
+    ///   (nil for the app itself). An extension signed under a profile that allows only one app
+    ///   ID shares the app's identifier, so both its own id and the app's count as allowed.
     static func checkProfile(_ profile: ProvisioningProfile, bundle: URL, name: String, leaf: Certificate?,
-                             now: Date, report: inout Report) {
+                             now: Date, hostAppID: String? = nil, report: inout Report) {
         func bad(_ k: Problem.Kind, _ m: String) { report.problems.append(.init(kind: k, file: name, message: m)) }
         let embedded = bundle.appendingPathComponent("embedded.mobileprovision")
         guard let data = try? Data(contentsOf: embedded), let inside = try? ProvisioningProfile(data: data) else {
@@ -473,7 +480,10 @@ public enum SignatureInspector {
         guard let info = try? PropertyListSerialization.propertyList(
                 from: Data(contentsOf: bundle.appendingPathComponent("Info.plist")), format: nil) as? [String: Any],
               let bundleID = info["CFBundleIdentifier"] as? String else { return }
-        if !inside.allows(bundleID: bundleID) {
+        // An extension that sits under the app's id and shares its identifier is allowed, even
+        // though the profile never names the extension itself (BundleSigner explains why).
+        let sharesTheApp = hostAppID.map { bundleID.hasPrefix($0 + ".") } ?? false
+        if !inside.allows(bundleID: bundleID), !sharesTheApp {
             bad(.profile, "the app ID \(bundleID) is not allowed by the profile (it allows \(inside.bundleIDPattern ?? "?"))")
         }
         // What the program asks for must be something the profile grants.
@@ -487,8 +497,12 @@ public enum SignatureInspector {
         let granted = inside.entitlements
         if let appID = ents["application-identifier"] as? String {
             let prefix = (inside.applicationIdentifier ?? "").split(separator: ".").first.map(String.init) ?? ""
-            if appID != "\(prefix).\(bundleID)" {
-                bad(.entitlements, "the app identifier in the permissions (\(appID)) does not match \(prefix).\(bundleID)")
+            // Its own identifier, or the app's when it shares it.
+            var allowed = ["\(prefix).\(bundleID)"]
+            if let host = hostAppID { allowed.append("\(prefix).\(host)") }
+            if !allowed.contains(appID) {
+                bad(.entitlements, "the app identifier in the permissions (\(appID)) does not match "
+                    + allowed.joined(separator: " or "))
             }
         } else { bad(.entitlements, "the permissions have no application-identifier") }
         if let t = ents["com.apple.developer.team-identifier"] as? String, t != inside.teamID {
