@@ -264,9 +264,7 @@ struct SignView: View {
         options.compressOutput = compressOutput
         options.adhoc = store.selectedCertificate == nil
         await runner.run(ipa: app.fileURL, options: options, certificate: store.selectedCertificate)
-        // Straight into installing, the way ESign does, unless the switch in Settings says not to.
-        if installAfterSigning, runner.finished != nil, let signed = store.library.first, signed.isSigned {
-            installing = signed
-        }
+        // Installing is started by the job itself and shown by the root screen (SignerApp), so it
+        // happens even if this screen is gone by then.
     }
 }

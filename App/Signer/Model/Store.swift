@@ -202,6 +202,11 @@ final class Store: ObservableObject {
 
     // MARK: - library
 
+    /// An app that has just been signed and is waiting to be installed. The root screen shows
+    /// the install sheet for it, so "Install as soon as it is signed" works whichever screen
+    /// started the job and even if that screen has gone.
+    @Published var pendingInstall: LibraryApp?
+
     func addToLibrary(_ app: LibraryApp) {
         library.removeAll { $0.fileURL == app.fileURL }
         library.insert(app, at: 0)

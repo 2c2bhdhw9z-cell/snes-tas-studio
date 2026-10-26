@@ -51,6 +51,11 @@ struct RootView: View {
         }
         // One place for "Imported successfully", the password prompt and any complaint.
         .importFeedback()
+        // Installing starts here, not on the Sign screen, so it still happens when the job
+        // finishes while another tab is up or the Sign screen has been left.
+        .sheet(item: $store.pendingInstall) { (app: LibraryApp) in
+            InstallView(app: app)
+        }
     }
 }
 

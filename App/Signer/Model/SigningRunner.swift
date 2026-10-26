@@ -56,6 +56,11 @@ final class SigningRunner: ObservableObject {
             finished = result
             message = "Signed"
             fraction = 1
+            // Straight into installing, the way ESign does, unless Settings says otherwise.
+            if UserDefaults.standard.object(forKey: SigningRunner.installAfterKey) as? Bool ?? true,
+               let justSigned = store.library.first(where: { $0.fileName == outputName }) {
+                store.pendingInstall = justSigned
+            }
         } catch {
             errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
             message = "Stopped"
@@ -66,6 +71,8 @@ final class SigningRunner: ObservableObject {
 
     /// The Settings switch for the breadcrumb file.
     static let traceKey = "writeTrace"
+    /// The Settings switch for going straight into installing after signing.
+    static let installAfterKey = "installAfterSigning"
 
     /// Imports an `.ipa` into the library without signing it.
     static func importIPA(_ url: URL) throws -> LibraryApp {
