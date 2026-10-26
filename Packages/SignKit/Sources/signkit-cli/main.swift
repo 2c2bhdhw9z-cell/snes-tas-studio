@@ -72,7 +72,7 @@ func run() throws {
     case "sign-ipa":
         // sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]
         guard args.count >= 5 else {
-            print("usage: signkit-cli sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress]")
+            print("usage: signkit-cli sign-ipa <in.ipa> <out.ipa> <p12> <password> [profile] [--name X] [--id X] [--no-compress] [--trace file]")
             exit(2)
         }
         var profileURL: URL?
@@ -84,6 +84,11 @@ func run() throws {
             case "--name": options.displayName = args[i + 1]; i += 1
             case "--id": options.bundleID = args[i + 1]; i += 1
             case "--no-compress": options.compressOutput = false
+        case "--trace":
+            // The same breadcrumb file the app writes (Settings, Troubleshooting).
+            Trace.isOn = true
+            Trace.start(at: URL(fileURLWithPath: args[i + 1]), what: args[1])
+            i += 1
             case "--inject": options.injectLibraries.append(URL(fileURLWithPath: args[i + 1])); i += 1
             default: break
             }

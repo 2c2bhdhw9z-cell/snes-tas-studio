@@ -40,8 +40,11 @@ public final class BundleSigner {
         // 1. Everything nested inside, innermost first: bundles sign their own insides.
         let items = try nestedItems(in: bundle)
         let nested = items.bundles + items.loose
+        Trace.note("\(nested.count) parts inside \(bundle.lastPathComponent)")
+        Trace.phase("signing the parts of \(bundle.lastPathComponent)")
         var cdHashes = [String: Data]()
         for (i, rel) in nested.enumerated() {
+            Trace.step(i, of: nested.count, rel)
             report(Double(i) / Double(max(nested.count, 1)) * 0.6, "Signing \(URL(fileURLWithPath: rel).lastPathComponent)")
             let url = bundle.appendingPathComponent(rel)
             if items.bundles.contains(rel) {
@@ -85,6 +88,7 @@ public final class BundleSigner {
         report(0.85, "Signing \(bundle.lastPathComponent)")
         let infoData = try Data(contentsOf: bundle.appendingPathComponent("Info.plist"))
         let binary = bundle.appendingPathComponent(executable)
+        Trace.note("signing \(bundle.lastPathComponent)'s own program \(executable) (\(fileSize(of: binary)) bytes)")
         var options = MachOSigner.Options(
             identifier: bundleID,
             teamID: adhoc ? nil : (chain.first?.teamID ?? profile?.teamID),

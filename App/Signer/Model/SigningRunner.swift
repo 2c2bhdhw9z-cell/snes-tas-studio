@@ -23,6 +23,11 @@ final class SigningRunner: ObservableObject {
         let outputName = "signed-\(UUID().uuidString.prefix(8)).ipa"
         let output = store.appsDir.appendingPathComponent(outputName)
 
+        // The breadcrumb file (Settings, Troubleshooting). If iOS closes the app part-way
+        // through — out of memory, say — this is all that is left to say where it was.
+        Trace.isOn = UserDefaults.standard.object(forKey: SigningRunner.traceKey) as? Bool ?? true
+        Trace.start(at: Paths.trace, what: ipa.lastPathComponent)
+
         do {
             let identity = try certificate.map { try store.identity(for: $0) }
             let job = IPASigner()
@@ -54,9 +59,13 @@ final class SigningRunner: ObservableObject {
         } catch {
             errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
             message = "Stopped"
+            Trace.failed(errorMessage ?? "unknown")
         }
         isRunning = false
     }
+
+    /// The Settings switch for the breadcrumb file.
+    static let traceKey = "writeTrace"
 
     /// Imports an `.ipa` into the library without signing it.
     static func importIPA(_ url: URL) throws -> LibraryApp {

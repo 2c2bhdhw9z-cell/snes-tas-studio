@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("installLocalHTTPS") private var useLocalHTTPS = false
     @AppStorage("compressOutput") private var compressOutput = false
     @AppStorage("keepLongJobsRunning") private var keepLongJobsRunning = true
+    @AppStorage(SigningRunner.traceKey) private var writeTrace = true
     @State private var webCertPassword = ""
 
     var body: some View {
@@ -83,6 +84,24 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
+                Section("Troubleshooting") {
+                    Toggle("Keep a trace while signing", isOn: $writeTrace)
+                    Text("Writes a small file as it signs, a line at a time. If Signer closes on its "
+                         + "own part-way through, that file still says which file and step it was on. "
+                         + "It costs nothing noticeable and is kept only on this phone.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    NavigationLink {
+                        TraceView()
+                    } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Last run")
+                            Text(lastRunSummary)
+                                .font(.caption)
+                                .foregroundStyle(lastRunLooksBad ? .red : .secondary)
+                        }
+                    }
+                }
+
                 Section("Storage") {
                     LabeledContent("Apps kept", value: "\(store.library.count)")
                     LabeledContent("Space used", value: storageText)
@@ -107,6 +126,15 @@ struct SettingsView: View {
 
     var hasWebCertificate: Bool {
         FileManager.default.fileExists(atPath: store.root.appendingPathComponent("local-https.p12").path)
+    }
+
+    /// How the last signing run ended, in plain words.
+    var lastRunSummary: String {
+        Trace.summary(of: Paths.trace) ?? Trace.summary(of: Paths.tracePrevious) ?? "nothing recorded yet"
+    }
+
+    var lastRunLooksBad: Bool {
+        lastRunSummary.hasPrefix("closed unexpectedly") || lastRunSummary.hasPrefix("stopped: ")
     }
 
     var storageText: String {

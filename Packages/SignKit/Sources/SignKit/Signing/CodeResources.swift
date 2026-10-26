@@ -84,6 +84,8 @@ public enum CodeResources {
 
         var hashes = [(Data, Data)](repeating: (Data(), Data()), count: wanted.count)
         let root = bundle
+        Trace.note("\(wanted.count) files and \(symlinks.count) links to list in \(bundle.lastPathComponent)")
+        Trace.phase("listing \(bundle.lastPathComponent)")
         // Small files go across all cores. Large files are streamed one at a time so
         // a bundle containing several gigabyte-sized game files cannot fill memory.
         let sizes = wanted.map { rel -> Int in
@@ -93,20 +95,29 @@ public enum CodeResources {
         if small.count > 4 {
             hashes.withUnsafeMutableBufferPointer { out in
                 let buffer = out
+                let done = Locked(0)
                 DispatchQueue.concurrentPerform(iterations: small.count) { n in
                     let i = small[n]
+                    if Trace.isOn {
+                        let n = done.withLock { v -> Int in v += 1; return v }
+                        Trace.step(n - 1, of: wanted.count, wanted[i])
+                    }
                     guard let data = try? Data(contentsOf: root.appendingPathComponent(wanted[i]),
                                                options: .mappedIfSafe) else { return }
                     buffer[i] = (sha1(data), sha256(data))
                 }
             }
         } else {
-            for i in small {
+            for (n, i) in small.enumerated() {
+                Trace.step(n, of: wanted.count, wanted[i])
                 let data = try Data(contentsOf: root.appendingPathComponent(wanted[i]), options: .mappedIfSafe)
                 hashes[i] = (sha1(data), sha256(data))
             }
         }
-        for i in wanted.indices where sizes[i] > 8 << 20 {
+        let big = wanted.indices.filter { sizes[$0] > 8 << 20 }
+        if !big.isEmpty { Trace.phase("listing \(bundle.lastPathComponent)'s large files") }
+        for (n, i) in big.enumerated() {
+            Trace.note("large file \(n + 1) of \(big.count): \(wanted[i]) (\(sizes[i]) bytes)")
             hashes[i] = try hashesOfFile(root.appendingPathComponent(wanted[i]))
         }
         if let i = hashes.firstIndex(where: { $0.0.isEmpty || $0.1.isEmpty }) {
@@ -137,6 +148,7 @@ public enum CodeResources {
             }
         }
 
+        Trace.note("writing the list of \(files.count) files")
         let plist: [String: Any] = [
             "files": files,
             "files2": files2,

@@ -15,6 +15,10 @@ enum Paths {
     static var profiles: URL { root.appendingPathComponent("Profiles") }
     static var apps: URL { root.appendingPathComponent("Apps") }
     static var tweaks: URL { root.appendingPathComponent("Tweaks") }
+    /// The breadcrumb file for the run happening now (SignKit's `Trace`), and the run before it.
+    /// The run before is the one that matters after a crash: it is not overwritten by the next try.
+    static var trace: URL { root.appendingPathComponent("trace.txt") }
+    static var tracePrevious: URL { root.appendingPathComponent("trace-previous.txt") }
 
     static func createAll() {
         for dir in [certificates, profiles, apps, tweaks] {

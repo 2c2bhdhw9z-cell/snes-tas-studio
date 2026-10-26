@@ -41,10 +41,14 @@ public final class IPASigner {
 
         let inputSize = fileSize(of: ipa)
         let freeSpace = (try? fm.attributesOfFileSystem(forPath: work.path)[.systemFreeSize] as? Int) ?? 0
+        Trace.note("file \(ipa.lastPathComponent), \(inputSize) bytes; free space \(freeSpace) bytes")
+        Trace.note("certificate \(identity == nil ? "none (ad-hoc)" : "yes"), "
+                   + "profile \(identity?.profile?.bundleIDPattern ?? "none")")
 
         // 1. Open the zip and calculate the real peak space. A compressed 2 GB app
         // can unpack much larger; guessing from the .ipa size is not safe.
         onProgress?(0.02, "Opening the app")
+        Trace.phase("opening the app")
         let reader = try ZipReader(url: ipa)
         let unpackedSize = reader.entries.reduce(Int64(0)) { total, entry in
             total.addingReportingOverflow(Int64(entry.uncompressedSize)).overflow
@@ -61,7 +65,12 @@ public final class IPASigner {
                                   + "while it is being signed, and there is \(haveText).")
         }
 
+        Trace.note("\(reader.entries.count) files inside, \(unpackedSize) bytes unpacked")
+        Trace.phase("unpacking")
+        var unpacked = 0
         try reader.extractAll(to: work) { f, name in
+            unpacked += 1
+            Trace.step(unpacked - 1, of: reader.entries.count, name)
             self.onProgress?(0.02 + f * 0.25, "Unpacking \(name.split(separator: "/").last.map(String.init) ?? "")")
         }
         let payload = work.appendingPathComponent("Payload")
@@ -70,9 +79,11 @@ public final class IPASigner {
             throw SignKitError.malformed("this file does not look like an iPhone app")
         }
         let app = payload.appendingPathComponent(appName)
+        Trace.note("the app inside is \(appName)")
 
         // 2. Modify
         onProgress?(0.3, "Applying your changes")
+        Trace.phase("applying the changes")
         var options = options
         if let profile = identity?.profile {
             let original = (try? BundleSigner(key: nil, chain: [], profile: nil).infoPlist(of: app))?["CFBundleIdentifier"] as? String
@@ -121,19 +132,25 @@ public final class IPASigner {
         // wrong. Very large apps skip re-reading every page, since the signer has just
         // computed those hashes from the final bytes.
         onProgress?(0.77, "Checking the finished app")
+        Trace.phase("checking the finished app")
         let inspection = SignatureInspector.check(app: app, profile: identity?.profile,
                                                   deep: unpackedSize < 200 << 20)
         for problem in inspection.problems { warnings.append("Check failed — " + problem.description) }
 
         // 4. Pack back up
         onProgress?(0.8, "Packing the app back up")
+        Trace.phase("packing the app back up")
         let writer = try ZipWriter(url: output)
+        var packed = 0
         try writer.addTree(at: payload, prefix: "Payload/", compress: options.compressOutput,
                            removeAfterWriting: true) { f, name in
+            packed += 1
+            Trace.step(packed - 1, of: 0, name)
             self.onProgress?(0.8 + f * 0.19, "Packing \(name.split(separator: "/").last.map(String.init) ?? "")")
         }
         try writer.finish()
         onProgress?(1, "Done")
+        Trace.finish("signed \(bundleID)")
 
         let size = (try? fm.attributesOfItem(atPath: output.path)[.size] as? Int) ?? 0
         return SigningResult(
