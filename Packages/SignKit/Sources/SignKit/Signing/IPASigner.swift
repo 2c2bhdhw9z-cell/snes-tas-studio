@@ -88,11 +88,14 @@ public final class IPASigner {
         if let profile = identity?.profile {
             let original = (try? BundleSigner(key: nil, chain: [], profile: nil).infoPlist(of: app))?["CFBundleIdentifier"] as? String
             let wanted = options.bundleID ?? original ?? ""
-            // A profile made for one exact app ID only installs apps with that ID —
-            // the same thing ESign does without asking. Wildcard profiles leave it alone.
+            // A profile made for one exact app ID does NOT mean the app has to take that ID.
+            // The app keeps its own name and carries the profile's identifier in its permissions,
+            // which is what zsign (ESign, GBox) does — so several apps signed with the same
+            // certificate live side by side. Changing the ID here used to make each new app
+            // replace the last one on the Home Screen.
             if !profile.isWildcard, let allowed = profile.bundleIDPattern, !profile.allows(bundleID: wanted) {
-                options.bundleID = allowed
-                warnings.append("Your profile only allows the app ID \(allowed), so the app was signed with that ID.")
+                warnings.append("Your certificate allows one app ID (\(allowed)). The app keeps its own ID "
+                                + "and uses that one for its permissions, so it installs beside your other apps.")
             }
             // Extensions each have their own app ID, which a one-ID profile does not name.
             // They are KEPT anyway: their bundle ids move under the app's new id and they are
@@ -121,10 +124,7 @@ public final class IPASigner {
         }
         var entitlements = identity?.profile?.entitlements(forBundleID: bundleID) ?? [:]
         for (k, v) in options.extraEntitlements { entitlements[k] = v }
-        if let profile = identity?.profile, !profile.allows(bundleID: bundleID) {
-            warnings.append("The certificate's profile is for \(profile.bundleIDPattern ?? "another app"), "
-                            + "so this app's ID was left as \(bundleID). It may not install.")
-        }
+
         cdhash = try signer.sign(bundle: app, entitlements: entitlements.isEmpty ? nil : entitlements)
 
         // Look the finished app over the way the iPhone's installer will. When iOS refuses an

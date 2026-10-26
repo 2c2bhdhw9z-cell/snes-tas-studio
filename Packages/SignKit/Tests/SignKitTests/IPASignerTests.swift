@@ -137,11 +137,12 @@ final class IPASignerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: output.path))
     }
 
-    /// A profile made for exactly one app ID: the app takes that ID, and its extensions are
-    /// KEPT, moved under the new ID and signed with the app's own identifier. That is what
-    /// zsign (so ESign and GBox) does, and what iOS accepts: removing them instead broke
-    /// Continuum's JIT helper, which the app then reported as missing.
-    func testOneIDProfileSwitchesTheAppIDAndKeepsExtensionsUnderIt() throws {
+    /// A profile made for exactly one app ID: the app KEEPS its own ID and its extensions, and
+    /// both carry the profile's identifier in their permissions. That is what zsign (so ESign and
+    /// GBox) does, and it is why several apps signed with one such certificate install side by
+    /// side. Taking the profile's ID instead made each new app replace the last one on the Home
+    /// Screen, and removing the extensions broke Continuum's JIT helper (owner, 26 October).
+    func testOneIDProfileKeepsTheAppIDAndItsExtensions() throws {
         let input = try sample()
         // The stand-in certificate's profile: one exact app ID, like a bought certificate's.
         let identity = try IPASigner.Identity.load(
@@ -188,7 +189,8 @@ final class IPASignerTests: XCTestCase {
         options.compressOutput = false
         let result = try IPASigner().sign(ipa: withExtension, to: output, identity: identity, options: options)
 
-        XCTAssertEqual(result.bundleID, allowed)
+        XCTAssertEqual(result.bundleID, hostID, "the app keeps its own ID")
+        XCTAssertNotEqual(result.bundleID, allowed)
         XCTAssertTrue(result.warnings.contains { $0.contains(allowed) }, "the user must be told")
         XCTAssertFalse(result.warnings.contains { $0.contains("Check failed") },
                        "the finished app must pass its own check: \(result.warnings)")
@@ -197,12 +199,12 @@ final class IPASignerTests: XCTestCase {
         XCTAssertTrue(names.contains { $0.contains("Helper.appex/") }, "the extension must be kept")
         let info = try PropertyListSerialization.propertyList(
             from: try read(output, ".app/Info.plist"), format: nil) as? [String: Any]
-        XCTAssertEqual(info?["CFBundleIdentifier"] as? String, allowed)
-        // The extension sits under the app's new ID ...
+        XCTAssertEqual(info?["CFBundleIdentifier"] as? String, hostID)
+        // The extension keeps its own ID too ...
         let exInfo = try PropertyListSerialization.propertyList(
             from: try read(output, "Helper.appex/Info.plist"), format: nil) as? [String: Any]
-        XCTAssertEqual(exInfo?["CFBundleIdentifier"] as? String, allowed + ".Helper")
-        // ... and carries the app's identifier, the only one the profile allows.
+        XCTAssertEqual(exInfo?["CFBundleIdentifier"] as? String, hostID + ".Helper")
+        // ... and both carry the one identifier the profile allows.
         let reader = try ZipReader(url: output)
         let binary = try XCTUnwrap(reader.entries.first { $0.name.hasSuffix("Helper.appex/Helper") })
         let slice = try MachOFile(data: try reader.data(for: binary)).slices[0]
@@ -212,6 +214,15 @@ final class IPASignerTests: XCTestCase {
         let ents = try PropertyListSerialization.propertyList(
             from: xml.sub(8, xml.count - 8), format: nil) as? [String: Any] ?? [:]
         XCTAssertEqual(ents["application-identifier"] as? String, "\(team).\(allowed)")
+
+        // And the app's own program carries the same identifier.
+        let hostBinary = try XCTUnwrap(reader.entries.first { $0.name.hasSuffix(".app/" + hostExec) })
+        let hostSlice = try MachOFile(data: try reader.data(for: hostBinary)).slices[0]
+        let hostBlobs = try XCTUnwrap(SignatureInspector.parseBlobs(try XCTUnwrap(hostSlice.existingSignature)))
+        let hostXML = try XCTUnwrap(hostBlobs[CSSlot.entitlements])
+        let hostEnts = try PropertyListSerialization.propertyList(
+            from: hostXML.sub(8, hostXML.count - 8), format: nil) as? [String: Any] ?? [:]
+        XCTAssertEqual(hostEnts["application-identifier"] as? String, "\(team).\(allowed)")
     }
 
     func testRefusesSomethingThatIsNotAnApp() throws {

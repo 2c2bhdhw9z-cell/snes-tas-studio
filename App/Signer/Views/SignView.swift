@@ -112,15 +112,10 @@ struct SignView: View {
             if let pattern = pairedPattern, !pattern.hasSuffix("*") {
                 Button("Use the ID my certificate allows") { bundleID = pattern }
                     .font(.caption)
-                Text("Your profile only allows the ID \(pattern), so Signer gives this app that ID. "
-                     + "Its extras keep working — they share the ID.")
+                Text("Your certificate allows one app ID (\(pattern)). The app keeps its own ID above "
+                     + "and uses that one for its permissions, so it installs beside your other apps. "
+                     + "Only change the ID above if you want a second copy of the same app.")
                     .font(.caption).foregroundStyle(.secondary)
-                Label("iPhone treats two apps with the same ID as one app, so installing this one "
-                      + "REPLACES the last app you signed with this certificate"
-                      + (lastSignedWithThisID.map { ", which was \($0)" } ?? "")
-                      + ". A certificate with a wildcard ID (ending in *) can hold many apps at once.",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
             }
         }
     }
@@ -226,15 +221,6 @@ struct SignView: View {
     var pairedPattern: String? {
         guard let cert = store.selectedCertificate else { return nil }
         return store.profile(for: cert)?.bundleIDPattern
-    }
-
-    /// The last app signed with this certificate's one ID — the one iPhone will replace.
-    /// Its own name, not this app's, and never this app itself.
-    var lastSignedWithThisID: String? {
-        guard let pattern = pairedPattern, !pattern.hasSuffix("*") else { return nil }
-        return store.library
-            .filter { $0.isSigned && $0.bundleID == pattern && $0.name != (info?.name ?? name) }
-            .max(by: { $0.added < $1.added })?.name
     }
 
     // MARK: actions

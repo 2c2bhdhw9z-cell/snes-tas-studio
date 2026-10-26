@@ -480,12 +480,9 @@ public enum SignatureInspector {
         guard let info = try? PropertyListSerialization.propertyList(
                 from: Data(contentsOf: bundle.appendingPathComponent("Info.plist")), format: nil) as? [String: Any],
               let bundleID = info["CFBundleIdentifier"] as? String else { return }
-        // An extension that sits under the app's id and shares its identifier is allowed, even
-        // though the profile never names the extension itself (BundleSigner explains why).
-        let sharesTheApp = hostAppID.map { bundleID.hasPrefix($0 + ".") } ?? false
-        if !inside.allows(bundleID: bundleID), !sharesTheApp {
-            bad(.profile, "the app ID \(bundleID) is not allowed by the profile (it allows \(inside.bundleIDPattern ?? "?"))")
-        }
+        // A profile for one exact app ID does not have to name this bundle: the app keeps its own
+        // ID and carries the profile's identifier in its permissions (see Profile.entitlements and
+        // BundleSigner). That is checked below, on the permissions themselves.
         // What the program asks for must be something the profile grants.
         guard let exec = mainExecutable(of: bundle),
               let bin = try? Data(contentsOf: bundle.appendingPathComponent(exec), options: .mappedIfSafe),
@@ -497,9 +494,11 @@ public enum SignatureInspector {
         let granted = inside.entitlements
         if let appID = ents["application-identifier"] as? String {
             let prefix = (inside.applicationIdentifier ?? "").split(separator: ".").first.map(String.init) ?? ""
-            // Its own identifier, or the app's when it shares it.
+            // Its own identifier (a wildcard profile), the app's (an extension sharing it), or the
+            // profile's one allowed identifier — iOS accepts any of the three.
             var allowed = ["\(prefix).\(bundleID)"]
             if let host = hostAppID { allowed.append("\(prefix).\(host)") }
+            if let profileID = inside.applicationIdentifier { allowed.append(profileID) }
             if !allowed.contains(appID) {
                 bad(.entitlements, "the app identifier in the permissions (\(appID)) does not match "
                     + allowed.joined(separator: " or "))

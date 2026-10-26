@@ -47,8 +47,15 @@ final class ProfileTests: XCTestCase {
             XCTAssertFalse(p.allows(bundleID: pattern + ".nope"))
         }
 
+        // A wildcard profile grants every ID, so the app's own is used. A one-ID profile grants
+        // only its own, so that is what goes in the permissions while the app keeps its name —
+        // what zsign (ESign, GBox) does, and why apps signed with one certificate do not replace
+        // each other.
         let rewritten = p.entitlements(forBundleID: "com.continuum.signer")
-        XCTAssertEqual(rewritten["application-identifier"] as? String, "\(team).com.continuum.signer")
+        let expected = p.isWildcard ? "\(team).com.continuum.signer" : "\(team).\(pattern)"
+        XCTAssertEqual(rewritten["application-identifier"] as? String, expected)
+        XCTAssertEqual(p.entitlements(forBundleID: pattern)["application-identifier"] as? String,
+                       "\(team).\(pattern)", "its own ID always works")
         XCTAssertEqual(rewritten["com.apple.developer.team-identifier"] as? String, team)
         // No wildcard may survive the rewrite in the app identifier.
         XCTAssertFalse((rewritten["application-identifier"] as? String ?? "").hasSuffix("*"))

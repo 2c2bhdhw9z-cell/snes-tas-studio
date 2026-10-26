@@ -91,7 +91,13 @@ public struct ProvisioningProfile {
         isEnterprise || devices.contains { $0.caseInsensitiveCompare(deviceUDID) == .orderedSame }
     }
 
-    /// The entitlements to sign the app with, with the app identifier rewritten for a new bundle ID.
+    /// The entitlements to sign a bundle with.
+    ///
+    /// A wildcard profile (`TEAMID.*`) grants every app ID, so the app's own ID is used and each
+    /// app gets its own identifier. A profile made for ONE exact app ID grants only that one: the
+    /// app then keeps its own name and carries the profile's identifier, which is what zsign —
+    /// so ESign and GBox — does. That is why several apps signed with one such certificate all
+    /// install side by side instead of replacing each other.
     public func entitlements(forBundleID bundleID: String) -> [String: Any] {
         var e = entitlements
         // A profile grants some things as "any" (a bare *), for example associated domains.
@@ -101,14 +107,17 @@ public struct ProvisioningProfile {
             else if let a = value as? [String], !a.isEmpty, a.allSatisfy({ $0 == "*" }) { e[key] = nil }
         }
         guard let team = teamID else { return e }
-        e["application-identifier"] = "\(team).\(bundleID)"
+        // The identifier has to be one the profile actually grants, or iOS refuses the install.
+        let identifier = allows(bundleID: bundleID) ? "\(team).\(bundleID)"
+                                                    : (applicationIdentifier ?? "\(team).\(bundleID)")
+        e["application-identifier"] = identifier
         if e["com.apple.developer.team-identifier"] == nil { e["com.apple.developer.team-identifier"] = team }
         // Wildcards inside other entitlements (keychain groups, app groups) get the same treatment.
         for (key, value) in e {
             if let s = value as? String, s.hasSuffix("*"), s.hasPrefix(team) {
-                e[key] = "\(team).\(bundleID)"
+                e[key] = identifier
             } else if let arr = value as? [String] {
-                e[key] = arr.map { $0.hasSuffix("*") && $0.hasPrefix(team) ? "\(team).\(bundleID)" : $0 }
+                e[key] = arr.map { $0.hasSuffix("*") && $0.hasPrefix(team) ? identifier : $0 }
             }
         }
         return e

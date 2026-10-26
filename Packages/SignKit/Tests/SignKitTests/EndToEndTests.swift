@@ -49,8 +49,9 @@ final class EndToEndTests: XCTestCase {
         let result = try IPASigner().sign(ipa: URL(fileURLWithPath: EndToEndTests.sample), to: output,
                                           identity: try identity(), options: options)
 
-        // The app ID switched to the one the profile allows, and the extension went.
-        XCTAssertEqual(result.bundleID, "app.sweetpotato2703.cancer3985")
+        // The app keeps its own ID, and its extension is kept: a one-ID profile only decides
+        // which identifier goes in the permissions (Profile.entitlements).
+        XCTAssertEqual(result.bundleID, "com.SideStore.SideStore")
         XCTAssertFalse(result.warnings.contains { $0.hasPrefix("Check failed") }, "\(result.warnings)")
 
         // Unpack the finished file with an outside tool's view of it and run the checker again.
@@ -149,12 +150,15 @@ final class EndToEndTests: XCTestCase {
         XCTAssertTrue(r.problems.contains { $0.kind == .resources }, "stray file")
         try FileManager.default.removeItem(at: stray)
 
-        // 5. A different app ID than the profile allows.
+        // 5. A different app ID is fine on its own — the profile decides the identifier in the
+        // permissions, not the app's name (see Profile.entitlements). What must be caught is
+        // permissions the profile does not grant, which the next test covers.
         var plist = try PropertyListSerialization.propertyList(from: try Data(contentsOf: info), format: nil) as! [String: Any]
         plist["CFBundleIdentifier"] = "com.someone.else"
         try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0).write(to: info)
         r = SignatureInspector.check(app: app, profile: profile)
-        XCTAssertTrue(r.problems.contains { $0.kind == .profile }, "wrong app ID")
+        XCTAssertTrue(r.problems.contains { $0.kind == .hash || $0.kind == .resources },
+                      "a changed Info.plist is still caught")
         try savedInfo.write(to: info)
         XCTAssertTrue(SignatureInspector.check(app: app, profile: profile).isClean, "restored app is clean again")
     }
