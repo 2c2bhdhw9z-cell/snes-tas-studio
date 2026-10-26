@@ -73,4 +73,26 @@ final class OCSPTests: XCTestCase {
         XCTAssertEqual(certID.child(2)?.content.count, 20, "issuer key hash")
         XCTAssertEqual(certID.child(3)?.unsignedInteger, cert.serial)
     }
+
+    /// A certificate that arrived on its own, with no issuer beside it: the issuer has to be
+    /// found among Apple's own certificates, or the question built for Apple is meaningless and
+    /// the answer comes back "unknown" (which is what the owner saw as "Unchecked").
+    func testFindsTheIssuerForACertificateThatCameAlone() throws {
+        let path = "/projects/sandbox/research/ipa/x/GBox/Payload/GBox.app/embedded.mobileprovision"
+        guard FileManager.default.fileExists(atPath: path) else { throw XCTSkip("no profile here") }
+        let profile = try ProvisioningProfile(url: URL(fileURLWithPath: path))
+        let leaf = try XCTUnwrap(profile.certificates.first)
+
+        // Nothing but the certificate itself, the way a "created via API" .p12 exports.
+        let issuer = try XCTUnwrap(AppleChain.issuer(of: leaf, in: AppleChain.known),
+                                   "Apple's own certificates are built in; the issuer must be found")
+        XCTAssertEqual(issuer.subjectDER, leaf.issuerDER)
+        XCTAssertNotEqual(issuer.der, leaf.der, "the certificate is not its own issuer")
+
+        // And the question for Apple is built from that issuer, not from the certificate.
+        let body = try OCSP.request(certificate: leaf, issuer: issuer)
+        XCTAssertGreaterThan(body.count, 40)
+        let wrong = try OCSP.request(certificate: leaf, issuer: leaf)
+        XCTAssertNotEqual(body, wrong, "a wrong issuer must not produce the same question")
+    }
 }

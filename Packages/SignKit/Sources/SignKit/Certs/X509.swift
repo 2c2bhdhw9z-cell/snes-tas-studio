@@ -118,6 +118,20 @@ public struct Certificate {
         return nil
     }
 
+    /// Where this certificate says its own issuer can be downloaded. Used when the issuer is not
+    /// one of the Apple certificates built in, so a check still works without an app update.
+    public var caIssuersURL: URL? {
+        guard let aia = extensions[OID.authorityInfoAccess],
+              let seq = try? DERNode.parse(aia) else { return nil }
+        for d in seq.children {
+            if d.child(0)?.oid == OID.caIssuers, let loc = d.child(1),
+               let s = String(data: loc.content, encoding: .utf8) {
+                return URL(string: s)
+            }
+        }
+        return nil
+    }
+
     public var sha1Fingerprint: String { sha1(der).hex }
     public var sha256Fingerprint: String { sha256(der).hex }
 }

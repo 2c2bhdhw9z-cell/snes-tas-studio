@@ -239,4 +239,26 @@ final class IPASignerTests: XCTestCase {
             XCTAssertTrue("\(error)".lowercased().contains("iphone app"), "\(error)")
         }
     }
+
+    /// A separate copy: the ID gets a random ending so iPhone installs it beside the original,
+    /// and the app's extensions follow it. What other signers call PPQ protection.
+    func testSeparateCopyGetsItsOwnID() throws {
+        let input = try sample()
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let output = dir.appendingPathComponent("copy.ipa")
+        var options = SigningOptions()
+        options.separateCopy = true
+        options.compressOutput = false
+        let beforePlist = try PropertyListSerialization.propertyList(
+            from: try read(input, ".app/Info.plist"), format: nil) as? [String: Any] ?? [:]
+        let before = try XCTUnwrap(beforePlist["CFBundleIdentifier"] as? String)
+        let result = try IPASigner().sign(ipa: input, to: output, identity: try identity(), options: options)
+        XCTAssertTrue(result.bundleID.hasPrefix(before + "."), "\(result.bundleID) must sit under \(before)")
+        XCTAssertEqual(result.bundleID.dropFirst(before.count + 1).count, 6)
+        // Twice in a row gives two different copies.
+        let second = dir.appendingPathComponent("copy2.ipa")
+        let again = try IPASigner().sign(ipa: input, to: second, identity: try identity(), options: options)
+        XCTAssertNotEqual(result.bundleID, again.bundleID)
+    }
 }

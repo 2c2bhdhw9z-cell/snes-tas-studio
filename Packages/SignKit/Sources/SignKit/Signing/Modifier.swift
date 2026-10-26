@@ -40,7 +40,14 @@ struct Modifier {
         let infoURL = app.appendingPathComponent("Info.plist")
         var info = try plist(at: infoURL)
         let oldBundleID = info["CFBundleIdentifier"] as? String
-        if let v = options.bundleID { info["CFBundleIdentifier"] = v }
+        // A separate copy: a short random ending on the ID, so iPhone sees a different app and
+        // installs it beside the original. Also what other signers call PPQ protection.
+        var wantedID = options.bundleID
+        if options.separateCopy, wantedID == nil, let old = oldBundleID {
+            let letters = "abcdefghijklmnopqrstuvwxyz0123456789"
+            wantedID = "\(old).\(String((0..<6).map { _ in letters.randomElement()! }))"
+        }
+        if let v = wantedID { info["CFBundleIdentifier"] = v }
         if let v = options.displayName {
             info["CFBundleDisplayName"] = v
             info["CFBundleName"] = String(v.prefix(15))
@@ -66,7 +73,7 @@ struct Modifier {
         try write(info, to: infoURL)
 
         // Extensions carry the app's ID as a prefix; keep them in step.
-        if let newID = options.bundleID, let oldID = oldBundleID, newID != oldID {
+        if let newID = wantedID, let oldID = oldBundleID, newID != oldID {
             try renestExtensions(in: app, from: oldID, to: newID)
         }
 

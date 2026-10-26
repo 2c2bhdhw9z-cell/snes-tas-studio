@@ -47,6 +47,10 @@ struct StoredCertificate: Codable, Identifiable, Hashable {
         case unknown, good, revoked, expired, offline
     }
 
+    /// What Apple (or the check itself) said last time, in plain words, so a result that is not
+    /// "Good" says why on the certificate's own screen.
+    var lastCheckDetail: String?
+
     /// "iPhone Developer: Created via API (3KQD4FN5YL)" — the line Apple puts in the file.
     var title: String {
         if let team = teamID, !commonName.contains("(") {
@@ -67,7 +71,8 @@ struct StoredCertificate: Codable, Identifiable, Hashable {
         case .expired: return "Expired"
         case .good: return "Good"
         case .offline: return (daysLeft ?? 1) < 0 ? "Expired" : "Not checked"
-        case .unknown: return (daysLeft ?? 1) < 0 ? "Expired" : "Unchecked"
+        // Never asked, against asked-and-no-answer: two different things to a person.
+        case .unknown: return (daysLeft ?? 1) < 0 ? "Expired" : (lastChecked == nil ? "Unchecked" : "No answer")
         }
     }
 

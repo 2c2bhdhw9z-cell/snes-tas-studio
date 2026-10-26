@@ -48,8 +48,19 @@ public enum OCSP {
         guard let statusNode = top.child(0) else { throw SignKitError.malformed("empty answer") }
         let responseStatus = statusNode.intValue
         guard responseStatus == 0 else {
+            // Apple's own words for the refusal, so the screen can say which one it was.
+            let why: String
+            switch responseStatus {
+            case 1: why = "it said the question was malformed"
+            case 2: why = "it hit an error of its own"
+            case 3: why = "it asked to be tried again later"
+            case 5: why = "it wants the question signed"
+            case 6: why = "it will not answer about this certificate (unauthorised)"
+            default: why = "it answered with code \(responseStatus)"
+            }
             return Answer(status: .unknown, revokedAt: nil, checkedAt: Date(),
-                          detail: "Apple would not answer (code \(responseStatus))")
+                          detail: "Apple would not answer: \(why). The certificate may still be fine; "
+                                + "this only means Apple did not say.")
         }
         // responseBytes [0] -> ResponseBytes -> OCTET STRING -> BasicOCSPResponse
         guard let bytes = top.child(1)?.child(0),
@@ -95,7 +106,33 @@ public enum OCSP {
         return nil
     }
 
-    /// Does the whole check over the network.
+    /// The whole check, finding the certificate's real issuer itself: among the certificates that
+    /// came with it, then among Apple's own, which are built in.
+    ///
+    /// A `.p12` exported as "created via API" usually holds the certificate alone, with no issuer
+    /// beside it. A question built against the wrong issuer comes back "unknown" from Apple, which
+    /// looks exactly like a check that never ran — the owner's certificate stayed "Unchecked"
+    /// (26 October).
+    public static func check(certificate: Certificate, chain: [Certificate] = [],
+                             session: URLSession = .shared) async -> Answer {
+        let pool = chain.filter { $0.der != certificate.der } + AppleChain.known
+        var found = AppleChain.issuer(of: certificate, in: pool)
+        // Not one of the Apple certificates built in: the certificate says where its issuer can
+        // be downloaded, so a brand new Apple issuer works without waiting for an app update.
+        if found == nil, let url = certificate.caIssuersURL,
+           let downloaded = try? await session.data(from: url).0,
+           let issuer = try? Certificate(der: downloaded), issuer.subjectDER == certificate.issuerDER {
+            found = issuer
+        }
+        guard let issuer = found else {
+            return Answer(status: .unknown, revokedAt: nil, checkedAt: Date(),
+                          detail: "The Apple certificate that issued this one could not be found, "
+                                + "so there is nothing to ask about")
+        }
+        return await check(certificate: certificate, issuer: issuer, session: session)
+    }
+
+    /// Does the whole check over the network against a known issuer.
     public static func check(certificate: Certificate, issuer: Certificate,
                              session: URLSession = .shared) async -> Answer {
         if certificate.isExpired {
@@ -115,13 +152,18 @@ public enum OCSP {
             req.timeoutInterval = 15
             let (data, response) = try await session.data(for: req)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
                 return Answer(status: .unreachable, revokedAt: nil, checkedAt: Date(),
-                              detail: "Could not reach Apple to check")
+                              detail: "Apple's checking service answered \(code) instead of an answer "
+                                    + "(\(url.host ?? url.absoluteString))")
             }
             return try parse(data)
+        } catch let error as SignKitError {
+            return Answer(status: .unknown, revokedAt: nil, checkedAt: Date(),
+                          detail: "Apple's answer could not be read: \(error.description)")
         } catch {
             return Answer(status: .unreachable, revokedAt: nil, checkedAt: Date(),
-                          detail: "Could not reach Apple to check")
+                          detail: "Could not reach Apple to check: \(error.localizedDescription)")
         }
     }
 }

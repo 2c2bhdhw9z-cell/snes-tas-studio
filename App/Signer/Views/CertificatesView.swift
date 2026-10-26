@@ -83,8 +83,10 @@ struct CertificatesView: View {
             do {
                 let identity = try store.identity(for: cert)
                 guard let leaf = identity.chain.first else { continue }
-                let issuer = identity.chain.count > 1 ? identity.chain[1] : leaf
-                let answer = await OCSP.check(certificate: leaf, issuer: issuer)
+                // The issuer is found from what came with the certificate and from Apple's own
+                // certificates, which are built in: a .p12 holding only the certificate used to
+                // make the question unanswerable, and the result read as "Unchecked".
+                let answer = await OCSP.check(certificate: leaf, chain: identity.chain)
                 store.certificates[index].revocationState = {
                     switch answer.status {
                     case .good: return .good
@@ -94,6 +96,8 @@ struct CertificatesView: View {
                     }
                 }()
                 store.certificates[index].lastChecked = answer.checkedAt
+                store.certificates[index].lastCheckDetail = answer.detail
+                if answer.status != .good, !answer.detail.isEmpty { banner = answer.detail }
             } catch {
                 banner = (error as? SignKitError)?.description ?? error.localizedDescription
             }
@@ -163,6 +167,9 @@ struct CertificateDetailView: View {
                 LabeledContent("Status", value: certificate.statusWord)
                 if let checked = certificate.lastChecked {
                     LabeledContent("Checked", value: checked.formatted(date: .abbreviated, time: .shortened))
+                }
+                if let detail = certificate.lastCheckDetail, !detail.isEmpty {
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
                 }
             }
 

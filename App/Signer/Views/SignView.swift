@@ -19,6 +19,7 @@ struct SignView: View {
     @State private var fileSharing = false
     @State private var proMotion = false
     @State private var removeExtensions = false
+    @State private var separateCopy = false
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
     @State private var installing: LibraryApp?
@@ -124,6 +125,12 @@ struct SignView: View {
         Section("Changes") {
             Toggle("Show this app's files in the Files app", isOn: $fileSharing)
             Toggle("Allow the smoother 120 Hz screen", isOn: $proMotion)
+            Toggle("Install as a separate copy", isOn: $separateCopy)
+            Text(separateCopy
+                 ? "Gives the app a new ID, so it installs beside the original instead of over it. "
+                 + "Its saves and logins start fresh."
+                 : "Signs the app with its own ID, so it replaces that same app if you have it.")
+                .font(.caption).foregroundStyle(.secondary)
             Toggle("Remove the extras bundled with it", isOn: $removeExtensions)
             if info?.hasWatchApp == true {
                 Toggle("Remove the Apple Watch app", isOn: $removeWatch)
@@ -259,6 +266,7 @@ struct SignView: View {
         options.fileSharing = fileSharing
         options.proMotion = proMotion
         options.removeExtensions = removeExtensions
+        options.separateCopy = separateCopy
         options.removeWatchApp = removeWatch
         options.injectLibraries = tweaks
         options.compressOutput = compressOutput

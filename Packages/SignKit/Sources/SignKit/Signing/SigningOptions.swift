@@ -23,6 +23,12 @@ public struct SigningOptions {
     public var liquidGlass: Bool?             // true = opt in, false = force the old look
 
     // Clean-up
+    /// Signs the app as a separate copy: its ID gets a short random ending, so iPhone treats it
+    /// as a different app and it installs beside the original instead of replacing it. Also what
+    /// other signers call PPQ protection, because an ID nobody else uses is not matched against
+    /// the App Store. Ignored when an ID is typed in by hand.
+    public var separateCopy = false
+
     public var removeExtensions = false
     public var removeWatchApp = false
     public var removeFiles: [String] = []

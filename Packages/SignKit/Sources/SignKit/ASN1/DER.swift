@@ -265,6 +265,8 @@ public enum OID {
     public static let sha256WithRSAEncryption = "1.2.840.113549.1.1.11"
     public static let authorityInfoAccess = "1.3.6.1.5.5.7.1.1"
     public static let ocsp = "1.3.6.1.5.5.7.48.1"
+    /// Where the certificate says its own issuer can be downloaded.
+    public static let caIssuers = "1.3.6.1.5.5.7.48.2"
     public static let ocspBasic = "1.3.6.1.5.5.7.48.1.1"
     public static let ocspNonce = "1.3.6.1.5.5.7.48.1.2"
     // PKCS#12 / PKCS#5
