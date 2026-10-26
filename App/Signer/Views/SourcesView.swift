@@ -127,6 +127,11 @@ struct SourceAppsView: View {
                         if let summary = app.summary {
                             Text(summary).font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
                         }
+                        if let notes = app.whatsNew, let have = loader.installed(app, in: store.library),
+                           Version.isNewer(app.version, than: have.version) {
+                            Text("New: \(notes)")
+                                .font(.caption2).foregroundStyle(.tint).lineLimit(2)
+                        }
                     }
                     Spacer()
                     if downloading == app.id || updates.isBusy(with: app.bundleID) {

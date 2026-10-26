@@ -225,6 +225,42 @@ final class IPASignerTests: XCTestCase {
         XCTAssertEqual(hostEnts["application-identifier"] as? String, "\(team).\(allowed)")
     }
 
+    /// The permissions editor (Sign screen, Permissions) hands its list to the engine as
+    /// `extraEntitlements`. This is the proof it reaches the signature inside the app, where
+    /// iOS reads it - nothing on the phone can show that.
+    func testExtraPermissionsReachTheSignature() throws {
+        let input = try sample()
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let output = dir.appendingPathComponent("extras.ipa")
+
+        var options = SigningOptions()
+        options.compressOutput = false
+        options.extraEntitlements = [
+            "get-task-allow": true,
+            "com.apple.developer.kernel.increased-memory-limit": true,
+            "keychain-access-groups": ["ABCDE12345.shared"],
+            "com.continuum.test-text": "hello",
+        ]
+        _ = try IPASigner().sign(ipa: input, to: output, identity: try identity(), options: options)
+
+        let reader = try ZipReader(url: output)
+        let appInfo = try PropertyListSerialization.propertyList(
+            from: try read(output, ".app/Info.plist"), format: nil) as? [String: Any] ?? [:]
+        let executable = try XCTUnwrap(appInfo["CFBundleExecutable"] as? String)
+        let binary = try XCTUnwrap(reader.entries.first { $0.name.hasSuffix(".app/" + executable) })
+        let slice = try MachOFile(data: try reader.data(for: binary)).slices[0]
+        let blobs = try XCTUnwrap(SignatureInspector.parseBlobs(try XCTUnwrap(slice.existingSignature)))
+        let xml = try XCTUnwrap(blobs[CSSlot.entitlements])
+        let ents = try PropertyListSerialization.propertyList(
+            from: xml.sub(8, xml.count - 8), format: nil) as? [String: Any] ?? [:]
+
+        XCTAssertEqual(ents["get-task-allow"] as? Bool, true)
+        XCTAssertEqual(ents["com.apple.developer.kernel.increased-memory-limit"] as? Bool, true)
+        XCTAssertEqual(ents["keychain-access-groups"] as? [String], ["ABCDE12345.shared"])
+        XCTAssertEqual(ents["com.continuum.test-text"] as? String, "hello")
+    }
+
     func testRefusesSomethingThatIsNotAnApp() throws {
         let dir = try temp()
         defer { try? FileManager.default.removeItem(at: dir) }

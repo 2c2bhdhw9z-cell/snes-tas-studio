@@ -36,12 +36,24 @@ BuildBox, BatSign, ABox, SideStore. Each line below is a feature one of them has
 | Apps and signing on one screen, no empty Sign tab | GBox, KSign | `Views/LibraryView.swift`, 26 Oct |
 | Clears the gigabytes a killed signing run leaves behind | nobody | `IPASigner.clearLeftovers`, 26 Oct |
 
+## Done since this list was written
+
+1. ~~**Updates for repository apps.**~~ Done 26 October: My apps says "2.1 waiting" and Update
+   downloads, signs and installs in one tap; the Sources tab says Update or Added. Version
+   comparison is `Util/Version.swift` in the engine, with tests.
+3. ~~**An entitlements editor.**~~ Done 26 October: Sign → Permissions. Shows what the
+   certificate's profile allows in plain words, one-tap switches for the useful extras (debugger,
+   extra memory, large addresses, JIT with a warning), and anything else by name and value.
+   `Views/EntitlementsView.swift`; proved to reach the signature inside the app by
+   `testExtraPermissionsReachTheSignature`.
+
 ## Still to build, in the order it is worth doing
 
-1. **Updates for repository apps.** Notice a newer version of something already installed, then
-   sign and install it in one tap. (BatSign, Feather.)
-2. **ESign-format repositories**, including the encrypted ones; Feather's `AltSourceKit` shows how.
-3. **An entitlements editor.** The engine already takes `extraEntitlements`; there is no screen.
+2. **ESign-format repositories**, including the encrypted ones. The plain ones already work: the
+   two real ESign feeds checked on 26 October (`esign.yyyue.xyz/app.json` and friends) are
+   AltStore-shaped, and `versionDescription` (what's new) and text sizes are read now too.
+   The **encrypted** ones are blocked on a real example - nothing public spells the format out,
+   and guessing it is pointless. Needs an encrypted ESign repo address to work from.
 4. **Alternative app icons** (`CFBundleAlternateIcons`), and a proper white-icon fix: take the icon
    out of `Assets.car` rather than deleting the file. (KSign, Feather, ABox.)
 5. **A Mach-O viewer**: every library an app links, with one tap to remove one, and what the

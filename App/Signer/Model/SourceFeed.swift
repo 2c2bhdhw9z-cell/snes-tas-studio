@@ -15,6 +15,9 @@ struct SourceApp: Identifiable, Hashable {
     var downloadURL: URL?
     var size: Int?
     var screenshots: [URL] = []
+    /// What changed in this version. AltStore puts it in the version entry, ESign sources in
+    /// `versionDescription` at the top of the app.
+    var whatsNew: String?
 
     var sizeText: String? {
         size.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) }
@@ -72,9 +75,14 @@ struct SourceFeed {
 
         let download = (newest?["downloadURL"] as? String) ?? (dict["downloadURL"] as? String)
             ?? (dict["url"] as? String)
+        // Most feeds send a number; some send it as text.
         let size = (newest?["size"] as? Int) ?? (dict["size"] as? Int)
+            ?? (newest?["size"] as? String).flatMap(Int.init)
+            ?? (dict["size"] as? String).flatMap(Int.init)
         let version = (newest?["version"] as? String) ?? (dict["version"] as? String) ?? ""
         let dateText = (newest?["date"] as? String) ?? (dict["versionDate"] as? String)
+        let whatsNew = (newest?["localizedDescription"] as? String)
+            ?? (dict["versionDescription"] as? String)
 
         return SourceApp(
             name: name,
@@ -88,7 +96,8 @@ struct SourceFeed {
             iconURL: ((dict["iconURL"] as? String) ?? (dict["icon"] as? String)).flatMap(URL.init(string:)),
             downloadURL: download.flatMap(URL.init(string:)),
             size: size,
-            screenshots: screenshots(dict)
+            screenshots: screenshots(dict),
+            whatsNew: whatsNew
         )
     }
 

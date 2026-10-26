@@ -22,6 +22,7 @@ struct SignView: View {
     @State private var separateCopy = false
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
+    @State private var extras: [ExtraEntitlement] = []
     @AppStorage("installAfterSigning") private var installAfterSigning = true
 
     init(preselected: LibraryApp? = nil) {
@@ -37,6 +38,7 @@ struct SignView: View {
                 detailsSection
                 switchesSection
                 tweaksSection
+                permissionsSection
             }
             certificateSection
             actionSection
@@ -138,6 +140,21 @@ struct SignView: View {
                 pickTweaks()
             } label: {
                 Label("Add a .dylib or .deb", systemImage: "plus")
+            }
+        }
+    }
+
+    var permissionsSection: some View {
+        Section("Permissions") {
+            NavigationLink {
+                EntitlementsView(extras: $extras)
+            } label: {
+                HStack {
+                    Text("What the app is allowed to do")
+                    Spacer()
+                    Text(extras.isEmpty ? "as the certificate says" : "\(extras.count) added")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -258,6 +275,8 @@ struct SignView: View {
         options.separateCopy = separateCopy
         options.removeWatchApp = removeWatch
         options.injectLibraries = tweaks
+        options.extraEntitlements = Dictionary(extras.map { ($0.key, $0.plistValue) },
+                                               uniquingKeysWith: { _, last in last })
         options.compressOutput = compressOutput
         options.adhoc = store.selectedCertificate == nil
         await runner.run(ipa: app.fileURL, options: options, certificate: store.selectedCertificate)
