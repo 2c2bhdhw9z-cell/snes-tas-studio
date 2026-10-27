@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import SignKit
 
 /// Sources: lists of apps you can add by address, browse and download.
@@ -6,9 +7,9 @@ struct SourcesView: View {
     @EnvironmentObject var store: Store
     // Shared, so My apps knows what the sources offer and can say an update is waiting.
     @ObservedObject private var loader = SourceLoader.shared
-    @State private var newAddress = ""
     @State private var adding = false
     @State private var message: String?
+    @State private var banner: String?
 
     var body: some View {
         NavigationStack {
@@ -60,15 +61,37 @@ struct SourcesView: View {
             .navigationTitle("Sources")
             .refreshable { await loader.refreshAll(store.sources) }
             .toolbar {
-                Button { adding = true } label: { Label("Add", systemImage: "plus") }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if !store.sources.isEmpty {
+                        Menu {
+                            ForEach(ShareCode.Format.allCases, id: \.self) { format in
+                                Button(format.label) { copyCode(as: format) }
+                            }
+                        } label: {
+                            Label("Share my sources", systemImage: "square.and.arrow.up")
+                        }
+                    }
+                    Button { adding = true } label: { Label("Add", systemImage: "plus") }
+                }
             }
             .task { await loader.refreshAll(store.sources) }
-            .alert("Add a source", isPresented: $adding) {
-                TextField("https://…", text: $newAddress)
-                Button("Cancel", role: .cancel) { newAddress = "" }
-                Button("Add") { add() }
-            } message: {
-                Text("Paste the address of an app list.")
+            .sheet(isPresented: $adding) {
+                AddSourcesView { urls in
+                    add(urls)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                if let banner {
+                    Text(banner)
+                        .font(.callout)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .padding(.bottom, 12)
+                        .task {
+                            try? await Task.sleep(nanoseconds: 2_500_000_000)
+                            self.banner = nil
+                        }
+                }
             }
             .alert("That did not work", isPresented: .constant(message != nil)) {
                 Button("OK") { message = nil }
@@ -76,18 +99,106 @@ struct SourcesView: View {
         }
     }
 
-    func add() {
-        let text = newAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-        newAddress = ""
-        guard var url = URL(string: text) else {
-            message = "That does not look like an address."
-            return
+    /// Adds every address found, skipping the ones already here, then reads them.
+    func add(_ urls: [URL]) {
+        var added: [Source] = []
+        for url in urls {
+            guard !store.sources.contains(where: { $0.url.absoluteString == url.absoluteString }) else { continue }
+            let source = Source(id: UUID(), url: url, name: url.host ?? url.absoluteString)
+            store.sources.append(source)
+            added.append(source)
         }
-        if url.scheme == nil { url = URL(string: "https://" + text) ?? url }
-        let source = Source(id: UUID(), url: url, name: url.host ?? text)
-        store.sources.append(source)
         store.save()
-        Task { await loader.refresh(source) }
+        let skipped = urls.count - added.count
+        if added.isEmpty {
+            banner = skipped > 0 ? "Already added" : "Nothing to add"
+        } else {
+            banner = "Added \(added.count)" + (skipped > 0 ? ", \(skipped) already here" : "")
+        }
+        Task {
+            for source in added { await loader.refresh(source) }
+        }
+    }
+
+    /// Puts a code for every source on the clipboard, in whichever signer's shape was chosen.
+    func copyCode(as format: ShareCode.Format) {
+        let code = ShareCode.encode(store.sources.map(\.url), as: format)
+        UIPasteboard.general.string = code
+        banner = "\(format.label) copied — \(store.sources.count) source"
+            + (store.sources.count == 1 ? "" : "s")
+    }
+}
+
+/// Adding sources: one address, a list of them, or a share code from another signer.
+///
+/// ESign hands out its list as `source[…]`, which people call an encrypted repo; KravaSign,
+/// MapleSign and FlareStore each have their own. All of them are read here (SignKit's
+/// `ShareCode`), and the screen says which one it recognised before anything is added.
+struct AddSourcesView: View {
+    @Environment(\.dismiss) var dismiss
+    let add: ([URL]) -> Void
+    @State private var text = ""
+
+    var found: ShareCode.Decoded? { ShareCode.decode(text) }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextEditor(text: $text)
+                        .frame(minHeight: 120)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .font(.footnote.monospaced())
+                } header: {
+                    Text("Paste here")
+                } footer: {
+                    Text("An address, a whole list of them, or a code from another signer — "
+                         + "ESign's source[…], KravaSign, MapleSign or FlareStore. It works out "
+                         + "which it is by itself.")
+                }
+
+                Section {
+                    Button {
+                        if let clip = UIPasteboard.general.string { text = clip }
+                    } label: {
+                        Label("Paste from the clipboard", systemImage: "doc.on.clipboard")
+                    }
+                }
+
+                if let found {
+                    Section("Found") {
+                        LabeledContent("Kind", value: found.format.label)
+                        LabeledContent("Sources", value: "\(found.urls.count)")
+                        ForEach(found.urls, id: \.absoluteString) { url in
+                            Text(url.absoluteString)
+                                .font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                    }
+                } else if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Section {
+                        Label("No addresses in that. If it is a code from another signer, paste "
+                              + "all of it, including source[ and the ] at the end.",
+                              systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+            .navigationTitle("Add sources")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Add") {
+                        if let found { add(found.urls) }
+                        dismiss()
+                    }
+                    .disabled(found == nil)
+                }
+            }
+        }
     }
 }
 
