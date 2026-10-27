@@ -25,6 +25,7 @@ struct SignView: View {
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
     @State private var extras: [ExtraEntitlement] = []
+    @State private var removeLibraries: [String] = []
     @State private var newIcon: Data?
     @State private var photo: PhotosPickerItem?
     @AppStorage("installAfterSigning") private var installAfterSigning = true
@@ -43,6 +44,7 @@ struct SignView: View {
                 iconSection
                 switchesSection
                 tweaksSection
+                insideSection
                 permissionsSection
             }
             certificateSection
@@ -245,6 +247,24 @@ struct SignView: View {
         return square.pngData() ?? image.pngData()
     }
 
+    var insideSection: some View {
+        Section("Inside the app") {
+            NavigationLink {
+                if let app {
+                    InsideAppView(ipa: app.fileURL, removeLibraries: $removeLibraries)
+                }
+            } label: {
+                HStack {
+                    Text("Its programs and what they link")
+                    Spacer()
+                    Text(removeLibraries.isEmpty
+                         ? "look inside" : "\(removeLibraries.count) to remove")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
     var permissionsSection: some View {
         Section("Permissions") {
             NavigationLink {
@@ -377,6 +397,7 @@ struct SignView: View {
         options.removeWatchApp = removeWatch
         options.icon = newIcon
         options.injectLibraries = tweaks
+        options.removeLibraries = removeLibraries
         options.extraEntitlements = Dictionary(extras.map { ($0.key, $0.plistValue) },
                                                uniquingKeysWith: { _, last in last })
         options.compressOutput = compressOutput
