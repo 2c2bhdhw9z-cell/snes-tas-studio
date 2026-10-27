@@ -33,6 +33,14 @@ public struct Segment {
     public let vmaddr: UInt64, vmsize: UInt64, fileoff: UInt64, filesize: UInt64
 }
 
+public struct Section {
+    public let segment: String
+    public let name: String
+    public let addr: UInt64
+    public let size: UInt64
+    public let fileOffset: Int
+}
+
 /// One architecture slice of a Mach-O file.
 public struct MachOSlice {
     public var data: Data
@@ -85,6 +93,29 @@ public struct MachOSlice {
             }
             return nil
         }
+    }
+
+    /// Every section in the file, with where it lives in memory and on disk. Needed by anything
+    /// that follows pointers inside a program, such as reading out its classes.
+    public var sections: [Section] {
+        var out = [Section]()
+        for lc in loadCommands where lc.cmd == LC.segment64 || lc.cmd == LC.segment {
+            let o = lc.offset
+            let segName = cString(data.sub(o + 8, 16))
+            let nsects = Int(data.u32le(o + (is64 ? 64 : 48)))
+            var so = o + (is64 ? 72 : 56)
+            for _ in 0..<nsects {
+                guard so + (is64 ? 80 : 68) <= data.count else { break }
+                let name = cString(data.sub(so, 16))
+                let addr = is64 ? data.u64le(so + 32) : UInt64(data.u32le(so + 32))
+                let size = is64 ? data.u64le(so + 40) : UInt64(data.u32le(so + 36))
+                let offset = Int(data.u32le(so + (is64 ? 48 : 40)))
+                out.append(Section(segment: segName, name: name, addr: addr,
+                                   size: size, fileOffset: offset))
+                so += is64 ? 80 : 68
+            }
+        }
+        return out
     }
 
     public var codeSignatureCommand: LoadCommand? { loadCommands.first { $0.cmd == LC.codeSignature } }

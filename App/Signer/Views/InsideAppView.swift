@@ -48,6 +48,14 @@ struct InsideAppView: View {
                     }
                     signatureRows(report)
                     linkRows(report)
+                    // classdump: the classes this program defines, as headers.
+                    NavigationLink {
+                        HeadersView(ipa: ipa, programPath: report.path.components(separatedBy: ".app/")
+                            .dropFirst().joined(separator: ".app/"), programName: report.name)
+                    } label: {
+                        Label("Its classes, as headers", systemImage: "curlybraces")
+                            .font(.callout)
+                    }
                 } header: {
                     HStack {
                         Text(report.name)

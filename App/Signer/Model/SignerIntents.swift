@@ -20,10 +20,8 @@ struct LibraryAppEntity: AppEntity, Identifiable {
     var isSigned: Bool
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(
-            title: "\(name)",
-            subtitle: LocalizedStringResource(stringLiteral: isSigned
-                                              ? "signed · \(version)" : "not signed yet · \(version)"))
+        let state = isSigned ? "signed" : "not signed yet"
+        return DisplayRepresentation(title: "\(name)", subtitle: "\(state) · \(version)")
     }
 
     init(_ app: LibraryApp) {
@@ -49,9 +47,10 @@ struct LibraryAppQuery: EntityQuery {
 /// Sign an app that is already in My apps, with the certificate Signer is set to use.
 struct SignAppIntent: AppIntent {
     static var title: LocalizedStringResource = "Sign an app"
-    static var description = IntentDescription(
-        "Signs an app from My apps with the certificate Signer is set to use. Signer opens and "
-        + "does the work, because signing a large app takes longer than a shortcut is allowed.")
+    static var description = IntentDescription("""
+        Signs an app from My apps with the certificate Signer is set to use. Signer opens and \
+        does the work, because signing a large app takes longer than a shortcut is allowed.
+        """)
     static var openAppWhenRun = true
 
     @Parameter(title: "App")
@@ -63,16 +62,18 @@ struct SignAppIntent: AppIntent {
             throw AppIntentError.notFound
         }
         NotificationCenter.default.post(name: .signThisApp, object: found.id)
-        return .result(dialog: "Signing \(found.name) in Signer.")
+        let words = "Signing \(found.name) in Signer."
+        return .result(dialog: IntentDialog("\(words)"))
     }
 }
 
 /// Install an app that has already been signed.
 struct InstallAppIntent: AppIntent {
     static var title: LocalizedStringResource = "Install an app"
-    static var description = IntentDescription(
-        "Hands a signed app from My apps to iOS to install. Signer opens to serve the app from "
-        + "the phone.")
+    static var description = IntentDescription("""
+        Hands a signed app from My apps to iOS to install. Signer opens to serve the app from \
+        the phone.
+        """)
     static var openAppWhenRun = true
 
     @Parameter(title: "App")
@@ -84,18 +85,21 @@ struct InstallAppIntent: AppIntent {
             throw AppIntentError.notFound
         }
         guard found.isSigned else {
-            return .result(dialog: "\(found.name) is not signed yet, so it cannot be installed.")
+            let no = "\(found.name) is not signed yet, so it cannot be installed."
+            return .result(dialog: IntentDialog("\(no)"))
         }
         Store.shared.pendingInstall = found
-        return .result(dialog: "Installing \(found.name).")
+        let words = "Installing \(found.name)."
+        return .result(dialog: IntentDialog("\(words)"))
     }
 }
 
 /// Read every repository again and say what is out of date.
 struct RefreshSourcesIntent: AppIntent {
     static var title: LocalizedStringResource = "Check my sources"
-    static var description = IntentDescription(
-        "Reads every repository again and says which of your apps have a newer version waiting.")
+    static var description = IntentDescription("""
+        Reads every repository again and says which of your apps have a newer version waiting.
+        """)
     static var openAppWhenRun = false
 
     @MainActor
@@ -103,34 +107,32 @@ struct RefreshSourcesIntent: AppIntent {
         let store = Store.shared
         await SourceLoader.shared.refreshAll(store.sources)
         let waiting = store.library.filter { SourceLoader.shared.update(for: $0) != nil }
-        let dialog: IntentDialog
+        let words: String
         switch waiting.count {
-        case 0: dialog = "Everything is up to date."
-        case 1: dialog = "\(waiting[0].name) has a newer version waiting."
+        case 0: words = "Everything is up to date."
+        case 1: words = "\(waiting[0].name) has a newer version waiting."
         default:
-            dialog = IntentDialog(stringLiteral:
-                "\(waiting.count) apps have a newer version waiting: "
-                + waiting.prefix(4).map(\.name).joined(separator: ", "))
+            let names = waiting.prefix(4).map(\.name).joined(separator: ", ")
+            words = "\(waiting.count) apps have a newer version waiting: \(names)"
         }
-        return .result(value: waiting.count, dialog: dialog)
+        return .result(value: waiting.count, dialog: IntentDialog("\(words)"))
     }
 }
 
 /// What is out of date, without reading the repositories again.
 struct UpdatesWaitingIntent: AppIntent {
     static var title: LocalizedStringResource = "Updates waiting"
-    static var description = IntentDescription(
-        "Says how many of your apps have a newer version waiting, using what Signer already knows.")
+    static var description = IntentDescription("""
+        Says how many of your apps have a newer version waiting, using what Signer already knows.
+        """)
     static var openAppWhenRun = false
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog & ReturnsValue<Int> {
         let waiting = Store.shared.library.filter { SourceLoader.shared.update(for: $0) != nil }
-        return .result(value: waiting.count,
-                       dialog: waiting.isEmpty
-                       ? "Nothing is waiting."
-                       : IntentDialog(stringLiteral: "\(waiting.count) waiting: "
-                                      + waiting.prefix(4).map(\.name).joined(separator: ", ")))
+        let names = waiting.prefix(4).map(\.name).joined(separator: ", ")
+        let words = waiting.isEmpty ? "Nothing is waiting." : "\(waiting.count) waiting: \(names)"
+        return .result(value: waiting.count, dialog: IntentDialog("\(words)"))
     }
 }
 

@@ -122,6 +122,34 @@ func run() throws {
         if report.isClean { print("CLEAN: nothing the installer would refuse") }
         for p in report.problems { print("PROBLEM [\(p.kind.rawValue)] \(p)") }
         exit(report.isClean ? 0 : 1)
+    case "headers":
+        // headers <program|ipa>   — write out the classes inside a program, as headers
+        guard args.count >= 2 else { print("usage: signkit-cli headers <program or .ipa>"); exit(2) }
+        let path = URL(fileURLWithPath: args[1])
+        var binary: Data
+        if path.pathExtension.lowercased() == "ipa" {
+            let reader = try ZipReader(url: path)
+            guard let info = reader.entries.first(where: {
+                $0.name.hasSuffix(".app/Info.plist") && $0.name.split(separator: "/").count == 3
+            }) else { throw SignKitError.malformed("not an iPhone app") }
+            let appDir = String(info.name.dropLast("Info.plist".count))
+            let plist = try PropertyListSerialization.propertyList(
+                from: try reader.data(for: info), format: nil) as? [String: Any] ?? [:]
+            let exec = plist["CFBundleExecutable"] as? String ?? ""
+            guard let entry = reader.entries.first(where: { $0.name == appDir + exec }) else {
+                throw SignKitError.malformed("no program inside")
+            }
+            binary = try reader.data(for: entry)
+        } else {
+            binary = try Data(contentsOf: path)
+        }
+        let file = try MachOFile(data: binary)
+        guard let slice = file.slices.first(where: { $0.is64 }) ?? file.slices.first else {
+            throw SignKitError.malformed("no 64-bit slice")
+        }
+        let dump = ObjCDump.read(slice)
+        print(dump.headers())
+        FileHandle.standardError.write(Data("\(dump.classes.count) classes, \(dump.protocols.count) protocols\n".utf8))
     default:
         usage()
     }

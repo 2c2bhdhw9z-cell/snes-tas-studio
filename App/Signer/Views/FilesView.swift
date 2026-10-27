@@ -316,7 +316,11 @@ struct FileViewer: View {
     }
 
     /// For a certificate or profile, show what is actually in it.
-    static func details(url: URL, kind: FileEntry.Kind, bytes: Int) -> String? {
+    ///
+    /// Deliberately not tied to the main thread: a SwiftUI view's own members are, and this is
+    /// called from a background job on purpose - unpacking a 4 GB app's settings file must not
+    /// happen on the main thread.
+    nonisolated static func details(url: URL, kind: FileEntry.Kind, bytes: Int) -> String? {
         switch kind {
         case .profile:
             guard let p = try? ProvisioningProfile(url: url) else { return nil }
@@ -353,7 +357,7 @@ struct FileViewer: View {
 
     /// Looks at no more than the first 64 KB — opening a two-gigabyte file must
     /// never pull the whole thing into memory.
-    static func body(of url: URL, hex: Bool) -> String {
+    nonisolated static func body(of url: URL, hex: Bool) -> String {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return "Could not read this file." }
         let slice = autoreleasepool { handle.readData(ofLength: 64 * 1024) }
         try? handle.close()
