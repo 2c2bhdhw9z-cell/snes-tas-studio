@@ -143,6 +143,10 @@ final class LockdownClient {
         return noErr
     }
 
+    /// What SecureTransport says when it has looked at the other side's certificate and is
+    /// waiting to be told whether to go on. Swift does not carry the name, only the number.
+    static let serverAuthCompleted: OSStatus = -9841
+
     func startTLS(identity: SecIdentity) throws {
         guard let context = SSLCreateContext(nil, .clientSide, .streamType) else {
             throw Failure.tls(-1)
@@ -166,8 +170,8 @@ final class LockdownClient {
                 return
             case errSSLWouldBlock:
                 continue
-            case errSSLServerAuthCompleted:
-                continue   // we are not judging it; carry on
+            case LockdownClient.serverAuthCompleted:
+                continue   // we are not judging the phone's certificate; carry on
             default:
                 throw Failure.tls(result)
             }
@@ -202,7 +206,7 @@ final class LockdownClient {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         var read = 0
         let status = buffer.withUnsafeMutableBufferPointer { pointer in
-            SSLRead(ssl, pointer.baseAddress, pointer.count, &read)
+            SSLRead(ssl, pointer.baseAddress!, pointer.count, &read)
         }
         if read > 0 { return Data(buffer[0..<read]) }
         if status == errSSLWouldBlock { return Data() }
