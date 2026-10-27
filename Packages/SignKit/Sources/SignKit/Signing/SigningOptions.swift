@@ -32,6 +32,11 @@ public struct SigningOptions {
     public var removeExtensions = false
     public var removeWatchApp = false
     public var removeFiles: [String] = []
+    /// Files to write over inside the app, each path relative to the `.app` itself
+    /// ("Info.plist", "Frameworks/thing.dylib"). This is how an edited `.plist` or a swapped
+    /// file gets in: the app is unpacked, these are written, and signing happens afterwards,
+    /// so the hashes always match what is really there.
+    public var replaceFiles: [String: Data] = [:]
     /// Keep only these architectures (for example ["arm64"]) to make the app smaller.
     public var keepArchitectures: Set<String>?
 

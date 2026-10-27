@@ -21,6 +21,20 @@ struct Modifier {
         for rel in options.removeFiles {
             try? fm.removeItem(at: app.appendingPathComponent(rel))
         }
+
+        // Files the user edited or swapped out. Done before the Info.plist edits below, so
+        // an edited Info.plist is the starting point and the switches still win over it.
+        let appRoot = app.standardizedFileURL.path
+        for (rel, data) in options.replaceFiles {
+            let target = app.appendingPathComponent(rel)
+            guard target.standardizedFileURL.path.hasPrefix(appRoot + "/") else {
+                warnings("A file outside the app was ignored: \(rel)")
+                continue
+            }
+            try? fm.createDirectory(at: target.deletingLastPathComponent(),
+                                    withIntermediateDirectories: true)
+            try data.write(to: target)
+        }
         // Old signatures are always thrown away — everywhere, not just at the top —
         // along with the App Store's leftovers, so nothing stale gets hashed in.
         try? fm.removeItem(at: app.appendingPathComponent("embedded.mobileprovision"))

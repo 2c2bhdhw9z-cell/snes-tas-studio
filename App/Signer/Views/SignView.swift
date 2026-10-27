@@ -26,6 +26,8 @@ struct SignView: View {
     @State private var tweaks: [URL] = []
     @State private var extras: [ExtraEntitlement] = []
     @State private var removeLibraries: [String] = []
+    @State private var replaceFiles: [String: Data] = [:]
+    @State private var removeFiles: [String] = []
     @State private var newIcon: Data?
     @State private var photo: PhotosPickerItem?
     @AppStorage("installAfterSigning") private var installAfterSigning = true
@@ -262,8 +264,23 @@ struct SignView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            NavigationLink {
+                if let app {
+                    AppFilesView(ipa: app.fileURL, replace: $replaceFiles, remove: $removeFiles)
+                }
+            } label: {
+                HStack {
+                    Text("Its files, and editing them")
+                    Spacer()
+                    Text(changeCount == 0 ? "look inside" : "\(changeCount) change"
+                         + (changeCount == 1 ? "" : "s"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
         }
     }
+
+    var changeCount: Int { replaceFiles.count + removeFiles.count }
 
     var permissionsSection: some View {
         Section("Permissions") {
@@ -398,6 +415,8 @@ struct SignView: View {
         options.icon = newIcon
         options.injectLibraries = tweaks
         options.removeLibraries = removeLibraries
+        options.replaceFiles = replaceFiles
+        options.removeFiles = removeFiles
         options.extraEntitlements = Dictionary(extras.map { ($0.key, $0.plistValue) },
                                                uniquingKeysWith: { _, last in last })
         options.compressOutput = compressOutput
