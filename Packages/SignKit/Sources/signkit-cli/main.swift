@@ -122,6 +122,38 @@ func run() throws {
         if report.isClean { print("CLEAN: nothing the installer would refuse") }
         for p in report.problems { print("PROBLEM [\(p.kind.rawValue)] \(p)") }
         exit(report.isClean ? 0 : 1)
+    case "catalog":
+        // catalog <ipa|Assets.car> [out.png]  — what is in a compiled image set, and its icon
+        guard args.count >= 2 else { print("usage: signkit-cli catalog <.ipa or Assets.car> [out.png]"); exit(2) }
+        let path = URL(fileURLWithPath: args[1])
+        var carData: Data
+        if path.pathExtension.lowercased() == "ipa" {
+            let reader = try ZipReader(url: path)
+            let appDir = try AppContents.appDirectory(reader)
+            guard let entry = reader.entries.first(where: { $0.name == appDir + "Assets.car" }) else {
+                print("no Assets.car inside"); exit(1)
+            }
+            carData = try reader.data(for: entry)
+        } else {
+            carData = try Data(contentsOf: path)
+        }
+        let catalog = try AssetCatalog.read(carData)
+        print("\(catalog.renditions.count) renditions, \(catalog.facets.count) names")
+        for rendition in catalog.renditions.sorted(by: { $0.pixels > $1.pixels }).prefix(12) {
+            print("  \(rendition.facet) — \(rendition.width)x\(rendition.height) @\(rendition.scale)"
+                  + " \(rendition.pixelFormat) \(rendition.packing.label) \(rendition.payloadLength) bytes")
+        }
+        if let icon = catalog.bestIcon {
+            print("icon: \(icon.facet) \(icon.width)x\(icon.height) \(icon.packing.label)")
+            if let png = AssetCatalog.png(for: icon, in: carData) {
+                let out = args.count > 2 ? URL(fileURLWithPath: args[2])
+                    : URL(fileURLWithPath: "catalog-icon.png")
+                try png.write(to: out)
+                print("wrote \(png.count) bytes to \(out.path)")
+            } else {
+                print("that icon is packed in a way only iOS can unpack")
+            }
+        }
     case "headers":
         // headers <program|ipa>   — write out the classes inside a program, as headers
         guard args.count >= 2 else { print("usage: signkit-cli headers <program or .ipa>"); exit(2) }

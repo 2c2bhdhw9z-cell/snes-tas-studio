@@ -33,6 +33,8 @@ extension Data {
         UInt32(u8(o)) | UInt32(u8(o + 1)) << 8 | UInt32(u8(o + 2)) << 16 | UInt32(u8(o + 3)) << 24
     }
     public func u64le(_ o: Int) -> UInt64 { UInt64(u32le(o)) | UInt64(u32le(o + 4)) << 32 }
+    public func u16be(_ o: Int) -> UInt16 { UInt16(u8(o)) << 8 | UInt16(u8(o + 1)) }
+
     public func u32be(_ o: Int) -> UInt32 {
         UInt32(u8(o)) << 24 | UInt32(u8(o + 1)) << 16 | UInt32(u8(o + 2)) << 8 | UInt32(u8(o + 3))
     }

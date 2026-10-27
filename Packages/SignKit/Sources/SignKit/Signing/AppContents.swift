@@ -61,7 +61,7 @@ public enum AppContents {
     }
 
     /// Where the app sits inside the zip, "Payload/Something.app/".
-    static func appDirectory(_ reader: ZipReader) throws -> String {
+    public static func appDirectory(_ reader: ZipReader) throws -> String {
         guard let info = reader.entries.first(where: {
             $0.name.hasSuffix(".app/Info.plist") && $0.name.split(separator: "/").count == 3
         }) else {

@@ -65,6 +65,15 @@ struct IPAInfo {
         }.sorted { $0.uncompressedSize > $1.uncompressedSize }
         if let best = iconEntries.first { iconData = try? reader.data(for: best) }
 
+        // No icon file in the app: its icon lives in the compiled image set, which is why such
+        // apps look blank in other signers. Read it out of there instead (IconReader).
+        if iconData == nil,
+           let car = reader.entries.first(where: { $0.name == appDir + "Assets.car" }),
+           car.uncompressedSize < 64 << 20,
+           let carData = try? reader.data(for: car) {
+            iconData = IconReader.icon(fromCatalog: carData)
+        }
+
         // The app's other icons, if it ships any: the biggest file for each one.
         var alternates: [AltIcon] = []
         for (label, files) in alternateIconNames(info) {
