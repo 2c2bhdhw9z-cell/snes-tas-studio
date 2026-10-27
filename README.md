@@ -21,6 +21,17 @@ how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is goin
   instead of iOS's vague "integrity could not be verified".
 - **Changes apps while signing**: name, app ID, version, icon, minimum iOS, file sharing,
   120 Hz, remove extras, remove the Watch app, add `.dylib`/`.deb` add-ons.
+- **A new icon without wrecking the app.** A photo, a picture file, or one of the icons the
+  app already carries for itself; the app's compiled image set is left alone, which is what
+  other signers' "icon fix" destroys.
+- **A permissions editor.** What the certificate's profile allows, in plain words, plus
+  switches for the useful extras (debugger, extra memory, large addresses, JIT) and anything
+  else by name.
+- **Shows what is inside an app**: every program in it, everything each one links, what its
+  signature says, and one tap to take a carried library out.
+- **Keeps source apps up to date.** My apps says when a source has a newer version; one tap
+  downloads it, signs it and installs it.
+- **Light, dark, or follow the phone.**
 - **Handles multi-gigabyte apps.** Imports, downloads, unpacking, resource hashing,
   Mach-O signing, packing and installation all stream in small chunks. A 2 GB app is
   never loaded into memory; ZIP64 covers archives that pass 4 GB; long jobs stay alive
@@ -40,7 +51,7 @@ how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is goin
 ## Checking the engine
 
 ```sh
-swift test --package-path Packages/SignKit          # 78 tests, runs on Linux
+swift test --package-path Packages/SignKit          # 99 tests, runs on Linux
 Packages/SignKit/.build/debug/signkit-cli zip x.ipa # read any .ipa, verify every checksum
 signkit-cli sign-ipa in.ipa out.ipa cert.p12 pw     # sign end to end
 RCODESIGN=/path/to/rcodesign tools/verify-signature.sh out.ipa
