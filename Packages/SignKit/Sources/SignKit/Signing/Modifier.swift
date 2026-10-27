@@ -108,22 +108,34 @@ struct Modifier {
     }
 
     /// Copies the new icon in and points the app at it.
+    ///
+    /// The app's compiled image set (`Assets.car`) is left alone. iPhone looks in there for the
+    /// icon only because of `CFBundleIconName`, so taking that key out is enough for the loose
+    /// files written here to be the icon - deleting the catalogue, which this used to do, takes
+    /// every other picture in the app with it (what other signers' "white icon fix" breaks).
+    /// Keeping it means the worst that can happen is the icon does not change, instead of an
+    /// app with no pictures in it.
     func writeIcon(_ png: Data, to app: URL, info: inout [String: Any]) throws {
         let name = "SignKitIcon"
-        for (suffix, _) in [("60x60@2x", 120), ("60x60@3x", 180), ("76x76@2x~ipad", 152)] {
+        for suffix in ["60x60@2x", "60x60@3x", "76x76@2x~ipad", "83.5x83.5@2x~ipad"] {
             try png.write(to: app.appendingPathComponent("\(name)\(suffix).png"))
         }
-        info["CFBundleIcons"] = [
-            "CFBundlePrimaryIcon": [
-                "CFBundleIconFiles": ["\(name)60x60"],
-                "CFBundleIconName": name,
-            ],
+        // Whatever other icons the app carries for itself (CFBundleAlternateIcons) are kept,
+        // so an app that lets you switch its icon still can.
+        var icons = info["CFBundleIcons"] as? [String: Any] ?? [:]
+        icons["CFBundlePrimaryIcon"] = ["CFBundleIconFiles": ["\(name)60x60"]]
+        info["CFBundleIcons"] = icons
+
+        var padIcons = info["CFBundleIcons~ipad"] as? [String: Any] ?? [:]
+        padIcons["CFBundlePrimaryIcon"] = [
+            "CFBundleIconFiles": ["\(name)60x60", "\(name)76x76", "\(name)83.5x83.5"],
         ]
+        info["CFBundleIcons~ipad"] = padIcons
+
         info["CFBundleIconFiles"] = ["\(name)60x60"]
-        // The compiled catalogue would override our icon, so it goes.
-        try? FileManager.default.removeItem(at: app.appendingPathComponent("Assets.car"))
-        warnings("The icon was replaced, which removes the app's built-in image set. "
-                 + "Some pictures inside the app may be missing.")
+        // These two send iPhone to the compiled catalogue instead of the files above.
+        info.removeValue(forKey: "CFBundleIconName")
+        info.removeValue(forKey: "CFBundleIconFile")
     }
 
     /// Rewrites extension bundle IDs so they stay under the app's new ID.

@@ -54,8 +54,14 @@ BuildBox, BatSign, ABox, SideStore. Each line below is a feature one of them has
    AltStore-shaped, and `versionDescription` (what's new) and text sizes are read now too.
    The **encrypted** ones are blocked on a real example - nothing public spells the format out,
    and guessing it is pointless. Needs an encrypted ESign repo address to work from.
-4. **Alternative app icons** (`CFBundleAlternateIcons`), and a proper white-icon fix: take the icon
-   out of `Assets.car` rather than deleting the file. (KSign, Feather, ABox.)
+4. **Reading an icon out of `Assets.car`.** Half of this item is done (26 October): there is an
+   icon picker on the Sign screen - a photo, a picture file, or one of the app's own alternative
+   icons (`CFBundleAlternateIcons`) - and a new icon no longer deletes the app's compiled image
+   set, which is what makes other signers' "icon fix" lose every picture in an app. What is left
+   is *reading* an icon that exists only inside `Assets.car`, for apps that show up blank. That
+   needs a reader for Apple's compiled catalogue format (BOM trees, CSI renditions, LZVN), which
+   is a large piece of engine work; all four real apps checked here ship loose icon files, so it
+   is rare. Worth doing only when an app actually turns up blank.
 5. **A Mach-O viewer**: every library an app links, with one tap to remove one, and what the
    signature inside says. (ABox.)
 6. **Editing inside an app before signing**: unzip, change a `.plist`, repack. (ESign, GBox.)

@@ -1,5 +1,7 @@
 import SwiftUI
 import Combine
+import PhotosUI
+import UIKit
 import UniformTypeIdentifiers
 import SignKit
 
@@ -23,6 +25,8 @@ struct SignView: View {
     @State private var removeWatch = false
     @State private var tweaks: [URL] = []
     @State private var extras: [ExtraEntitlement] = []
+    @State private var newIcon: Data?
+    @State private var photo: PhotosPickerItem?
     @AppStorage("installAfterSigning") private var installAfterSigning = true
 
     init(preselected: LibraryApp? = nil) {
@@ -36,6 +40,7 @@ struct SignView: View {
             appSection
             if info != nil {
                 detailsSection
+                iconSection
                 switchesSection
                 tweaksSection
                 permissionsSection
@@ -142,6 +147,102 @@ struct SignView: View {
                 Label("Add a .dylib or .deb", systemImage: "plus")
             }
         }
+    }
+
+    /// The icon: keep the app's own, use one of the app's other icons, or put in a picture.
+    /// The engine has written every icon size an app needs since the start (Modifier.writeIcon);
+    /// this is the screen for it.
+    var iconSection: some View {
+        Section("Icon") {
+            HStack(spacing: 12) {
+                if let newIcon, let image = UIImage(data: newIcon) {
+                    Image(uiImage: image).resizable()
+                        .frame(width: 60, height: 60)
+                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                } else if let data = info?.iconPNG, let image = UIImage(data: data) {
+                    Image(uiImage: image).resizable()
+                        .frame(width: 60, height: 60)
+                        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                } else {
+                    Image(systemName: "app.dashed").resizable()
+                        .frame(width: 60, height: 60)
+                        .foregroundStyle(.secondary)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(newIcon == nil ? "The app's own icon" : "Your picture")
+                        .font(.callout)
+                    Text("Every size iPhone asks for is written from this one picture.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            PhotosPicker(selection: $photo, matching: .images) {
+                Label("Choose a picture", systemImage: "photo")
+            }
+            Button {
+                DocumentPicker.present(multiple: false) { urls in
+                    if let url = urls.first, let data = try? Data(contentsOf: url) {
+                        newIcon = SignView.asPNG(data)
+                    }
+                }
+            } label: {
+                Label("Choose a picture file", systemImage: "doc")
+            }
+            if let alternates = info?.alternateIcons, !alternates.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(alternates) { alt in
+                            Button {
+                                newIcon = alt.png
+                            } label: {
+                                VStack(spacing: 4) {
+                                    if let image = UIImage(data: alt.png) {
+                                        Image(uiImage: image).resizable()
+                                            .frame(width: 48, height: 48)
+                                            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                                    }
+                                    Text(alt.name).font(.caption2).lineLimit(1).frame(maxWidth: 60)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+                Text("Icons this app already carries for itself. Tap one to make it the icon you see.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            if newIcon != nil {
+                Button("Put the app's own icon back", role: .destructive) { newIcon = nil }
+            }
+        }
+        .onChange(of: photo) { item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self) {
+                    newIcon = SignView.asPNG(data)
+                }
+            }
+        }
+    }
+
+    /// A photo is usually a JPEG and iPhone icons have to be PNG, so whatever is picked is
+    /// turned into one. Also squares it off at 1024, the size Apple asks for.
+    static func asPNG(_ data: Data) -> Data? {
+        guard let image = UIImage(data: data) else { return nil }
+        let side: CGFloat = 1024
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let square = UIGraphicsImageRenderer(size: CGSize(width: side, height: side),
+                                             format: format).image { _ in
+            // Fill the square with the picture, cropping the long side rather than squashing it.
+            let scale = max(side / image.size.width, side / image.size.height)
+            let width = image.size.width * scale
+            let height = image.size.height * scale
+            image.draw(in: CGRect(x: (side - width) / 2, y: (side - height) / 2,
+                                  width: width, height: height))
+        }
+        return square.pngData() ?? image.pngData()
     }
 
     var permissionsSection: some View {
@@ -274,6 +375,7 @@ struct SignView: View {
         options.removeExtensions = removeExtensions
         options.separateCopy = separateCopy
         options.removeWatchApp = removeWatch
+        options.icon = newIcon
         options.injectLibraries = tweaks
         options.extraEntitlements = Dictionary(extras.map { ($0.key, $0.plistValue) },
                                                uniquingKeysWith: { _, last in last })

@@ -261,6 +261,39 @@ final class IPASignerTests: XCTestCase {
         XCTAssertEqual(ents["com.continuum.test-text"] as? String, "hello")
     }
 
+    /// A new icon must not cost the app every other picture it has. Other signers delete
+    /// Assets.car to make their icon win, which is where "the app's images went missing"
+    /// comes from; this one keeps the catalogue and takes out the key that points at it.
+    func testNewIconKeepsTheAppsImageSet() throws {
+        let input = try sample()
+        let dir = try temp()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let output = dir.appendingPathComponent("icon.ipa")
+
+        let before = try ZipReader(url: input).entries.map(\.name)
+        try XCTSkipUnless(before.contains { $0.hasSuffix(".app/Assets.car") },
+                          "this sample has no compiled image set to protect")
+
+        // A tiny 1x1 PNG is enough: the signer copies it, it does not decode it.
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==")!
+        var options = SigningOptions()
+        options.compressOutput = false
+        options.icon = png
+        _ = try IPASigner().sign(ipa: input, to: output, identity: try identity(), options: options)
+
+        let after = try ZipReader(url: output).entries.map(\.name)
+        XCTAssertTrue(after.contains { $0.hasSuffix(".app/Assets.car") },
+                      "the app's compiled image set must survive a new icon")
+        XCTAssertTrue(after.contains { $0.hasSuffix("SignKitIcon60x60@2x.png") },
+                      "the new icon files must be in the app")
+
+        let info = try PropertyListSerialization.propertyList(
+            from: try read(output, ".app/Info.plist"), format: nil) as? [String: Any] ?? [:]
+        XCTAssertNil(info["CFBundleIconName"], "that key sends iPhone back to the catalogue")
+        let primary = (info["CFBundleIcons"] as? [String: Any])?["CFBundlePrimaryIcon"] as? [String: Any]
+        XCTAssertEqual(primary?["CFBundleIconFiles"] as? [String], ["SignKitIcon60x60"])
+    }
+
     func testRefusesSomethingThatIsNotAnApp() throws {
         let dir = try temp()
         defer { try? FileManager.default.removeItem(at: dir) }

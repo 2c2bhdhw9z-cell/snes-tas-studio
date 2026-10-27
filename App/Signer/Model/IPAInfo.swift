@@ -16,6 +16,15 @@ struct IPAInfo {
     var hasExtensions: Bool
     var hasWatchApp: Bool
     var linkedTweaks: [String]
+    /// Icons the app ships besides its usual one (CFBundleAlternateIcons). Any of them can be
+    /// made the main icon while signing, using the picture already inside the app.
+    var alternateIcons: [AltIcon] = []
+
+    struct AltIcon: Identifiable, Hashable {
+        var id: String { name }
+        var name: String
+        var png: Data
+    }
 
     static func read(_ url: URL) throws -> IPAInfo {
         let reader = try ZipReader(url: url)
@@ -56,6 +65,20 @@ struct IPAInfo {
         }.sorted { $0.uncompressedSize > $1.uncompressedSize }
         if let best = iconEntries.first { iconData = try? reader.data(for: best) }
 
+        // The app's other icons, if it ships any: the biggest file for each one.
+        var alternates: [AltIcon] = []
+        for (label, files) in alternateIconNames(info) {
+            let candidates = reader.entries.filter { e in
+                guard e.name.hasPrefix(appDir), e.name.hasSuffix(".png") else { return false }
+                let file = String(e.name.dropFirst(appDir.count))
+                guard !file.contains("/") else { return false }
+                return files.contains { file.hasPrefix($0) }
+            }.sorted { $0.uncompressedSize > $1.uncompressedSize }
+            if let best = candidates.first, let png = try? reader.data(for: best) {
+                alternates.append(AltIcon(name: label, png: png))
+            }
+        }
+
         let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         return IPAInfo(
             name: (info["CFBundleDisplayName"] as? String) ?? (info["CFBundleName"] as? String)
@@ -70,8 +93,25 @@ struct IPAInfo {
             isEncrypted: encrypted,
             hasExtensions: reader.entries.contains { $0.name.contains("/PlugIns/") },
             hasWatchApp: reader.entries.contains { $0.name.contains("/Watch/") },
-            linkedTweaks: tweaks
+            linkedTweaks: tweaks,
+            alternateIcons: alternates
         )
+    }
+
+    /// CFBundleAlternateIcons: each entry is a name the app uses for the icon, and the files
+    /// that make it up. Apps with a "dark" or "pro" icon put them here.
+    static func alternateIconNames(_ info: [String: Any]) -> [(String, [String])] {
+        guard let icons = info["CFBundleIcons"] as? [String: Any],
+              let alternates = icons["CFBundleAlternateIcons"] as? [String: Any] else { return [] }
+        var out: [(String, [String])] = []
+        for key in alternates.keys.sorted() {
+            guard let entry = alternates[key] as? [String: Any] else { continue }
+            var files = entry["CFBundleIconFiles"] as? [String] ?? []
+            if let name = entry["CFBundleIconName"] as? String { files.append(name) }
+            if files.isEmpty { files = [key] }
+            out.append((key, files))
+        }
+        return out
     }
 
     static func iconCandidates(_ info: [String: Any]) -> [String] {
