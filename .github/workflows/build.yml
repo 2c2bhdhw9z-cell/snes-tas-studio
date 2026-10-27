@@ -43,6 +43,8 @@ jobs:
         working-directory: App
         run: |
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" Signer/Info.plist || true
+          # The Dynamic Island extension has to carry the same version as the app.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ github.run_number }}" SignerActivity/Info.plist || true
 
       - name: Build
         working-directory: App

@@ -28,6 +28,14 @@ final class SigningRunner: ObservableObject {
         Trace.isOn = UserDefaults.standard.object(forKey: SigningRunner.traceKey) as? Bool ?? true
         Trace.start(at: Paths.trace, what: ipa.lastPathComponent)
 
+        // The Dynamic Island, so a long job can be watched with Signer closed. The name comes
+        // from the library rather than from reading the zip again, which on a 4 GB game would
+        // hold the screen up before anything had even started.
+        let islandName = store.library.first {
+            $0.fileURL.standardizedFileURL == ipa.standardizedFileURL
+        }?.name ?? ipa.deletingPathExtension().lastPathComponent
+        SigningIsland.shared.start(appName: islandName)
+
         do {
             let identity = try certificate.map { try store.identity(for: $0) }
             let job = IPASigner()
@@ -35,6 +43,7 @@ final class SigningRunner: ObservableObject {
                 Task { @MainActor in
                     self?.fraction = f
                     if !m.isEmpty { self?.message = m }
+                    SigningIsland.shared.update(fraction: f, step: m.isEmpty ? (self?.message ?? "") : m)
                 }
             }
             let result = try await Task.detached(priority: .userInitiated) {
@@ -47,15 +56,21 @@ final class SigningRunner: ObservableObject {
                 iconName = outputName + ".png"
                 try? png.write(to: store.appsDir.appendingPathComponent(iconName!))
             }
+            // If the app we signed came from a repository, the signed copy says so too.
+            let origin = store.library.first {
+                $0.fileURL.standardizedFileURL == ipa.standardizedFileURL
+            }
             store.addToLibrary(LibraryApp(
                 id: UUID(), name: result.displayName, bundleID: result.bundleID,
                 version: result.version, fileName: outputName, isSigned: true,
                 signedWithCertificateID: certificate?.id, added: Date(),
-                bytes: result.bytes, iconFileName: iconName
+                bytes: result.bytes, iconFileName: iconName,
+                sourceName: origin?.sourceName, sourceURL: origin?.sourceURL
             ))
             finished = result
             message = "Signed"
             fraction = 1
+            SigningIsland.shared.end(failed: false, step: "Signed")
             // Straight into installing, the way ESign does, unless Settings says otherwise.
             if UserDefaults.standard.object(forKey: SigningRunner.installAfterKey) as? Bool ?? true,
                let justSigned = store.library.first(where: { $0.fileName == outputName }) {
@@ -65,6 +80,7 @@ final class SigningRunner: ObservableObject {
             errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
             message = "Stopped"
             Trace.failed(errorMessage ?? "unknown")
+            SigningIsland.shared.end(failed: true, step: "Stopped")
         }
         isRunning = false
     }

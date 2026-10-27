@@ -42,7 +42,19 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
+		<string>fetch</string>
+		<string>processing</string>
 	</array>
+	<!-- Checking repositories while the app is closed (Settings, Sources). -->
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.continuum.signer.refresh</string>
+	</array>
+	<!-- Signing progress in the Dynamic Island. -->
+	<key>NSSupportsLiveActivities</key>
+	<true/>
+	<key>NSSupportsLiveActivitiesFrequentUpdates</key>
+	<true/>
 	<key>UISupportsDocumentBrowser</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>

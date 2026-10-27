@@ -6,6 +6,11 @@ import SignKit
 struct SignerApp: App {
     @StateObject private var store = Store.shared
 
+    init() {
+        // iOS refuses the identifier unless this happens before launching finishes.
+        BackgroundRefresh.register()
+    }
+
     var body: some Scene {
         WindowGroup {
             RootView()

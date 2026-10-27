@@ -13,6 +13,8 @@ struct SettingsView: View {
     @AppStorage(SigningRunner.traceKey) private var writeTrace = true
     @AppStorage("installAfterSigning") private var installAfterSigning = true
     @AppStorage(AppTheme.key) private var theme = AppTheme.system.rawValue
+    @AppStorage(BackgroundRefresh.settingKey) private var checkInBackground = true
+    @AppStorage(SigningIsland.settingKey) private var showIsland = true
     @State private var webCertPassword = ""
 
     var body: some View {
@@ -87,6 +89,11 @@ struct SettingsView: View {
                 }
 
                 Section("Signing") {
+                    Toggle("Show progress in the Dynamic Island", isOn: $showIsland)
+                    Text("Puts the job in the island at the top of the screen and on the lock "
+                         + "screen, so a long sign can be watched with Signer closed. Needs "
+                         + "iOS 16.1 or newer.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Toggle("Install as soon as it is signed", isOn: $installAfterSigning)
                     Text("Goes straight to installing when signing finishes, the way ESign does. "
                          + "Off leaves the app in My apps for you to install when you like.")
@@ -100,6 +107,24 @@ struct SettingsView: View {
                          ? "Smaller file, slower signing."
                          : "Off is much faster, and the app installs exactly the same.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+
+                Section("Sources") {
+                    Toggle("Check my sources in the background", isOn: $checkInBackground)
+                    Text("iOS gives Signer a moment now and then - usually while charging on "
+                         + "Wi-Fi - to read your repositories and tell you if an app has a newer "
+                         + "version waiting. Nothing is downloaded or signed on its own.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Shortcuts can also do it: \"Check my sources\", \"Updates waiting\", "
+                         + "\"Sign an app\" and \"Install an app\" are all in the Shortcuts app "
+                         + "and work with Siri.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .onChange(of: checkInBackground) { on in
+                    Task {
+                        if on { await BackgroundRefresh.askAboutNotifications() }
+                        BackgroundRefresh.schedule()
+                    }
                 }
 
                 Section("Troubleshooting") {

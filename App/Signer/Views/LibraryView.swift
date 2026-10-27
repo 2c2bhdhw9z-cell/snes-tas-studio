@@ -210,6 +210,12 @@ struct AppRow: View {
                          + (offer.sizeText.map { " · \($0)" } ?? ""))
                         .font(.caption2)
                         .foregroundStyle(.tint)
+                } else if let from = app.sourceName {
+                    // Where it came from matters more than its ID once it came from somewhere.
+                    Text("from \(from)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 } else {
                     Text(app.bundleID)
                         .font(.caption2)

@@ -130,6 +130,10 @@ struct LibraryApp: Codable, Identifiable, Hashable {
     var added: Date
     var bytes: Int
     var iconFileName: String?
+    /// Which repository it came from, when it came from one. Older saved lists do not have
+    /// these, so both are optional.
+    var sourceName: String? = nil
+    var sourceURL: URL? = nil
 
     var fileURL: URL {
         filePath.map { URL(fileURLWithPath: $0) } ?? Paths.apps.appendingPathComponent(fileName)

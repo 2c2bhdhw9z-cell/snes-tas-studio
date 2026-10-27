@@ -9,6 +9,9 @@ struct SourceApp: Identifiable, Hashable {
     var version: String
     var versionDate: Date?
     var developer: String?
+    /// Which repository offered it, filled in when a source is read.
+    var sourceName: String? = nil
+    var sourceURL: URL? = nil
     var summary: String?
     var fullDescription: String?
     var iconURL: URL?
@@ -188,7 +191,16 @@ final class SourceLoader: ObservableObject {
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 throw SignKitError.io("the source answered with code \(http.statusCode)")
             }
-            feeds[source.id] = try SourceFeed.parse(data, from: source.url)
+            var feed = try SourceFeed.parse(data, from: source.url)
+            // Stamp every app with where it came from, so My apps can say so later.
+            let name = feed.name
+            feed.apps = feed.apps.map { app in
+                var stamped = app
+                stamped.sourceName = name
+                stamped.sourceURL = source.url
+                return stamped
+            }
+            feeds[source.id] = feed
             rebuildOffers()
         } catch {
             failures[source.id] = (error as? SignKitError)?.description ?? error.localizedDescription
@@ -224,6 +236,11 @@ final class SourceLoader: ObservableObject {
         // File tab is instant and never creates a second multi-gigabyte copy.
         try FileManager.default.moveItem(at: temp, to: named)
         downloadProgress = 1
-        return try SigningRunner.importIPA(named)
+        var imported = try SigningRunner.importIPA(named)
+        // Remember which repository it came from (shown in My apps).
+        imported.sourceName = app.sourceName
+        imported.sourceURL = app.sourceURL
+        Store.shared.addToLibrary(imported)
+        return imported
     }
 }
