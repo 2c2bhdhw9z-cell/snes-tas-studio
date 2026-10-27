@@ -15,6 +15,9 @@ struct SettingsView: View {
     @AppStorage(AppTheme.key) private var theme = AppTheme.system.rawValue
     @AppStorage(BackgroundRefresh.settingKey) private var checkInBackground = true
     @AppStorage(SigningIsland.settingKey) private var showIsland = true
+    @AppStorage(DeviceInstaller.hostKey) private var pairingHost = "127.0.0.1"
+    @AppStorage(DeviceInstaller.portKey) private var pairingPort = 62078
+    @StateObject private var device = DeviceInstaller()
     @State private var webCertPassword = ""
 
     var body: some View {
@@ -86,6 +89,50 @@ struct SettingsView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         Button("Put the usual address back") { helperURL = InstallServer.defaultHelper }
                     }
+                }
+
+                Section("Pairing file") {
+                    LabeledContent("Pairing file",
+                                   value: DeviceInstaller.hasPairingFile
+                                   ? (UserDefaults.standard.string(forKey: DeviceInstaller.fileKey) ?? "kept")
+                                   : "none yet")
+                    LabeledContent("Address") {
+                        TextField("127.0.0.1", text: $pairingHost)
+                            .multilineTextAlignment(.trailing)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                    }
+                    LabeledContent("Port") {
+                        TextField("62078", value: $pairingPort, format: .number)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numberPad)
+                    }
+                    Button {
+                        Task { await device.check() }
+                    } label: {
+                        if device.busy {
+                            Label("Asking…", systemImage: "hourglass")
+                        } else {
+                            Label("Say hello to iOS's install service", systemImage: "hand.wave")
+                        }
+                    }
+                    .disabled(device.busy)
+                    if let saw = device.sawService {
+                        Label("It answered: \(saw)", systemImage: "checkmark.circle")
+                            .font(.caption).foregroundStyle(.green)
+                    }
+                    if let problem = device.problem {
+                        Label(problem, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    Text("This is the way SideStore installs: instead of handing iOS a details "
+                         + "file over the web, Signer talks to the service inside iOS that the "
+                         + "Finder talks to. It needs a pairing file - tap yours on the File tab "
+                         + "and choose \"Use as the pairing file\" - and it needs that service to "
+                         + "be reachable at the address above, which on a phone means a tunnel "
+                         + "app such as StosVPN running. Say hello first: if it answers, the "
+                         + "rest will work.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
                 Section("Signing") {

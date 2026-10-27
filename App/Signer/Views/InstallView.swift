@@ -6,6 +6,7 @@ struct InstallView: View {
     @EnvironmentObject var store: Store
     @Environment(\.dismiss) var dismiss
     @StateObject private var server = InstallServer()
+    @StateObject private var device = DeviceInstaller()
     @AppStorage("installHelperURL") private var helperURL = InstallServer.defaultHelper
     @AppStorage("installLocalHTTPS") private var useLocalHTTPS = false
 
@@ -63,6 +64,38 @@ struct InstallView: View {
                         Text("Look at your home screen: the app should be installing. If it says \"Waiting…\", "
                              + "close Signer fully (swipe it away) and the install will carry on.")
                             .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                // SideStore's route, when a pairing file has been imported.
+                if DeviceInstaller.hasPairingFile {
+                    Section("Or the way SideStore does it") {
+                        Button {
+                            Task { await device.install(ipa: app.fileURL, bundleID: app.bundleID) }
+                        } label: {
+                            Text(device.busy ? "Working…" : "Install with the pairing file")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(device.busy || busy)
+                        if device.busy || device.fraction > 0 {
+                            ProgressView(value: device.fraction)
+                        }
+                        if !device.step.isEmpty {
+                            Text(device.step).font(.caption).foregroundStyle(.secondary)
+                        }
+                        if device.done {
+                            Label("iOS has it", systemImage: "checkmark.circle")
+                                .font(.caption).foregroundStyle(.green)
+                        }
+                        if let problem = device.problem {
+                            Label(problem, systemImage: "exclamationmark.triangle")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
+                        Text("Talks to the service inside iOS that the Finder talks to, instead "
+                             + "of serving a details file. Needs the address in Settings to be "
+                             + "reachable - on a phone that means a tunnel app running.")
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
             }

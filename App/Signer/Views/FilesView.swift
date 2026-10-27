@@ -110,6 +110,8 @@ struct FilesView: View {
                     case .ipa:
                         Button("Sign this app") { addToLibrary(entry, thenSign: true) }
                         Button("Add to My apps") { addToLibrary(entry, thenSign: false) }
+                    case .pairing:
+                        Button("Use as the pairing file") { takePairingFile(entry) }
                     case .other:
                         EmptyView()
                     }
@@ -157,6 +159,23 @@ struct FilesView: View {
         }
     }
 
+    /// Keeps a pairing file for installing the way SideStore does (Settings, Pairing file).
+    func takePairingFile(_ entry: FileEntry) {
+        do {
+            let data = try Data(contentsOf: entry.url)
+            let pairing = try PairingFile(data: data)
+            try FileManager.default.createDirectory(at: Paths.root, withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: DeviceInstaller.pairingURL)
+            try data.write(to: DeviceInstaller.pairingURL)
+            UserDefaults.standard.set(entry.name, forKey: DeviceInstaller.fileKey)
+            show(pairing.udid == nil ? "Pairing file kept" : "Pairing file kept for \(pairing.udid ?? "")")
+        } catch let e as SignKitError {
+            show(e.description, error: true)
+        } catch {
+            show(error.localizedDescription, error: true)
+        }
+    }
+
     func addToLibrary(_ entry: FileEntry, thenSign: Bool) {
         do {
             let app = try SigningRunner.importIPA(entry.url)
@@ -177,7 +196,7 @@ extension Notification.Name {
 
 /// One row in the file list.
 struct FileEntry: Identifiable, Hashable {
-    enum Kind { case p12, profile, ipa, other }
+    enum Kind { case p12, profile, ipa, pairing, other }
 
     var id: String { url.path }
     let url: URL
@@ -193,6 +212,8 @@ struct FileEntry: Identifiable, Hashable {
         case "p12", "pfx": return .p12
         case "mobileprovision", "provisionprofile": return .profile
         case "ipa": return .ipa
+        // A pairing file: what a computer keeps after this phone has trusted it.
+        case "plist", "mobiledevicepairing", "pairing": return .pairing
         default: return .other
         }
     }
@@ -257,6 +278,7 @@ struct FileRow: View {
         case .p12: return "key.fill"
         case .profile: return "doc.badge.gearshape"
         case .ipa: return "app.gift"
+        case .pairing: return "iphone.and.arrow.forward"
         case .other: return "doc"
         }
     }
@@ -347,6 +369,11 @@ struct FileViewer: View {
                 lines.append("Add-ons inside: \(info.linkedTweaks.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))")
             }
             return lines.joined(separator: "\n")
+        case .pairing:
+            guard let pairing = try? PairingFile(data: try Data(contentsOf: url)) else {
+                return "A settings file. If it is a pairing file, Signer could not read it."
+            }
+            return (["Pairing file"] + pairing.summary).joined(separator: "\n")
         case .p12:
             return "A certificate file. Tap Import on it to use it for signing.\n"
                 + "Size: \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))"
