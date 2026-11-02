@@ -148,8 +148,10 @@ struct SignView: View {
             Button {
                 pickTweaks()
             } label: {
-                Label("Add a .dylib or .deb", systemImage: "plus")
+                Label("Add a .dylib", systemImage: "plus")
             }
+            Text("Choose the standalone .dylib file. Debian .deb packages are not unpacked here yet.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
@@ -253,14 +255,18 @@ struct SignView: View {
         Section("Inside the app") {
             NavigationLink {
                 if let app {
-                    InsideAppView(ipa: app.fileURL, removeLibraries: $removeLibraries)
+                    // Once a signing run completes, inspect the actual output just written,
+                    // not the input IPA that was selected at the top of this form.
+                    InsideAppView(ipa: runner.finished?.outputURL ?? app.fileURL,
+                                  removeLibraries: $removeLibraries)
                 }
             } label: {
                 HStack {
                     Text("Its programs and what they link")
                     Spacer()
                     Text(removeLibraries.isEmpty
-                         ? "look inside" : "\(removeLibraries.count) to remove")
+                         ? (runner.finished == nil ? "selected app" : "signed output")
+                         : "\(removeLibraries.count) to remove")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

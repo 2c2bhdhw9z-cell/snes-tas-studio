@@ -189,6 +189,14 @@ struct Modifier {
         let info = try plist(at: app.appendingPathComponent("Info.plist"))
         guard let exec = info["CFBundleExecutable"] as? String else { return }
 
+        // Validate before copying. A Debian .deb is an archive, not a Mach-O library;
+        // linking the archive itself makes dyld reject the app at launch. We do not yet
+        // unpack .deb control/data archives, so fail clearly and require the standalone dylib.
+        for lib in options.injectLibraries where !MachOFile.isSignable(url: lib) {
+            throw SignKitError.unsupported(
+                "\(lib.lastPathComponent) is not a Mach-O library. Choose the standalone .dylib; .deb packages are not unpacked yet.")
+        }
+
         // Copy the tweaks into the bundle first.
         var injectedNames = [String]()
         let frameworks = app.appendingPathComponent("Frameworks")

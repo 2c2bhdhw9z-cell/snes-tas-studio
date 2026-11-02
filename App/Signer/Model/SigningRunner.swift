@@ -50,6 +50,28 @@ final class SigningRunner: ObservableObject {
                 try job.sign(ipa: ipa, to: output, identity: identity, options: options)
             }.value
 
+            // Do not report success or start installation until every selected add-on is
+            // proven to be both linked from the app's main executable and present in the IPA.
+            if !options.injectLibraries.isEmpty {
+                let outputInfo = try IPAInfo.read(output)
+                let linkedNames = Set(outputInfo.linkedTweaks.map {
+                    URL(fileURLWithPath: $0).lastPathComponent
+                })
+                let archive = try ZipReader(url: output)
+                let entryNames = archive.entries.map(\.name)
+                for library in options.injectLibraries {
+                    let name = library.lastPathComponent
+                    guard linkedNames.contains(name) else {
+                        throw SignKitError.unsupported(
+                            "The signed app does not link the selected add-on \(name). No install was started.")
+                    }
+                    guard entryNames.contains(where: { $0.hasSuffix(".app/Frameworks/\(name)") }) else {
+                        throw SignKitError.unsupported(
+                            "The signed IPA links \(name), but does not contain it in the app's Frameworks folder.")
+                    }
+                }
+            }
+
             // Keep the icon next to the app so the library can show it.
             var iconName: String?
             if let info = try? IPAInfo.read(output), let png = info.iconPNG {
