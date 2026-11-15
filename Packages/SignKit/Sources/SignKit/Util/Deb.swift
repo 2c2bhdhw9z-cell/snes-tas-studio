@@ -70,15 +70,9 @@ public enum Deb {
             // A `.deb`'s data.tar.gz is gzip, not raw deflate, so it is opened as gzip (47).
             tar = try Zip.inflate(body, expected: body.count * 4, windowBits: 47)
         } else if name.hasSuffix(".xz") {
-            guard let out = XZ.decode(body) else {
-                throw DebError.unsupported("this package is xz-compressed, which Signer cannot open yet")
-            }
-            tar = out
+            throw DebError.unsupported(UnsupportedCompressor.explain(xz: true))
         } else if name.hasSuffix(".zst") {
-            guard let out = Zstd.decode(body) else {
-                throw DebError.unsupported("this package is zstd-compressed, which Signer cannot open yet")
-            }
-            tar = out
+            throw DebError.unsupported(UnsupportedCompressor.explain(xz: false))
         } else if name.hasSuffix(".tar") {
             tar = body
         } else {

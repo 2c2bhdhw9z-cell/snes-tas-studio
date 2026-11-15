@@ -32,7 +32,7 @@ Keychain and saved as it is typed) and B7 (a cancelled run deletes its half-writ
 
 | What | What was done |
 |---|---|
-| `.deb` add-ons | **Built.** `Util/Deb.swift` reads the `ar` container and the tar inside it, and takes out every `.dylib`. gzip and stored tar work; **xz and zstd do not** — iOS has no xz decoder, and a full LZMA2 implementation is out of proportion to the job, so those say so plainly and the screen suggests the `.gz` package. zstd uses the system decoder where it exists. Five tests cover it (`DebTests.swift`). |
+| `.deb` add-ons | **Built.** `Util/Deb.swift` reads the `ar` container and the tar inside it, and takes out every `.dylib`. gzip and stored tar work; **xz and zstd do not** — iOS has no public decoder for either, and writing LZMA2 is out of proportion to the job, so those say so plainly and the screen suggests the `.gz` package. Five tests cover it (`DebTests.swift`). |
 | Cancelling a sign | **Built.** `IPASigner.cancel()` sets a thread-safe flag that the unpack and pack loops check once per file. The half-written output is deleted. The Sign screen shows "Stop signing". |
 | Cancelling an install | **Built.** "Stop installing" ends the listener and every connection, and forgets the pending version swap so the working app is untouched. |
 | The on-phone install | **Built.** It refuses instead of falling back, and Settings has the address field. |
