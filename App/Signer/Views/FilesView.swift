@@ -79,35 +79,7 @@ struct FilesView: View {
             .listStyle(.plain)
             .searchable(text: $search, prompt: "Search")
             .navigationTitle(directory == Paths.files ? "File List" : directory.lastPathComponent)
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    if directory != Paths.files && !selecting {
-                        Button {
-                            directory = directory.deletingLastPathComponent()
-                            reload()
-                        } label: {
-                            Label("Up", systemImage: "arrow.up.left")
-                        }
-                    }
-                    if !entries.isEmpty {
-                        Button(selecting ? "Done" : "Select") {
-                            if selecting {
-                                stopSelecting()
-                            } else {
-                                selecting = true
-                            }
-                        }
-                    }
-                    if !selecting {
-                        Button {
-                            DocumentPicker.present { urls in
-                                guard !urls.isEmpty else { return }
-                                ImportCoordinator.shared.take(urls)
-                            }
-                        } label: { Label("Add", systemImage: "plus") }
-                    }
-                }
-            }
+            .toolbar { toolbar }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if selecting {
                     SelectionBar(count: chosenFiles.count, unit: "file",
@@ -124,17 +96,7 @@ struct FilesView: View {
             .refreshable { reload() }
             .onAppear { reload() }
             .onReceive(NotificationCenter.default.publisher(for: .filesChanged)) { _ in reload() }
-            .overlay(alignment: .bottom) {
-                if let banner {
-                    Text(banner)
-                        .font(.callout)
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .foregroundStyle(bannerIsError ? .red : .primary)
-                        .padding(.bottom, 12)
-                        .transition(.opacity)
-                }
-            }
+            .overlay(alignment: .bottom) { toast }
             // Tapping a file: the same short menu ESign shows.
             .confirmationDialog(chosen?.name ?? "", isPresented: Binding(
                 get: { chosen != nil }, set: { if !$0 { chosen = nil } }), titleVisibility: .visible) {
@@ -173,6 +135,50 @@ struct FilesView: View {
     }
 
     // MARK: - choosing several
+
+    @ToolbarContentBuilder
+    var toolbar: some ToolbarContent {
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            if directory != Paths.files && !selecting {
+                Button {
+                    directory = directory.deletingLastPathComponent()
+                    reload()
+                } label: {
+                    Label("Up", systemImage: "arrow.up.left")
+                }
+            }
+            if !entries.isEmpty {
+                Button(selecting ? "Done" : "Select") {
+                    if selecting {
+                        stopSelecting()
+                    } else {
+                        selecting = true
+                    }
+                }
+            }
+            if !selecting {
+                Button {
+                    DocumentPicker.present { urls in
+                        guard !urls.isEmpty else { return }
+                        ImportCoordinator.shared.take(urls)
+                    }
+                } label: { Label("Add", systemImage: "plus") }
+            }
+        }
+    }
+
+    @ViewBuilder
+    var toast: some View {
+        if let banner {
+            Text(banner)
+                .font(.callout)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .foregroundStyle(bannerIsError ? .red : .primary)
+                .padding(.bottom, 12)
+                .transition(.opacity)
+        }
+    }
 
     func toggle(_ entry: FileEntry) {
         if picked.contains(entry.id) { picked.remove(entry.id) } else { picked.insert(entry.id) }
