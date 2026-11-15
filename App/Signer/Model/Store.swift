@@ -210,6 +210,25 @@ final class Store: ObservableObject {
     /// the install sheet for it, so "Install as soon as it is signed" works whichever screen
     /// started the job and even if that screen has gone.
     @Published var pendingInstall: LibraryApp?
+    /// An app asked for on the File tab (or by a Shortcut) before My apps existed. The tab
+    /// switches and My apps reads this when it appears, so a cold launch works too.
+    @Published var pendingSign: UUID?
+    /// After an update: the old copy's ID is removed once the new one has really been handed
+    /// to iOS. Cancelling the install sheet therefore leaves the working app alone.
+    var replaceAfterInstall: (old: UUID, new: UUID)?
+
+    /// Called when an install finishes. Drops the version that was replaced, if any.
+    func installFinished(_ app: LibraryApp) {
+        guard let pending = replaceAfterInstall, pending.new == app.id else { return }
+        replaceAfterInstall = nil
+        if let old = library.first(where: { $0.id == pending.old }) { deleteApp(old) }
+    }
+
+    /// The person stopped an install, so nothing was replaced: the old copy stays and the
+    /// pending swap is forgotten.
+    func installCancelled() {
+        replaceAfterInstall = nil
+    }
 
     func addToLibrary(_ app: LibraryApp) {
         library.removeAll { $0.fileURL == app.fileURL }

@@ -27,8 +27,31 @@ public final class IPASigner {
 
     public var onProgress: ((Double, String) -> Void)?
     private var warnings = [String]()
+    /// Set from another thread to stop the job at the next file boundary. Signing is
+    /// unpack / modify / sign / pack, and each of those loops calls `checkCancelled()`, so a
+    /// 4 GB app stops within a second or two instead of minutes.
+    private let cancelled = Cancelled()
 
     public init() {}
+
+    /// Stops the run at the next safe point. The half-written output is deleted by `sign`.
+    public func cancel() { cancelled.value = true }
+    public var isCancelled: Bool { cancelled.value }
+
+    private func checkCancelled() throws {
+        if cancelled.value { throw SignKitError.cancelled }
+    }
+
+    /// A flag the signing thread reads and another thread writes. A plain `Bool` would be a
+    /// data race across threads, which Swift checks for now.
+    private final class Cancelled: @unchecked Sendable {
+        private let lock = NSLock()
+        private var flag = false
+        var value: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return flag }
+            set { lock.lock(); flag = newValue; lock.unlock() }
+        }
+    }
 
     /// Signs an `.ipa` and writes a new one.
     public func sign(ipa: URL, to output: URL, identity: Identity?, options: SigningOptions) throws -> SigningResult {
@@ -38,6 +61,11 @@ public final class IPASigner {
         let work = fm.temporaryDirectory.appendingPathComponent("signkit-\(UUID().uuidString)")
         try fm.createDirectory(at: work, withIntermediateDirectories: true)
         defer { try? fm.removeItem(at: work) }
+        // A stopped or failed run must not leave a half-written .ipa in Apps/ as well as the
+        // unpacked folder: nothing points at it, so it would just sit there taking space.
+        defer {
+            if cancelled.value, fm.fileExists(atPath: output.path) { try? fm.removeItem(at: output) }
+        }
 
         let inputSize = fileSize(of: ipa)
         let freeSpace = (try? fm.attributesOfFileSystem(forPath: work.path)[.systemFreeSize] as? Int) ?? 0
@@ -54,6 +82,7 @@ public final class IPASigner {
             total.addingReportingOverflow(Int64(entry.uncompressedSize)).overflow
                 ? Int64.max : total + Int64(entry.uncompressedSize)
         }
+        try checkCancelled()
         let largestFile = Int64(reader.entries.map(\.uncompressedSize).max() ?? 0)
         let safety = max(Int64(256 << 20), Int64(inputSize / 10))
         let needed = unpackedSize.addingReportingOverflow(largestFile).overflow
@@ -68,11 +97,11 @@ public final class IPASigner {
         Trace.note("\(reader.entries.count) files inside, \(unpackedSize) bytes unpacked")
         Trace.phase("unpacking")
         var unpacked = 0
-        try reader.extractAll(to: work) { f, name in
+        try reader.extractAll(to: work, progress: { f, name in
             unpacked += 1
             Trace.step(unpacked - 1, of: reader.entries.count, name)
             self.onProgress?(0.02 + f * 0.25, "Unpacking \(name.split(separator: "/").last.map(String.init) ?? "")")
-        }
+        }, shouldStop: { self.cancelled.value })
         let payload = work.appendingPathComponent("Payload")
         guard let appName = (try? fm.contentsOfDirectory(atPath: payload.path))?
             .first(where: { $0.hasSuffix(".app") }) else {
@@ -143,11 +172,11 @@ public final class IPASigner {
         let writer = try ZipWriter(url: output)
         var packed = 0
         try writer.addTree(at: payload, prefix: "Payload/", compress: options.compressOutput,
-                           removeAfterWriting: true) { f, name in
+                           removeAfterWriting: true, progress: { f, name in
             packed += 1
             Trace.step(packed - 1, of: 0, name)
             self.onProgress?(0.8 + f * 0.19, "Packing \(name.split(separator: "/").last.map(String.init) ?? "")")
-        }
+        }, shouldStop: { self.cancelled.value })
         try writer.finish()
         onProgress?(1, "Done")
         Trace.finish("signed \(bundleID)")

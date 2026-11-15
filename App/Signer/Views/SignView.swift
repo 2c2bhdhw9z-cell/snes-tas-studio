@@ -13,6 +13,8 @@ struct SignView: View {
 
     @State private var app: LibraryApp?
     @State private var info: IPAInfo?
+    /// True while a picked file is being read off the main thread.
+    @State private var reading = false
 
     // What the user can change
     @State private var name = ""
@@ -30,6 +32,9 @@ struct SignView: View {
     @State private var removeFiles: [String] = []
     @State private var newIcon: Data?
     @State private var photo: PhotosPickerItem?
+    /// A complaint about an add-on that could not be read, shown at the bottom of the screen.
+    @State private var banner: String?
+    @State private var bannerIsError = false
     @AppStorage("installAfterSigning") private var installAfterSigning = true
 
     init(preselected: LibraryApp? = nil) {
@@ -41,6 +46,14 @@ struct SignView: View {
     var body: some View {
         Form {
             appSection
+            if reading {
+                Section {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Reading the app…").foregroundStyle(.secondary)
+                    }
+                }
+            }
             if info != nil {
                 detailsSection
                 iconSection
@@ -54,7 +67,24 @@ struct SignView: View {
         }
         .navigationTitle("Sign")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { if let app, info == nil { select(app) } }
+        .overlay(alignment: .bottom) { signToast }
+        .onAppear { if let app, info == nil, !reading { select(app) } }
+    }
+
+    @ViewBuilder
+    var signToast: some View {
+        if let banner {
+            Text(banner)
+                .font(.callout)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .foregroundStyle(bannerIsError ? .red : .primary)
+                .padding(.bottom, 12)
+                .task(id: banner) {
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    if self.banner == banner { self.banner = nil }
+                }
+        }
     }
 
     // MARK: sections
@@ -144,13 +174,15 @@ struct SignView: View {
                 Label(url.lastPathComponent, systemImage: "puzzlepiece.extension")
                     .font(.callout)
             }
-            .onDelete { idx in idx.forEach { tweaks.remove(at: $0) } }
+            .onDelete { idx in tweaks.remove(atOffsets: idx) }
             Button {
                 pickTweaks()
             } label: {
-                Label("Add a .dylib", systemImage: "plus")
+                Label("Add an add-on", systemImage: "plus")
             }
-            Text("Choose the standalone .dylib file. Debian .deb packages are not unpacked here yet.")
+            Text("A standalone .dylib, or a Debian .deb package — the library inside it is taken out "
+                 + "for you. A .deb built with xz or zstd compression cannot be opened yet; most "
+                 + "repositories also offer a .gz one.")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -338,6 +370,15 @@ struct SignView: View {
                     ProgressView(value: runner.fraction)
                     Text(runner.message).font(.caption).foregroundStyle(.secondary)
                 }
+                // The way out of a big app. Without this the only stop was to close Signer.
+                Button(role: .destructive) {
+                    runner.cancel()
+                } label: {
+                    Label(runner.stopping ? "Stopping…" : "Stop signing",
+                          systemImage: "stop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .disabled(runner.stopping)
             } else if let result = runner.finished {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("Signed in \(String(format: "%.0f", result.duration)) seconds",
@@ -351,7 +392,10 @@ struct SignView: View {
                          : "It is in My apps too.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let signed = store.library.first, signed.isSigned {
+                if let signed = runner.finished.flatMap({ result in
+                    // The app that was just signed, not simply the newest one in the list.
+                    store.library.first { $0.fileName == result.outputURL.lastPathComponent }
+                }) {
                     Button {
                         store.pendingInstall = signed
                     } label: {
@@ -385,26 +429,84 @@ struct SignView: View {
     func pickApp() {
         DocumentPicker.present(multiple: false) { urls in
             guard let url = urls.first else { return }
-            if let local = try? Intake.keep(url), let imported = try? SigningRunner.importIPA(local) {
-                select(imported)
-            } else {
-                ImportCoordinator.shared.take([url])
+            // Copying and reading a multi-gigabyte app took seconds and froze the screen.
+            // Off the main thread, with "Reading…" shown instead.
+            reading = true
+            Task.detached(priority: .userInitiated) {
+                let local = try? Intake.keep(url)
+                let imported = local.flatMap { try? SigningRunner.importIPA($0) }
+                await MainActor.run {
+                    reading = false
+                    if let imported {
+                        select(imported)
+                    } else {
+                        ImportCoordinator.shared.take([url])
+                    }
+                }
             }
         }
     }
 
     func pickTweaks() {
         DocumentPicker.present { urls in
-            tweaks.append(contentsOf: urls.compactMap { try? Intake.keep($0) })
+            Task.detached(priority: .userInitiated) {
+                var kept = [URL]()
+                var problems = [String]()
+                for url in urls {
+                    if url.pathExtension.lowercased() == "deb" {
+                        // A .deb holds one or more .dylibs; take each out as an add-on.
+                        do {
+                            let members = try Deb.dylibs(in: url)
+                            guard !members.isEmpty else {
+                                problems.append("· \(url.lastPathComponent) has no .dylib inside.")
+                                continue
+                            }
+                            for member in members {
+                                let name = (member.path as NSString).lastPathComponent
+                                let dest = Paths.tweaks.appendingPathComponent(name)
+                                try? FileManager.default.createDirectory(at: Paths.tweaks,
+                                                                        withIntermediateDirectories: true)
+                                try? member.data.write(to: dest)
+                                kept.append(dest)
+                            }
+                        } catch {
+                            problems.append("· \(url.lastPathComponent): "
+                                            + ((error as? Deb.DebError)?.description ?? error.localizedDescription))
+                        }
+                    } else if let local = try? Intake.keep(url) {
+                        kept.append(local)
+                    }
+                }
+                await MainActor.run {
+                    tweaks.append(contentsOf: kept)
+                    if !problems.isEmpty {
+                        banner = problems.joined(separator: " ")
+                        bannerIsError = true
+                    } else if !kept.isEmpty {
+                        banner = "Added \(kept.count) add-on" + (kept.count == 1 ? "" : "s")
+                        bannerIsError = false
+                    }
+                }
+            }
         }
     }
 
     func select(_ app: LibraryApp) {
         self.app = app
-        info = try? IPAInfo.read(app.fileURL)
-        name = info?.name ?? app.name
-        bundleID = info?.bundleID ?? app.bundleID
-        version = info?.version ?? app.version
+        // `IPAInfo.read` unpacks the icon catalogue, which is tens of megabytes on a real app.
+        // Doing it here blocked the screen; it happens off the main thread now.
+        info = nil
+        reading = true
+        Task.detached(priority: .userInitiated) {
+            let read = try? IPAInfo.read(app.fileURL)
+            await MainActor.run {
+                reading = false
+                info = read
+                name = read?.name ?? app.name
+                bundleID = read?.bundleID ?? app.bundleID
+                version = read?.version ?? app.version
+            }
+        }
     }
 
     func sign() async {

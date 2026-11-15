@@ -54,10 +54,23 @@ struct LibraryView: View {
                      + "put back on the File tab.")
             }
             .overlay(alignment: .bottom) { toast }
-            .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
-                openSignScreen(note)
+            .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { _ in
+                openSignScreen()
             }
+            // Covers the cold-launch case: the File tab asked before this screen existed.
+            .task { if store.pendingSign != nil { openSignScreen() } }
+            .onChange(of: store.pendingSign) { _ in openSignScreen() }
         }
+    }
+
+    /// Opens the Sign screen on the app the File tab (or a Shortcut) asked for, if any.
+    /// Falls back to the newest app so an older request still lands somewhere sensible.
+    func openSignScreen() {
+        guard let wanted = store.pendingSign else { return }
+        store.pendingSign = nil
+        stopSelecting()
+        let chosen = store.library.first { $0.id == wanted } ?? store.library.first
+        path = [.sign(chosen)]
     }
 
     /// The top bar. One `ToolbarItemGroup` returned directly: a `@ToolbarContentBuilder`
@@ -118,15 +131,6 @@ struct LibraryView: View {
     }
 
     /// A file tapped on the File tab with "Sign this app" lands here.
-    func openSignScreen(_ note: Notification) {
-        // Picking from the File tab has nothing to do with choosing several here.
-        stopSelecting()
-        let chosen = (note.object as? UUID).flatMap { id in
-            store.library.first { $0.id == id }
-        } ?? store.library.first
-        path = [.sign(chosen)]
-    }
-
     // MARK: - choosing several
 
     func toggle(_ app: LibraryApp) {

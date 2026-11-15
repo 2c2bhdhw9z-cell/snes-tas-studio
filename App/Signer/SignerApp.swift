@@ -50,8 +50,10 @@ struct RootView: View {
                 .tag(Tab.settings)
         }
         // Tapping "Sign this app" on a file goes to My apps, which opens the Sign screen
-        // on that app (LibraryView listens for the same thing).
-        .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { _ in
+        // on that app. The app's ID is kept in the store rather than passed in the
+        // notification, so it still works when My apps has never been shown (cold launch).
+        .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
+            store.pendingSign = note.object as? UUID
             tab = .apps
         }
         // Light, dark, or follow the phone. nil is "follow the phone".
@@ -67,6 +69,9 @@ struct RootView: View {
             // Reading the sources at launch is what lets My apps say an update is waiting
             // without opening the Sources tab first.
             await SourceLoader.shared.refreshAll(store.sources)
+            // The switch defaults to on, so the permission question has to be asked here,
+            // not only when the switch is changed.
+            if BackgroundRefresh.isOn { await BackgroundRefresh.askAboutNotifications() }
         }
         // One place for "Imported successfully", the password prompt and any complaint.
         .importFeedback()

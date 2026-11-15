@@ -7,7 +7,10 @@ which every other on-device signer (ESign, GBox, Feather, KSign, VexSign, ProSig
 runs underneath. See [docs/RESEARCH.md](docs/RESEARCH.md) for what the others do and
 how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is going.
 [docs/AUDIT.md](docs/AUDIT.md) is every file read line by line, with all 137 problems found
-in it, numbered.
+in it, numbered. [docs/NEXT.md](docs/NEXT.md) is what people would want next — features worth
+adding, fixes that come first, and what is only half built — and
+[docs/FIXES-13.md](docs/FIXES-13.md) records the pass that fixed the first list and finished
+most of the second.
 
 ## What it does today
 

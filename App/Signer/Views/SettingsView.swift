@@ -19,6 +19,12 @@ struct SettingsView: View {
     @AppStorage(DeviceInstaller.portKey) private var pairingPort = 62078
     @StateObject private var device = DeviceInstaller()
     @State private var webCertPassword = ""
+    /// Read by the certificate row and changed when a file is picked, so the row updates.
+    @State private var hasWebCertificate = false
+    /// The address the on-phone install answers on. Nothing used to write this, so it was
+    /// stuck at 127.0.0.1 and could never match a certificate's name.
+    @AppStorage("localHTTPSHost") private var webCertHost = "127.0.0.1"
+    @State private var banner: String?
 
     var body: some View {
         NavigationStack {
@@ -65,14 +71,29 @@ struct SettingsView: View {
                             DocumentPicker.present(multiple: false) { urls in
                                 if let url = urls.first, let data = try? Data(contentsOf: url) {
                                     try? data.write(to: store.root.appendingPathComponent("local-https.p12"))
+                                    // The row used to never refresh, so it looked as if the file
+                                    // had not been taken. Bump the state it reads.
+                                    hasWebCertificate = true
+                                    banner = "Web certificate added"
                                 }
                             }
                         } label: {
                             LabeledContent("Web certificate (.p12)",
                                            value: hasWebCertificate ? "added" : "choose")
                         }
+                        // Saved on every keystroke, not only on Return: pressing Done on the
+                        // keyboard used to lose it. It goes to the Keychain, like a
+                        // certificate password, instead of plain UserDefaults.
                         SecureField("Its password", text: $webCertPassword)
-                            .onSubmit { UserDefaults.standard.set(webCertPassword, forKey: "localHTTPSPassword") }
+                            .onChange(of: webCertPassword) { new in
+                                SecretStore.set(new, for: "localHTTPSPassword")
+                            }
+                        LabeledContent("Address it answers on") {
+                            TextField("127.0.0.1", text: $webCertHost)
+                                .multilineTextAlignment(.trailing)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                        }
                         Text("iOS only installs from a secure address. Doing it all on the phone needs a "
                              + "web certificate for a name that points back here. Nothing is uploaded.")
                             .font(.caption).foregroundStyle(.secondary)
@@ -213,14 +234,39 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
+            .overlay(alignment: .bottom) { settingsToast }
             .onAppear {
-                webCertPassword = UserDefaults.standard.string(forKey: "localHTTPSPassword") ?? ""
+                // Migrated from the old plain-text copy if it is still there.
+                if let saved = SecretStore.get("localHTTPSPassword") {
+                    webCertPassword = saved
+                } else if let old = UserDefaults.standard.string(forKey: "localHTTPSPassword") {
+                    webCertPassword = old
+                    SecretStore.set(old, for: "localHTTPSPassword")
+                    UserDefaults.standard.removeObject(forKey: "localHTTPSPassword")
+                }
+                hasWebCertificate = Self.webCertificateExists
             }
         }
     }
 
-    var hasWebCertificate: Bool {
-        FileManager.default.fileExists(atPath: store.root.appendingPathComponent("local-https.p12").path)
+    @ViewBuilder
+    var settingsToast: some View {
+        if let banner {
+            Text(banner)
+                .font(.callout)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(.bottom, 12)
+                .task(id: banner) {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    if self.banner == banner { self.banner = nil }
+                }
+        }
+    }
+
+    static var webCertificateExists: Bool {
+        FileManager.default.fileExists(
+            atPath: Paths.root.appendingPathComponent("local-https.p12").path)
     }
 
     /// How the last signing run ended, in plain words.
