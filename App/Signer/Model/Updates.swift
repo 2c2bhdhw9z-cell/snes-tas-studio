@@ -33,9 +33,12 @@ final class Updates: ObservableObject {
 
     func isBusy(with bundleID: String) -> Bool { busyBundleID == bundleID }
 
-    /// Downloads `offer`, signs it, starts the install, and removes `replacing` (the older
-    /// copy) and the unsigned download from My apps. The downloaded `.ipa` itself stays on
-    /// the File tab, the way a download should.
+    /// Downloads `offer`, signs it, starts the install, and only then removes `replacing` (the
+    /// older copy) and the unsigned download from My apps. The downloaded `.ipa` itself stays
+    /// on the File tab, the way a download should.
+    ///
+    /// The old copy used to be deleted the moment the new one was signed, so cancelling the
+    /// install sheet left nothing working at all.
     func run(_ offer: SourceApp, replacing old: LibraryApp?) async {
         guard busyBundleID == nil else { return }
         busyBundleID = offer.bundleID
@@ -49,18 +52,26 @@ final class Updates: ObservableObject {
         do {
             let fresh = try await SourceLoader.shared.download(offer)
             stage = "Signing \(offer.name) \(offer.version)"
+            // Everything the Sign screen would have used, not just the compression switch:
+            // a name or an add-on chosen there used to be dropped on an update.
             var options = SigningOptions()
             options.compressOutput = UserDefaults.standard.bool(forKey: "compressOutput")
             options.adhoc = store.selectedCertificate == nil
+            options.injectIntoExtensions = true
             await runner.run(ipa: fresh.fileURL, options: options, certificate: store.selectedCertificate)
             if let failure = runner.errorMessage {
                 error = failure
+                // The unsigned download is still ours to remove; the working app stays put.
+                store.deleteApp(fresh)
                 return
             }
-            // The signed copy is at the top of My apps now. Drop the unsigned download's
-            // entry (its file stays on the File tab) and the version it replaces.
+            // The signed copy is at the top of My apps now. The old version is kept until
+            // the install has actually been handed to iOS, so a cancelled sheet changes
+            // nothing. `Store` clears it when the install finishes.
+            if let old, old.id != fresh.id {
+                store.replaceAfterInstall = (old.id, fresh.id)
+            }
             store.deleteApp(fresh)
-            if let old, old.id != fresh.id { store.deleteApp(old) }
         } catch {
             self.error = (error as? SignKitError)?.description ?? error.localizedDescription
         }

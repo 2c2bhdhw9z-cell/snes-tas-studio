@@ -208,10 +208,13 @@ public final class ZipReader {
     }
 
     /// Unpacks everything into a directory, keeping permissions and symlinks.
-    public func extractAll(to dir: URL, progress: ((Double, String) -> Void)? = nil) throws {
+    public func extractAll(to dir: URL, progress: ((Double, String) -> Void)? = nil,
+                           shouldStop: (() -> Bool)? = nil) throws {
         let fm = FileManager.default
         let total = max(1, entries.count)
         for (i, e) in entries.enumerated() {
+            // Checked once per file, so a stopped run leaves nothing half-written.
+            if shouldStop?() == true { throw SignKitError.cancelled }
             progress?(Double(i) / Double(total), e.name)
             guard !e.name.contains("..") else { throw SignKitError.malformed("unsafe path in zip: \(e.name)") }
             let dest = dir.appendingPathComponent(e.name)
@@ -440,7 +443,8 @@ public final class ZipWriter {
     /// Adds a whole directory tree, which is how a signed `.app` gets packed into `Payload/`.
     public func addTree(at root: URL, prefix: String, compress: Bool = true,
                         removeAfterWriting: Bool = false,
-                        progress: ((Double, String) -> Void)? = nil) throws {
+                        progress: ((Double, String) -> Void)? = nil,
+                        shouldStop: (() -> Bool)? = nil) throws {
         let fm = FileManager.default
         var files = [URL]()
         if let it = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
@@ -450,6 +454,7 @@ public final class ZipWriter {
         files.sort { $0.path < $1.path }
         let total = max(1, files.count)
         for (i, u) in files.enumerated() {
+            if shouldStop?() == true { throw SignKitError.cancelled }
             let rel = u.path.replacingOccurrences(of: root.path + "/", with: "")
             let name = prefix + rel
             progress?(Double(i) / Double(total), rel)
@@ -544,9 +549,16 @@ public enum Zip {
     }
 
     public static func inflate(_ input: Data, expected: Int) throws -> Data {
+        try inflate(input, expected: expected, windowBits: -15)
+    }
+
+    /// Decompresses a whole buffer. `windowBits` -15 is a raw deflate stream (inside a zip),
+    /// 47 is gzip (what a `.deb`'s `data.tar.gz` holds). zlib picks the format from the
+    /// leading bytes when 47 is passed.
+    public static func inflate(_ input: Data, expected: Int, windowBits: Int32) throws -> Data {
         if input.isEmpty { return Data() }
         var stream = z_stream()
-        guard inflateInit2_(&stream, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
+        guard inflateInit2_(&stream, windowBits, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
             throw SignKitError.crypto("cannot start decompression")
         }
         defer { inflateEnd(&stream) }

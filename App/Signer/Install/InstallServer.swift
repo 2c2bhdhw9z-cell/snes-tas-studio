@@ -112,6 +112,9 @@ final class InstallServer: ObservableObject {
             params = .tcp
         }
         params.allowLocalEndpointReuse = true
+        // Only this phone may connect. Without this, anyone on the same Wi-Fi could download
+        // the signed app while it is being installed.
+        params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
 
         // A fixed, known port (with a few spares) rather than "any port". Before the
         // listener is ready, iOS reports its port as 0, and build 16 handed iOS
@@ -293,6 +296,10 @@ final class InstallServer: ObservableObject {
             let halves = value.split(separator: "-", omittingEmptySubsequences: false)
             guard halves.count == 2 else { return nil }
             if halves[0].isEmpty, let suffix = Int(halves[1]) {
+                // `bytes=-0` asks for the last zero bytes. Letting it through made
+                // `start...(total - 1)` a range whose lower bound is above its upper bound,
+                // which traps; a client on the same network could send it.
+                guard suffix > 0 else { return nil }
                 let start = max(0, total - suffix)
                 return start...(total - 1)
             }

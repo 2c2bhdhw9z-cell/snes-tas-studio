@@ -45,6 +45,16 @@ struct SourcesView: View {
                             } label: {
                                 sourceLabel(source)
                             }
+                            // Deleting used to rely on `.onDelete` across a ForEach of
+                            // Sections, which iOS usually does not offer a swipe for, so a
+                            // source could not be removed at all. A long-press always works.
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    remove(source)
+                                } label: {
+                                    Label("Remove this source", systemImage: "trash")
+                                }
+                            }
                         }
                     }
                 }
@@ -168,13 +178,19 @@ struct SourcesView: View {
 
     func deletePicked() {
         let doomed = store.sources.picked(picked)
-        let ids = Set(doomed.map(\.id))
-        store.sources.removeAll { ids.contains($0.id) }
+        store.sources.removeAll { source in doomed.contains { $0.id == source.id } }
         store.save()
         stopSelecting()
         if !doomed.isEmpty {
             banner = "Removed \(doomed.count) source" + (doomed.count == 1 ? "" : "s")
         }
+    }
+
+    /// The one-source delete behind the long-press menu.
+    func remove(_ source: Source) {
+        store.sources.removeAll { $0.id == source.id }
+        store.save()
+        banner = "Removed \(source.name)"
     }
 
     /// Adds every address found, skipping the ones already here, then reads them.

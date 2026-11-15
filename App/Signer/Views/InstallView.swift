@@ -43,6 +43,20 @@ struct InstallView: View {
                     Section { ProgressView(value: f) }
                 }
 
+                // A way out while iOS is copying. Closing the sheet used to be the only stop,
+                // and on a big app the download keeps the phone busy for minutes.
+                if busy {
+                    Section {
+                        Button(role: .destructive) {
+                            server.stop()
+                            store.installCancelled()
+                        } label: {
+                            Label("Stop installing", systemImage: "stop.circle")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+
                 if !server.log.isEmpty {
                     Section("Progress") {
                         ForEach(server.log.reversed(), id: \.self) { line in
@@ -65,6 +79,7 @@ struct InstallView: View {
                              + "close Signer fully (swipe it away) and the install will carry on.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    .onAppear { store.installFinished(app) }
                 }
 
                 // SideStore's route, when a pairing file has been imported.
@@ -146,9 +161,16 @@ struct InstallView: View {
     }
 
     func start() async {
-        let info = try? IPAInfo.read(app.fileURL)
         let route: InstallServer.Route
-        if useLocalHTTPS, let p12 = localWebCertificate() {
+        if useLocalHTTPS {
+            // The on-phone route was switched on, so it is not silently swapped for the helper
+            // while the screen still says nothing is uploaded.
+            guard let p12 = localWebCertificate() else {
+                server.stage = .failed("Doing everything on this phone needs a web certificate, and "
+                                       + "there is not one in Settings → Installing yet. Add the .p12 "
+                                       + "there, or turn the switch off to use the helper address.")
+                return
+            }
             route = .localHTTPS(p12: p12.data, password: p12.password, host: p12.host)
         } else if let url = URL(string: helperURL), !helperURL.isEmpty {
             route = .helper(url)
@@ -156,16 +178,27 @@ struct InstallView: View {
             server.stage = .failed("No install method is set up yet. Open Settings → Installing.")
             return
         }
+        // Reading the app for its icon took long enough to freeze the screen on a big one.
+        // The library already has the icon, so only read the file when it does not.
+        var iconPNG: Data?
+        if app.iconURL == nil || !FileManager.default.fileExists(atPath: app.iconURL?.path ?? "") {
+            let url = app.fileURL
+            iconPNG = await Task.detached(priority: .userInitiated) {
+                (try? IPAInfo.read(url))?.iconPNG
+            }.value
+        }
         await server.start(ipa: app.fileURL, bundleID: app.bundleID,
                            version: app.version.isEmpty ? "1.0" : app.version,
-                           title: app.name, iconPNG: info?.iconPNG, route: route)
+                           title: app.name, iconPNG: iconPNG, route: route)
+        if case .handedOff = server.stage { store.installFinished(app) }
     }
 
     /// The web certificate used when everything is done on the phone.
     func localWebCertificate() -> (data: Data, password: String, host: String)? {
         let url = store.root.appendingPathComponent("local-https.p12")
         guard let data = try? Data(contentsOf: url) else { return nil }
-        let password = UserDefaults.standard.string(forKey: "localHTTPSPassword") ?? ""
+        let password = SecretStore.get("localHTTPSPassword")
+            ?? UserDefaults.standard.string(forKey: "localHTTPSPassword") ?? ""
         let host = UserDefaults.standard.string(forKey: "localHTTPSHost") ?? "127.0.0.1"
         return (data, password, host)
     }

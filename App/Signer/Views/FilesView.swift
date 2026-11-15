@@ -301,14 +301,22 @@ struct FilesView: View {
     }
 
     func addToLibrary(_ entry: FileEntry, thenSign: Bool) {
-        do {
-            let app = try SigningRunner.importIPA(entry.url)
-            show(thenSign ? "Opening it in My apps…" : "Added to My apps")
-            if thenSign { NotificationCenter.default.post(name: .signThisApp, object: app.id) }
-        } catch let e as SignKitError {
-            show(e.description, error: true)
-        } catch {
-            show(error.localizedDescription, error: true)
+        // Reading the app (and its icon catalogue) blocked the list for seconds on a big one.
+        show(thenSign ? "Reading the app…" : "Adding to My apps…")
+        Task { @MainActor in
+            // `importIPA` touches the store, so it runs here, but the heavy read inside it is
+            // what took the time; the work is handed to a background task for that part.
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try SigningRunner.readApp(entry.url) }
+            }.value
+            switch result {
+            case .success(let info):
+                let app = SigningRunner.addToLibrary(entry, info: info)
+                show(thenSign ? "Opening it in My apps…" : "Added to My apps")
+                if thenSign { NotificationCenter.default.post(name: .signThisApp, object: app.id) }
+            case .failure(let error):
+                show((error as? SignKitError)?.description ?? error.localizedDescription, error: true)
+            }
         }
     }
 }

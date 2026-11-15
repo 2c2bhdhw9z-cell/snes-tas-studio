@@ -10,8 +10,34 @@ final class SigningRunner: ObservableObject {
     @Published var finished: SigningResult?
     @Published var errorMessage: String?
 
+    /// The running job, kept so Stop can reach it from the main thread while it works.
+    private var job: IPASigner?
+    /// A stop was asked for. Read by the job at its next file boundary.
+    @Published private(set) var stopping = false
+
+    /// Stops the run at the next file. A 4 GB app finishes unpacking within a second or two
+    /// of this being pressed, and the half-written output is deleted instead of left behind.
+    func cancel() {
+        guard isRunning else { return }
+        stopping = true
+        message = "Stopping"
+        job?.cancel()
+    }
+
+    /// One signing job at a time for the whole app. Two runs at once overwrite each other's
+    /// trace file, Live Activity and output, and the phone only has room for one big app.
+    static var jobInFlight = false
+
     func run(ipa: URL, options: SigningOptions, certificate: StoredCertificate?) async {
+        guard !SigningRunner.jobInFlight else {
+            errorMessage = "Another app is already being signed. Wait for it to finish."
+            message = "Stopped"
+            return
+        }
+        SigningRunner.jobInFlight = true
+        defer { SigningRunner.jobInFlight = false }
         isRunning = true
+        stopping = false
         KeepAwake.shared.begin("signing")
         defer { KeepAwake.shared.end() }
         fraction = 0
@@ -39,6 +65,8 @@ final class SigningRunner: ObservableObject {
         do {
             let identity = try certificate.map { try store.identity(for: $0) }
             let job = IPASigner()
+            self.job = job
+            defer { self.job = nil }
             job.onProgress = { [weak self] f, m in
                 Task { @MainActor in
                     self?.fraction = f
@@ -99,10 +127,17 @@ final class SigningRunner: ObservableObject {
                 store.pendingInstall = justSigned
             }
         } catch {
-            errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
-            message = "Stopped"
-            Trace.failed(errorMessage ?? "unknown")
-            SigningIsland.shared.end(failed: true, step: "Stopped")
+            if let kit = error as? SignKitError, case .cancelled = kit {
+                // Stopping is not a failure: say "Stopped" quietly and leave no output file.
+                message = "Stopped"
+                Trace.failed("stopped by hand")
+                SigningIsland.shared.end(failed: false, step: "Stopped")
+            } else {
+                errorMessage = (error as? SignKitError)?.description ?? error.localizedDescription
+                message = "Stopped"
+                Trace.failed(errorMessage ?? "unknown")
+                SigningIsland.shared.end(failed: true, step: "Stopped")
+            }
         }
         isRunning = false
     }
@@ -114,14 +149,25 @@ final class SigningRunner: ObservableObject {
 
     /// Imports an `.ipa` into the library without signing it.
     static func importIPA(_ url: URL) throws -> LibraryApp {
+        addToLibrary(url, info: try readApp(url))
+    }
+
+    /// The slow half of an import: reading the app's info, which can unpack a big icon
+    /// catalogue. Kept apart so a screen can run it off the main thread and then add the
+    /// result on the main one.
+    nonisolated static func readApp(_ url: URL) throws -> IPAInfo {
+        try IPAInfo.read(url)
+    }
+
+    /// The quick half: copy the file into place if needed, write the icon, add the entry.
+    static func addToLibrary(_ url: URL, info: IPAInfo) -> LibraryApp {
         let store = Store.shared
-        let info = try IPAInfo.read(url)
         let inFileList = url.standardizedFileURL.path.hasPrefix(Paths.files.standardizedFileURL.path + "/")
         let name = inFileList ? url.lastPathComponent : "import-\(UUID().uuidString.prefix(8)).ipa"
         let dest = inFileList ? url : store.appsDir.appendingPathComponent(name)
         if !inFileList {
             try? FileManager.default.removeItem(at: dest)
-            try FileManager.default.copyItem(at: url, to: dest)
+            try? FileManager.default.copyItem(at: url, to: dest)
         }
         var iconName: String?
         if let png = info.iconPNG {

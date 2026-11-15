@@ -58,6 +58,13 @@ extension MachOSlice {
     }
 
     /// Renames a linked library (for example CydiaSubstrate -> our hook library).
+    ///
+    /// The new name is written **in place** whenever it fits in the command's existing size,
+    /// so the command does not move. That matters: the position of a `LC_LOAD_DYLIB` is the
+    /// library's ordinal, and symbols are bound by ordinal, so removing the command and
+    /// appending a new one renumbers every library after it and the app can crash on launch.
+    /// Only when the new name is longer than the old one is the command rebuilt, and then in
+    /// exactly the same place.
     public mutating func replaceDylib(_ old: String, with new: String) throws {
         guard let lc = loadCommands.first(where: { lc in
             guard LC.isDylibLoad(lc.cmd) else { return false }
@@ -65,8 +72,35 @@ extension MachOSlice {
             return cString(data.sub(lc.offset + nameOff, lc.size - nameOff)) == old
         }) else { return }
         let weak = lc.cmd == LC.loadWeakDylib
-        removeLoadCommand(lc)
-        try injectDylib(new, weak: weak)
+        let nameOff = Int(data.u32le(lc.offset + 8))
+        let room = lc.size - nameOff
+        var name = Data(new.utf8); name.append(0)
+        if name.count <= room {
+            // Fits in the space the old name used: overwrite and keep every offset intact.
+            var padded = name
+            padded.append(Data(count: room - name.count))
+            let from = data.startIndex + lc.offset + nameOff
+            let to = data.startIndex + lc.offset + lc.size
+            data.replaceSubrange(from..<to, with: padded)
+            return
+        }
+        // Longer name: the command has to grow. Rebuild the whole load-command block so that
+        // the extra bytes come out of the header padding at the end and nothing after the
+        // block moves - shifting the file would invalidate every segment offset in it.
+        let rebuilt = MachOSlice.dylibCommand(new, weak: weak)
+        let delta = rebuilt.count - lc.size
+        guard delta > 0, headerPadding >= delta else {
+            throw SignKitError.unsupported(
+                "no room to rename \(old) to \(new): the app's header is full")
+        }
+        let s = data.startIndex
+        let blockStart = headerSize
+        let blockEnd = headerSize + sizeofcmds
+        let before = data.sub(blockStart, lc.offset - blockStart)
+        let after = data.sub(lc.offset + lc.size, blockEnd - lc.offset - lc.size)
+        let newBlock = before + rebuilt + after + Data(count: delta)
+        data.replaceSubrange((s + blockStart)..<(s + blockEnd + delta), with: newBlock)
+        data.set32le(20, UInt32(sizeofcmds + delta))
     }
 
     public mutating func addRpath(_ path: String) throws {
