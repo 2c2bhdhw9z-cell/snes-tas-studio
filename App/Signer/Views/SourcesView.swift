@@ -10,6 +10,10 @@ struct SourcesView: View {
     @State private var adding = false
     @State private var message: String?
     @State private var banner: String?
+    // Choosing several sources at once. Sources have stable IDs of their own.
+    @State private var selecting = false
+    @State private var picked: Set<UUID> = []
+    @State private var confirmingDelete = false
 
     var body: some View {
         NavigationStack {
@@ -23,24 +27,23 @@ struct SourcesView: View {
                 }
                 ForEach(store.sources) { source in
                     Section {
-                        NavigationLink {
-                            SourceAppsView(source: source, loader: loader)
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(loader.feeds[source.id]?.name ?? source.name)
-                                        .font(.body.weight(.medium))
-                                    if loader.loading.contains(source.id) {
-                                        Text("Loading…").font(.caption).foregroundStyle(.secondary)
-                                    } else if let failure = loader.failures[source.id] {
-                                        Text(failure).font(.caption).foregroundStyle(.red)
-                                    } else if let feed = loader.feeds[source.id] {
-                                        Text("\(feed.apps.count) apps").font(.caption).foregroundStyle(.secondary)
-                                    } else {
-                                        Text(source.url.host ?? "").font(.caption).foregroundStyle(.secondary)
-                                    }
+                        // While choosing, the source is a check box. A NavigationLink would
+                        // open the source's apps on any tap, so it becomes a plain row.
+                        if selecting {
+                            Button {
+                                toggle(source)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    SelectionCheck(isOn: picked.contains(source.id))
+                                    sourceLabel(source)
                                 }
-                                Spacer()
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            NavigationLink {
+                                SourceAppsView(source: source, loader: loader)
+                            } label: {
+                                sourceLabel(source)
                             }
                         }
                     }
@@ -63,6 +66,11 @@ struct SourcesView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     if !store.sources.isEmpty {
+                        Button(selecting ? "Done" : "Select") {
+                            if selecting { stopSelecting() } else { selecting = true }
+                        }
+                    }
+                    if !selecting && !store.sources.isEmpty {
                         Menu {
                             ForEach(ShareCode.Format.allCases, id: \.self) { format in
                                 Button(format.label) { copyCode(as: format) }
@@ -71,8 +79,26 @@ struct SourcesView: View {
                             Label("Share my sources", systemImage: "square.and.arrow.up")
                         }
                     }
-                    Button { adding = true } label: { Label("Add", systemImage: "plus") }
+                    if !selecting {
+                        Button { adding = true } label: { Label("Add", systemImage: "plus") }
+                    }
                 }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if selecting {
+                    SelectionBar(count: store.sources.picked(picked).count, unit: "source",
+                                 allOn: !store.sources.isEmpty && store.sources.allSatisfy { picked.contains($0.id) },
+                                 selectAll: selectAll, delete: { confirmingDelete = true })
+                }
+            }
+            .alert("Delete \(store.sources.picked(picked).count) source"
+                   + (store.sources.picked(picked).count == 1 ? "" : "s") + "?",
+                   isPresented: $confirmingDelete) {
+                Button("Delete", role: .destructive) { deletePicked() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Apps already downloaded from it stay in My apps. Nothing installed is "
+                     + "touched. You can add the address again whenever you like.")
             }
             .task { await loader.refreshAll(store.sources) }
             .sheet(isPresented: $adding) {
@@ -96,6 +122,58 @@ struct SourcesView: View {
             .alert("That did not work", isPresented: .constant(message != nil)) {
                 Button("OK") { message = nil }
             } message: { Text(message ?? "") }
+        }
+    }
+
+    /// One source's name and what is known about it. Shared by the link and the check-box row
+    /// so the two always show the same thing.
+    @ViewBuilder
+    func sourceLabel(_ source: Source) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(loader.feeds[source.id]?.name ?? source.name)
+                    .font(.body.weight(.medium))
+                if loader.loading.contains(source.id) {
+                    Text("Loading…").font(.caption).foregroundStyle(.secondary)
+                } else if let failure = loader.failures[source.id] {
+                    Text(failure).font(.caption).foregroundStyle(.red)
+                } else if let feed = loader.feeds[source.id] {
+                    Text("\(feed.apps.count) apps").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(source.url.host ?? "").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    // MARK: - choosing several
+
+    func toggle(_ source: Source) {
+        if picked.contains(source.id) { picked.remove(source.id) } else { picked.insert(source.id) }
+    }
+
+    func stopSelecting() {
+        selecting = false
+        picked = []
+    }
+
+    func selectAll() {
+        if !store.sources.isEmpty, store.sources.allSatisfy({ picked.contains($0.id) }) {
+            picked = []
+        } else {
+            picked = Set(store.sources.map(\.id))
+        }
+    }
+
+    func deletePicked() {
+        let doomed = store.sources.picked(picked)
+        let ids = Set(doomed.map(\.id))
+        store.sources.removeAll { ids.contains($0.id) }
+        store.save()
+        stopSelecting()
+        if !doomed.isEmpty {
+            banner = "Removed \(doomed.count) source" + (doomed.count == 1 ? "" : "s")
         }
     }
 

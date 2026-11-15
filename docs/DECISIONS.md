@@ -2,6 +2,32 @@
 
 Small decisions that were taken without asking, so they can be changed. Newest first.
 
+## 15 November 2026 — choosing several rows, and a list of what comes next
+
+**The check is drawn, not `EditMode`.** `List(selection:)` and SwiftUI's edit mode make the
+row's own buttons take the tap, so a row with Install or Update on it cannot be chosen by
+tapping it. Every row here has a button. So while choosing, the row's buttons are replaced by
+one plain row with a hand-drawn check on the left (`Views/SelectionBar.swift`), and outside
+choosing the row is exactly what it was. The same bar serves all three tabs.
+
+**Picking is kept by ID, not by position.** Deleting a row from a `ForEach` shifts every
+index after it; a set of indexes taken before the delete then removes the wrong rows. The
+three tabs keep `Set<ID>` — a path for files, the app's UUID for apps, the source's UUID for
+sources — and take the rows out by looking them up, so a list that changes under the picks
+cannot delete something that was not picked.
+
+**Folders are deleted whole from the File tab.** Swipe-delete already did that, through
+`FileManager`, so a "several at once" that refused folders would be a step down. The confirm
+says how many folders and that what is inside goes with them.
+
+**One confirm per tab, not per row.** Swipe-to-delete stays instant, as before: it is one
+deliberate gesture on one row. The bar's Delete asks, because several rows at once is where a
+mistake costs the most.
+
+**`docs/NEXT.md` is a plan, not a promise.** It lists what people ask for, what has to be
+fixed before it, and what is half built. Writing it down is what stops the same twelve
+findings being rediscovered in a month.
+
 ## 15 November 2026 — the whole repo read, and every problem written down
 
 **`docs/AUDIT.md` exists so the list does not get lost again.** Every file was read from its
