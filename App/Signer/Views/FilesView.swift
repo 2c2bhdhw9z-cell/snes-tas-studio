@@ -136,7 +136,8 @@ struct FilesView: View {
 
     // MARK: - choosing several
 
-    @ToolbarContentBuilder
+    /// The top bar. One `ToolbarItemGroup` returned directly: a `@ToolbarContentBuilder`
+    /// property cannot hold bare `Button`s, only `ToolbarContent`.
     var toolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .topBarTrailing) {
             if directory != Paths.files && !selecting {
