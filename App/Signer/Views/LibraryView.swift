@@ -41,33 +41,11 @@ struct LibraryView: View {
                     SignView(preselected: app)
                 }
             }
-            .toolbar {
-                if !store.library.isEmpty {
-                    Button(selecting ? "Done" : "Select") {
-                        if selecting { stopSelecting() } else { selecting = true }
-                    }
-                }
-                if !selecting {
-                    Button {
-                        DocumentPicker.present { urls in
-                            guard !urls.isEmpty else { return }
-                            ImportCoordinator.shared.take(urls)
-                        }
-                    } label: {
-                        Label("Add an app", systemImage: "plus")
-                    }
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if selecting {
-                    SelectionBar(count: store.library.picked(picked).count, unit: "app",
-                                 allOn: !store.library.isEmpty && store.library.allSatisfy { picked.contains($0.id) },
-                                 selectAll: selectAll, delete: { confirmingDelete = true })
-                }
-            }
-            .alert("Delete \(store.library.picked(picked).count) app"
-                   + (store.library.picked(picked).count == 1 ? "" : "s") + "?",
-                   isPresented: $confirmingDelete) {
+            // Each piece of the top and bottom is its own property below. Put them all inline
+            // and Swift gives up with "unable to type-check this expression in reasonable time".
+            .toolbar { toolbar }
+            .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+            .alert(deleteTitle, isPresented: $confirmingDelete) {
                 Button("Delete", role: .destructive) { deletePicked() }
                 Button("Cancel", role: .cancel) {}
             } message: {
@@ -75,29 +53,75 @@ struct LibraryView: View {
                      + "can be downloaded again; ones you added yourself will need the file "
                      + "put back on the File tab.")
             }
-            .overlay(alignment: .bottom) {
-                if let banner {
-                    Text(banner)
-                        .font(.callout)
-                        .padding(.horizontal, 16).padding(.vertical, 10)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .padding(.bottom, 12)
-                        .task {
-                            try? await Task.sleep(nanoseconds: 2_500_000_000)
-                            self.banner = nil
-                        }
-                }
-            }
-            // A file tapped on the File tab with "Sign this app" lands here.
+            .overlay(alignment: .bottom) { toast }
             .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
-                // Picking from the File tab has nothing to do with choosing several here.
-                stopSelecting()
-                let chosen = (note.object as? UUID).flatMap { id in
-                    store.library.first { $0.id == id }
-                } ?? store.library.first
-                path = [.sign(chosen)]
+                openSignScreen(note)
             }
         }
+    }
+
+    @ToolbarContentBuilder
+    var toolbar: some ToolbarContent {
+        if !store.library.isEmpty {
+            Button(selecting ? "Done" : "Select") {
+                if selecting { stopSelecting() } else { selecting = true }
+            }
+        }
+        if !selecting {
+            Button {
+                DocumentPicker.present { urls in
+                    guard !urls.isEmpty else { return }
+                    ImportCoordinator.shared.take(urls)
+                }
+            } label: {
+                Label("Add an app", systemImage: "plus")
+            }
+        }
+    }
+
+    @ViewBuilder
+    var bottomBar: some View {
+        if selecting {
+            SelectionBar(count: pickedCount, unit: "app", allOn: allPicked,
+                         selectAll: selectAll, delete: { confirmingDelete = true })
+        }
+    }
+
+    @ViewBuilder
+    var toast: some View {
+        if let banner {
+            Text(banner)
+                .font(.callout)
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .padding(.bottom, 12)
+                .task {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    self.banner = nil
+                }
+        }
+    }
+
+    /// How many apps are picked, and whether that is all of them. Computed here rather than
+    /// inline so the body stays something the type checker can follow.
+    var pickedCount: Int { store.library.picked(picked).count }
+
+    var allPicked: Bool {
+        !store.library.isEmpty && store.library.allSatisfy { picked.contains($0.id) }
+    }
+
+    var deleteTitle: String {
+        pickedCount == 1 ? "Delete 1 app?" : "Delete \(pickedCount) apps?"
+    }
+
+    /// A file tapped on the File tab with "Sign this app" lands here.
+    func openSignScreen(_ note: Notification) {
+        // Picking from the File tab has nothing to do with choosing several here.
+        stopSelecting()
+        let chosen = (note.object as? UUID).flatMap { id in
+            store.library.first { $0.id == id }
+        } ?? store.library.first
+        path = [.sign(chosen)]
     }
 
     // MARK: - choosing several
@@ -158,79 +182,7 @@ struct LibraryView: View {
             }
             Section {
                 ForEach(store.library) { app in
-                    Group {
-                        // Only while choosing is the whole row one tap. The rest of the time the
-                        // row keeps its own buttons; wrapping them in a Button would swallow
-                        // their taps and make Install and Sign do nothing.
-                        if selecting {
-                            Button {
-                                toggle(app)
-                            } label: {
-                                HStack(spacing: 10) {
-                                    SelectionCheck(isOn: picked.contains(app.id))
-                                    AppRow(app: app,
-                                           offer: loader.update(for: app),
-                                           busy: updates.isBusy(with: app.bundleID),
-                                           stage: updates.stage,
-                                           fraction: updates.runner.isRunning ? updates.runner.fraction : nil,
-                                           blocked: true,
-                                           choosing: true,
-                                           sign: {}, install: {}, updateNow: {})
-                                }
-                            }
-                            .buttonStyle(.plain)
-                        } else {
-                            AppRow(app: app,
-                                   offer: loader.update(for: app),
-                                   busy: updates.isBusy(with: app.bundleID),
-                                   stage: updates.stage,
-                                   fraction: updates.runner.isRunning ? updates.runner.fraction : nil,
-                                   // One update at a time: signing a big app uses the whole phone.
-                                   blocked: updates.isBusy && !updates.isBusy(with: app.bundleID),
-                                   sign: { path.append(.sign(app)) },
-                                   install: { store.pendingInstall = app },
-                                   updateNow: {
-                                       guard let offer = loader.update(for: app) else { return }
-                                       Task { await updates.run(offer, replacing: app) }
-                                   })
-                        }
-                    }
-                    .contextMenu {
-                        if selecting {
-                            Button {
-                                toggle(app)
-                            } label: {
-                                Label(picked.contains(app.id) ? "Leave this one out" : "Pick this one",
-                                      systemImage: picked.contains(app.id) ? "circle" : "checkmark.circle")
-                            }
-                        } else {
-                            if let offer = loader.update(for: app) {
-                                Button {
-                                    Task { await updates.run(offer, replacing: app) }
-                                } label: {
-                                    Label("Update to \(offer.version)", systemImage: "arrow.down.circle")
-                                }
-                                .disabled(updates.isBusy)
-                            }
-                            Button {
-                                path.append(.sign(app))
-                            } label: {
-                                Label(app.isSigned ? "Sign again" : "Sign", systemImage: "signature")
-                            }
-                            if app.isSigned {
-                                Button {
-                                    store.pendingInstall = app
-                                } label: {
-                                    Label("Install", systemImage: "arrow.down.app")
-                                }
-                            }
-                            Button(role: .destructive) {
-                                store.deleteApp(app)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
-                    }
+                    row(app)
                 }
                 .onDelete { indexes in
                     indexes.map { store.library[$0] }.forEach(store.deleteApp)
@@ -243,6 +195,79 @@ struct LibraryView: View {
                             .foregroundStyle(.tint)
                     }
                 }
+            }
+        }
+    }
+
+    /// One app in the list. Its own function, with the menu in a separate property, for the
+    /// same reason the body was split: as one expression Swift's type checker gives up.
+    @ViewBuilder
+    func row(_ app: LibraryApp) -> some View {
+        Group {
+            if selecting {
+                Button {
+                    toggle(app)
+                } label: {
+                    HStack(spacing: 10) {
+                        SelectionCheck(isOn: picked.contains(app.id))
+                        AppRow(app: app, blocked: true, choosing: true,
+                               sign: {}, install: {}, updateNow: {})
+                    }
+                }
+                .buttonStyle(.plain)
+            } else {
+                AppRow(app: app,
+                       offer: loader.update(for: app),
+                       busy: updates.isBusy(with: app.bundleID),
+                       stage: updates.stage,
+                       fraction: updates.runner.isRunning ? updates.runner.fraction : nil,
+                       // One update at a time: signing a big app uses the whole phone.
+                       blocked: updates.isBusy && !updates.isBusy(with: app.bundleID),
+                       sign: { path.append(.sign(app)) },
+                       install: { store.pendingInstall = app },
+                       updateNow: {
+                           guard let offer = loader.update(for: app) else { return }
+                           Task { await updates.run(offer, replacing: app) }
+                       })
+            }
+        }
+        .contextMenu { menu(app) }
+    }
+
+    @ViewBuilder
+    func menu(_ app: LibraryApp) -> some View {
+        if selecting {
+            Button {
+                toggle(app)
+            } label: {
+                Label(picked.contains(app.id) ? "Leave this one out" : "Pick this one",
+                      systemImage: picked.contains(app.id) ? "circle" : "checkmark.circle")
+            }
+        } else {
+            if let offer = loader.update(for: app) {
+                Button {
+                    Task { await updates.run(offer, replacing: app) }
+                } label: {
+                    Label("Update to \(offer.version)", systemImage: "arrow.down.circle")
+                }
+                .disabled(updates.isBusy)
+            }
+            Button {
+                path.append(.sign(app))
+            } label: {
+                Label(app.isSigned ? "Sign again" : "Sign", systemImage: "signature")
+            }
+            if app.isSigned {
+                Button {
+                    store.pendingInstall = app
+                } label: {
+                    Label("Install", systemImage: "arrow.down.app")
+                }
+            }
+            Button(role: .destructive) {
+                store.deleteApp(app)
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
     }
