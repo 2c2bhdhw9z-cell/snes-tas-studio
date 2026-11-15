@@ -20,7 +20,8 @@ apart with REA (Ghidra + Rizin) only to learn what they do — see `docs/RESEARC
   (code directory, requirements, entitlements XML + DER, CMS), `CodeResources` matching
   Apple's own output, `.p12` reader (AES / Triple-DES / RC2-40), provisioning profiles,
   X.509, OCSP revocation checks, SHA-1/SHA-256/HMAC, RSA with Montgomery maths.
-  78 tests, run on Linux in CI, including forced on-disk signing and streamed archive
+  126 tests, run on Linux in CI (86 of them without the sample apps; see
+  `docs/AUDIT.md`, F3), including forced on-disk signing and streamed archive
   tests for multi-gigabyte apps. Output verified with an outside tool (rcodesign):
   `signature_verifies: true` for the app and every framework inside it.
 - Signature shape now matches what Apple's own tool writes (entitlement block, certificate

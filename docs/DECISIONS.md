@@ -2,6 +2,28 @@
 
 Small decisions that were taken without asking, so they can be changed. Newest first.
 
+## 15 November 2026 — the whole repo read, and every problem written down
+
+**`docs/AUDIT.md` exists so the list does not get lost again.** Every file was read from its
+first line to its last (123 files, about 18,800 lines), the engine's tests were run on a
+Linux computer, and GitHub was checked for branches, pull requests, releases and runs. The
+137 findings are numbered (`A1`…`G5`) so a fix can name the thing it fixes, and each one is
+marked *in the code*, *suspected* or *needs a device*.
+
+**Nothing was fixed in the same pass.** Reading and changing together means neither is
+trustworthy: a change made while reading cannot be judged against a known baseline, and a
+finding hidden by a fresh change cannot be reproduced. The audit is the baseline; the fixes
+come next, against it.
+
+**Suspected findings are kept, not thrown away.** Anything that follows from the code but
+cannot be proved without an iPhone, a sample `.ipa` or a tunnel app stays in the document
+with what would settle it. Deleting them because they were not proved would mean
+rediscovering them later — which is exactly what this document is for.
+
+**Two doc numbers were corrected on the spot** because they are counts, not behaviour:
+`README.md` said 99 tests and `docs/PLAN.md` said 78. It is 126 (86 of them run without the
+sample apps).
+
 ## 26 October 2026
 
 **My apps and Sign are one screen.** The Sign tab opened with nothing chosen, so signing always

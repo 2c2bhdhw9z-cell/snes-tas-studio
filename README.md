@@ -6,6 +6,8 @@ Everything here is written from scratch. The signing engine is ours — not zsig
 which every other on-device signer (ESign, GBox, Feather, KSign, VexSign, ProSign)
 runs underneath. See [docs/RESEARCH.md](docs/RESEARCH.md) for what the others do and
 how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is going.
+[docs/AUDIT.md](docs/AUDIT.md) is every file read line by line, with all 137 problems found
+in it, numbered.
 
 ## What it does today
 
@@ -47,11 +49,12 @@ how that was worked out, and [docs/PLAN.md](docs/PLAN.md) for where this is goin
 | `App` | The iPhone app (SwiftUI). The Xcode project is generated from `App/project.yml`. |
 | `tools/verify-signature.sh` | Checks a signed `.ipa` with an outside tool. |
 | `.github/workflows/build.yml` | Runs the engine tests, builds the `.ipa`, publishes it. |
+| `docs/AUDIT.md` | Every file read line by line, and every problem found in it, numbered. |
 
 ## Checking the engine
 
 ```sh
-swift test --package-path Packages/SignKit          # 99 tests, runs on Linux
+swift test --package-path Packages/SignKit          # 126 tests, runs on Linux
 Packages/SignKit/.build/debug/signkit-cli zip x.ipa # read any .ipa, verify every checksum
 signkit-cli sign-ipa in.ipa out.ipa cert.p12 pw     # sign end to end
 RCODESIGN=/path/to/rcodesign tools/verify-signature.sh out.ipa
