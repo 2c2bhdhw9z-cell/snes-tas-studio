@@ -50,6 +50,7 @@ in it, numbered.
 | `tools/verify-signature.sh` | Checks a signed `.ipa` with an outside tool. |
 | `.github/workflows/build.yml` | Runs the engine tests, builds the `.ipa`, publishes it. |
 | `docs/AUDIT.md` | Every file read line by line, and every problem found in it, numbered. |
+| `docs/NEXT.md` | What to add next, what to fix first, and what is only half built. |
 
 ## Checking the engine
 

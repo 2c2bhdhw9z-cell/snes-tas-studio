@@ -17,10 +17,25 @@ struct FilesView: View {
     @State private var hexing: FileEntry?
     @State private var banner: String?
     @State private var bannerIsError = false
+    // Choosing several files at once. Picking is kept by path rather than by position, so a
+    // folder list that changes under it (a delete, a reload, the search box) never picks the
+    // wrong file.
+    @State private var selecting = false
+    @State private var picked: Set<String> = []
+    @State private var confirmingDelete = false
 
     var shown: [FileEntry] {
         guard !search.isEmpty else { return entries }
         return entries.filter { $0.name.localizedCaseInsensitiveContains(search) }
+    }
+
+    /// The files that are picked right now, in the order they appear.
+    var chosenFiles: [FileEntry] {
+        shown.picked(picked)
+    }
+
+    var pickedFolders: Int {
+        chosenFiles.filter(\.isDirectory).count
     }
 
     var body: some View {
@@ -39,25 +54,26 @@ struct FilesView: View {
                 }
                 ForEach(shown) { entry in
                     Button {
-                        if entry.isDirectory {
+                        if selecting {
+                            toggle(entry)
+                        } else if entry.isDirectory {
                             directory = entry.url
                             reload()
                         } else {
                             chosen = entry
                         }
                     } label: {
-                        FileRow(entry: entry)
+                        HStack(spacing: 10) {
+                            if selecting { SelectionCheck(isOn: picked.contains(entry.id)) }
+                            FileRow(entry: entry)
+                        }
                     }
                     .buttonStyle(.plain)
                 }
                 .onDelete { indexes in
-                    for index in indexes {
-                        let entry = shown[index]
-                        store.library.removeAll { $0.fileURL.standardizedFileURL == entry.url.standardizedFileURL }
-                        try? FileManager.default.removeItem(at: entry.url)
-                    }
-                    store.save()
-                    reload()
+                    // The swipe stays a one-row, no-questions delete; the bar is where the
+                    // counts and the confirm live.
+                    delete(shown.picked(Set(indexes.map { shown[$0].id })))
                 }
             }
             .listStyle(.plain)
@@ -65,7 +81,7 @@ struct FilesView: View {
             .navigationTitle(directory == Paths.files ? "File List" : directory.lastPathComponent)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    if directory != Paths.files {
+                    if directory != Paths.files && !selecting {
                         Button {
                             directory = directory.deletingLastPathComponent()
                             reload()
@@ -73,13 +89,37 @@ struct FilesView: View {
                             Label("Up", systemImage: "arrow.up.left")
                         }
                     }
-                    Button {
-                        DocumentPicker.present { urls in
-                            guard !urls.isEmpty else { return }
-                            ImportCoordinator.shared.take(urls)
+                    if !entries.isEmpty {
+                        Button(selecting ? "Done" : "Select") {
+                            if selecting {
+                                stopSelecting()
+                            } else {
+                                selecting = true
+                            }
                         }
-                    } label: { Label("Add", systemImage: "plus") }
+                    }
+                    if !selecting {
+                        Button {
+                            DocumentPicker.present { urls in
+                                guard !urls.isEmpty else { return }
+                                ImportCoordinator.shared.take(urls)
+                            }
+                        } label: { Label("Add", systemImage: "plus") }
+                    }
                 }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if selecting {
+                    SelectionBar(count: chosenFiles.count, unit: "file",
+                                 allOn: !shown.isEmpty && shown.allSatisfy { picked.contains($0.id) },
+                                 selectAll: selectAll, delete: { confirmDelete() })
+                }
+            }
+            .alert(deleteTitle, isPresented: $confirmingDelete) {
+                Button("Delete", role: .destructive) { delete(chosenFiles) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(deleteMessage)
             }
             .refreshable { reload() }
             .onAppear { reload() }
@@ -118,10 +158,7 @@ struct FilesView: View {
                     Button("View") { viewing = entry }
                     Button("HEX Editor") { hexing = entry }
                     Button("Delete", role: .destructive) {
-                        store.library.removeAll { $0.fileURL.standardizedFileURL == entry.url.standardizedFileURL }
-                        store.save()
-                        try? FileManager.default.removeItem(at: entry.url)
-                        reload()
+                        delete([entry])
                     }
                     Button("Cancel", role: .cancel) {}
                 }
@@ -133,6 +170,83 @@ struct FilesView: View {
                 FileViewer(entry: entry, hex: true)
             }
         }
+    }
+
+    // MARK: - choosing several
+
+    func toggle(_ entry: FileEntry) {
+        if picked.contains(entry.id) { picked.remove(entry.id) } else { picked.insert(entry.id) }
+    }
+
+    func stopSelecting() {
+        selecting = false
+        picked = []
+    }
+
+    /// Picks every row on screen. Folders are included: a folder is one thing on this list, and
+    /// deleting it takes what is inside with it, which the confirm says out loud.
+    func selectAll() {
+        if !shown.isEmpty, shown.allSatisfy({ picked.contains($0.id) }) {
+            picked = []
+            return
+        }
+        picked = Set(shown.map(\.id))
+    }
+
+    var deleteTitle: String {
+        if chosenFiles.isEmpty { return "Delete?" }
+        if chosenFiles.count == 1 {
+            return "Delete \(chosenFiles[0].name)?"
+        }
+        return "Delete \(chosenFiles.count) items?"
+    }
+
+    var deleteMessage: String {
+        let files = chosenFiles.count - pickedFolders
+        var text: String
+        if files == 1 && pickedFolders == 0 {
+            text = "The file is gone from this phone, and from the Files app, for good."
+        } else if pickedFolders == 0 {
+            text = "These \(files) files are gone from this phone, and from the Files app, for good."
+        } else if files > 0 {
+            text = "\(files) file" + (files == 1 ? "" : "s")
+                + " and \(pickedFolders) folder" + (pickedFolders == 1 ? "" : "s")
+                + " are gone for good, along with everything inside the"
+                + (pickedFolders == 1 ? " folder." : " folders.")
+        } else {
+            text = "The whole folder is gone for good, along with everything inside it."
+        }
+        if chosenFiles.contains(where: { $0.kind == .ipa }) {
+            text += " Apps in My apps that point at these lose their entry too."
+        }
+        return text
+    }
+
+    func confirmDelete() {
+        guard !chosenFiles.isEmpty else { return }
+        confirmingDelete = true
+    }
+
+    /// Deletes the rows given, folders and everything inside them included. Anything the
+    /// library points at loses its entry as well, so My apps never ends up listing an app
+    /// whose file has gone.
+    func delete(_ list: [FileEntry]) {
+        let fm = FileManager.default
+        var removed = 0
+        for entry in list {
+            let inside = fm.enumerator(at: entry.url, includingPropertiesForKeys: nil)?
+                .allObjects as? [URL] ?? []
+            let paths = Set([entry.url] + inside)
+            // A library entry can point at a file inside a folder as well as at the folder.
+            store.library.removeAll { paths.contains($0.fileURL.standardizedFileURL) }
+            if (try? fm.removeItem(at: entry.url)) != nil { removed += 1 }
+        }
+        if removed > 0 {
+            store.save()
+            stopSelecting()
+            show("Deleted \(removed) item" + (removed == 1 ? "" : "s"))
+        }
+        reload()
     }
 
     // MARK: - doing things
@@ -147,6 +261,9 @@ struct FilesView: View {
                 FileEntry.list(in: folder)
             }.value
             entries = found
+            // A file deleted elsewhere (or by another app through the Files app) should not
+            // stay picked and quietly fail later.
+            picked.formIntersection(found.map(\.id))
         }
     }
 

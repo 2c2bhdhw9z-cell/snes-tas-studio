@@ -14,6 +14,11 @@ struct LibraryView: View {
     @ObservedObject private var updates = Updates.shared
     @State private var path: [Route] = []
     @State private var banner: String?
+    // Choosing several apps at once. Kept by ID so a list that re-orders (an app added or
+    // signed while choosing) never deletes the wrong row.
+    @State private var selecting = false
+    @State private var picked: Set<UUID> = []
+    @State private var confirmingDelete = false
 
     /// Where the list can go. Only one place so far: the Sign screen, on an app or on nothing.
     enum Route: Hashable {
@@ -37,14 +42,38 @@ struct LibraryView: View {
                 }
             }
             .toolbar {
-                Button {
-                    DocumentPicker.present { urls in
-                        guard !urls.isEmpty else { return }
-                        ImportCoordinator.shared.take(urls)
+                if !store.library.isEmpty {
+                    Button(selecting ? "Done" : "Select") {
+                        if selecting { stopSelecting() } else { selecting = true }
                     }
-                } label: {
-                    Label("Add an app", systemImage: "plus")
                 }
+                if !selecting {
+                    Button {
+                        DocumentPicker.present { urls in
+                            guard !urls.isEmpty else { return }
+                            ImportCoordinator.shared.take(urls)
+                        }
+                    } label: {
+                        Label("Add an app", systemImage: "plus")
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if selecting {
+                    SelectionBar(count: store.library.picked(picked).count, unit: "app",
+                                 allOn: !store.library.isEmpty && store.library.allSatisfy { picked.contains($0.id) },
+                                 selectAll: selectAll, delete: { confirmingDelete = true })
+                }
+            }
+            .alert("Delete \(store.library.picked(picked).count) app"
+                   + (store.library.picked(picked).count == 1 ? "" : "s") + "?",
+                   isPresented: $confirmingDelete) {
+                Button("Delete", role: .destructive) { deletePicked() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The signed copy is removed from this phone. Apps that came from a source "
+                     + "can be downloaded again; ones you added yourself will need the file "
+                     + "put back on the File tab.")
             }
             .overlay(alignment: .bottom) {
                 if let banner {
@@ -61,11 +90,44 @@ struct LibraryView: View {
             }
             // A file tapped on the File tab with "Sign this app" lands here.
             .onReceive(NotificationCenter.default.publisher(for: .signThisApp)) { note in
+                // Picking from the File tab has nothing to do with choosing several here.
+                stopSelecting()
                 let chosen = (note.object as? UUID).flatMap { id in
                     store.library.first { $0.id == id }
                 } ?? store.library.first
                 path = [.sign(chosen)]
             }
+        }
+    }
+
+    // MARK: - choosing several
+
+    func toggle(_ app: LibraryApp) {
+        if picked.contains(app.id) { picked.remove(app.id) } else { picked.insert(app.id) }
+    }
+
+    func stopSelecting() {
+        selecting = false
+        picked = []
+    }
+
+    func selectAll() {
+        if !store.library.isEmpty, store.library.allSatisfy({ picked.contains($0.id) }) {
+            picked = []
+        } else {
+            picked = Set(store.library.map(\.id))
+        }
+    }
+
+    /// Deletes every picked app in one pass. The list is copied first: `deleteApp` publishes a
+    /// change to `store.library`, and walking it while it changes is how the wrong row gets
+    /// removed.
+    func deletePicked() {
+        let doomed = store.library.picked(picked)
+        doomed.forEach(store.deleteApp)
+        stopSelecting()
+        if !doomed.isEmpty {
+            banner = "Deleted \(doomed.count) app" + (doomed.count == 1 ? "" : "s")
         }
     }
 
@@ -76,12 +138,14 @@ struct LibraryView: View {
 
     var list: some View {
         List {
-            Section {
-                Button {
-                    path.append(.sign(nil))
-                } label: {
-                    Label("Sign an app", systemImage: "signature")
-                        .font(.body.weight(.medium))
+            if !selecting {
+                Section {
+                    Button {
+                        path.append(.sign(nil))
+                    } label: {
+                        Label("Sign an app", systemImage: "signature")
+                            .font(.body.weight(.medium))
+                    }
                 }
             }
             if let problem = updates.error {
@@ -94,20 +158,52 @@ struct LibraryView: View {
             }
             Section {
                 ForEach(store.library) { app in
-                    AppRow(app: app,
-                           offer: loader.update(for: app),
-                           busy: updates.isBusy(with: app.bundleID),
-                           stage: updates.stage,
-                           fraction: updates.runner.isRunning ? updates.runner.fraction : nil,
-                           // One update at a time: signing a big app uses the whole phone.
-                           blocked: updates.isBusy && !updates.isBusy(with: app.bundleID),
-                           sign: { path.append(.sign(app)) },
-                           install: { store.pendingInstall = app },
-                           updateNow: {
-                               guard let offer = loader.update(for: app) else { return }
-                               Task { await updates.run(offer, replacing: app) }
-                           })
-                        .contextMenu {
+                    Group {
+                        // Only while choosing is the whole row one tap. The rest of the time the
+                        // row keeps its own buttons; wrapping them in a Button would swallow
+                        // their taps and make Install and Sign do nothing.
+                        if selecting {
+                            Button {
+                                toggle(app)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    SelectionCheck(isOn: picked.contains(app.id))
+                                    AppRow(app: app,
+                                           offer: loader.update(for: app),
+                                           busy: updates.isBusy(with: app.bundleID),
+                                           stage: updates.stage,
+                                           fraction: updates.runner.isRunning ? updates.runner.fraction : nil,
+                                           blocked: true,
+                                           choosing: true,
+                                           sign: {}, install: {}, updateNow: {})
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            AppRow(app: app,
+                                   offer: loader.update(for: app),
+                                   busy: updates.isBusy(with: app.bundleID),
+                                   stage: updates.stage,
+                                   fraction: updates.runner.isRunning ? updates.runner.fraction : nil,
+                                   // One update at a time: signing a big app uses the whole phone.
+                                   blocked: updates.isBusy && !updates.isBusy(with: app.bundleID),
+                                   sign: { path.append(.sign(app)) },
+                                   install: { store.pendingInstall = app },
+                                   updateNow: {
+                                       guard let offer = loader.update(for: app) else { return }
+                                       Task { await updates.run(offer, replacing: app) }
+                                   })
+                        }
+                    }
+                    .contextMenu {
+                        if selecting {
+                            Button {
+                                toggle(app)
+                            } label: {
+                                Label(picked.contains(app.id) ? "Leave this one out" : "Pick this one",
+                                      systemImage: picked.contains(app.id) ? "circle" : "checkmark.circle")
+                            }
+                        } else {
                             if let offer = loader.update(for: app) {
                                 Button {
                                     Task { await updates.run(offer, replacing: app) }
@@ -134,6 +230,7 @@ struct LibraryView: View {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
+                    }
                 }
                 .onDelete { indexes in
                     indexes.map { store.library[$0] }.forEach(store.deleteApp)
@@ -186,6 +283,9 @@ struct AppRow: View {
     var fraction: Double? = nil
     /// Another app's update is running, so this one cannot start yet.
     var blocked: Bool = false
+    /// True while several apps are being chosen: the row's own buttons step aside so the
+    /// whole row is one tap.
+    var choosing: Bool = false
     let sign: () -> Void
     let install: () -> Void
     var updateNow: () -> Void = {}
@@ -224,7 +324,9 @@ struct AppRow: View {
                 }
             }
             Spacer()
-            if busy {
+            if choosing {
+                EmptyView()
+            } else if busy {
                 ProgressView()
             } else if offer != nil {
                 Button("Update", action: updateNow)
