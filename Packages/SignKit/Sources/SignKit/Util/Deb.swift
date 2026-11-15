@@ -72,6 +72,7 @@ public enum Deb {
         } else if name.hasSuffix(".xz") {
             throw DebError.unsupported(UnsupportedCompressor.explain(xz: true))
         } else if name.hasSuffix(".zst") {
+            // No zstd decoder is available to an iPhone app, so say so rather than fail late.
             throw DebError.unsupported(UnsupportedCompressor.explain(xz: false))
         } else if name.hasSuffix(".tar") {
             tar = body
