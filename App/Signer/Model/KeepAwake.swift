@@ -19,7 +19,10 @@ final class KeepAwake {
         guard depth == 1 else { return }
 
         taskID = UIApplication.shared.beginBackgroundTask(withName: reason) { [weak self] in
-            Task { @MainActor in self?.endNow() }
+            // This runs when iOS is taking the background task away. It used to call endNow(),
+            // which stopped the silent audio loop -- the very thing holding the job open. Now
+            // only the task id is let go and the loop keeps playing, which is the whole point.
+            Task { @MainActor in self?.expire() }
         }
         UIApplication.shared.isIdleTimerDisabled = true
 

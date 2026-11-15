@@ -47,4 +47,37 @@ enum SecretStore {
         ]
         SecItemDelete(query as CFDictionary)
     }
+
+    // MARK: - the other secrets
+    //
+    // The web certificate's password for "do everything on this phone" used to sit in plain
+    // UserDefaults, where any backup could read it. It is a password, so it goes here too.
+
+    static func set(_ secret: String, for name: String) {
+        let lookup: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: name,
+        ]
+        SecItemDelete(lookup as CFDictionary)
+        guard !secret.isEmpty else { return }
+        var item = lookup
+        item[kSecValueData as String] = Data(secret.utf8)
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        _ = SecItemAdd(item as CFDictionary, nil)
+    }
+
+    static func get(_ name: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: name,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
 }

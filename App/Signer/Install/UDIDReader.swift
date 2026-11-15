@@ -28,6 +28,8 @@ final class UDIDReader: ObservableObject {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
+            // Loopback only: nothing on the Wi-Fi may POST a device ID before the real phone.
+            params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
             guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
             let l = try NWListener(using: params, on: nwPort)
             l.newConnectionHandler = { [weak self] conn in

@@ -69,7 +69,10 @@ final class RSATests: XCTestCase {
         XCTAssertNotNil(cert.notAfter)
         XCTAssertEqual(cert.sha1Fingerprint.count, 40)
         XCTAssertEqual(cert.sha256Fingerprint, "3b4bf936d7a05e8b2a54013925e902f5def29c260c6df96eed5505695f9a8770")
-        XCTAssertGreaterThan(cert.daysLeft ?? 0, 300)
+        // A certificate that is not yet expired, with room to spare. This used to require
+        // 300 days, which made the test fail on its own as the fixture aged; the fixture now
+        // runs to 2037, and the assertion only needs to catch a rewrite that broke the dates.
+        XCTAssertGreaterThan(cert.daysLeft ?? 0, 30)
     }
 
     func testPEMRoundTrip() throws {

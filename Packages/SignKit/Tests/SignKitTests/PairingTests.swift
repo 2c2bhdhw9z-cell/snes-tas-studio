@@ -112,10 +112,15 @@ final class PairingTests: XCTestCase {
         XCTAssertEqual(answer.status, 0)
         XCTAssertTrue(ok.isEmpty)
 
-        // A file-open answer, which hands back the number the phone gave the file.
-        var opened = AFC.packet(operation: 2, packetNumber: 10, header: Data(), payload: AFC.le64(42))
+        // A file-open answer, which hands back the number the phone gave the file. iOS sends
+        // operation 14 (AFC_OP_FILE_OPEN_RES), which is what a real phone does; 2 is accepted
+        // too because the old code expected it and a packet may still arrive that way.
+        var opened = AFC.packet(operation: 14, packetNumber: 10, header: Data(), payload: AFC.le64(42))
         let handle = try XCTUnwrap(try AFC.answer(from: &opened))
         XCTAssertEqual(handle.handle, 42)
+
+        var legacy = AFC.packet(operation: 2, packetNumber: 11, header: Data(), payload: AFC.le64(43))
+        XCTAssertEqual(try AFC.answer(from: &legacy)?.handle, 43)
 
         // Half an answer waits; rubbish is refused.
         var partial = AFC.packet(operation: 1, packetNumber: 1, header: Data(), payload: AFC.le64(0))

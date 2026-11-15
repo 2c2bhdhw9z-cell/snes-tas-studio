@@ -89,6 +89,9 @@ public enum AFC {
         case removePath = 8
         case makeDirectory = 9
         case fileOpen = 13
+        /// What iOS actually answers a file-open with. It is not `data` (2): `afc.h` in
+        /// libimobiledevice names it AFC_OP_FILE_OPEN_RES and gives it 14.
+        case fileOpenResult = 14
         case fileClose = 20
         case fileWrite = 16
     }
@@ -146,8 +149,13 @@ public enum AFC {
             operation == Operation.status.rawValue && body.count >= 8 ? body.u64le(0) : nil
         }
         /// For a file-open answer, the number the phone gave the file.
+        ///
+        /// iOS answers with operation 14 (`fileOpenResult`), not 2. Reading only 2 meant the
+        /// handle was never found and every over-AFC write failed. Both are accepted here so
+        /// a packet already read the old way still works.
         public var handle: UInt64? {
-            operation == Operation.data.rawValue && body.count >= 8 ? body.u64le(0) : nil
+            let opens = [Operation.fileOpenResult.rawValue, Operation.data.rawValue]
+            return opens.contains(operation) && body.count >= 8 ? body.u64le(0) : nil
         }
     }
 

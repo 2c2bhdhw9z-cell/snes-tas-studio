@@ -41,9 +41,12 @@ enum BackgroundRefresh {
         try? BGTaskScheduler.shared.submit(request)
     }
 
-    /// Ask for permission to put a notification up. Called when the switch is turned on, so
-    /// the question arrives with a reason the person just saw.
+    /// Ask for permission to put a notification up. Called when the switch is turned on, and
+    /// also once at launch if the switch is already on - it defaults to on, so without the
+    /// second call the question never appeared and no update notice was ever shown.
     static func askAboutNotifications() async {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        guard settings.authorizationStatus == .notDetermined else { return }
         _ = try? await UNUserNotificationCenter.current()
             .requestAuthorization(options: [.alert, .sound, .badge])
     }
@@ -62,11 +65,25 @@ enum BackgroundRefresh {
     }
 
     /// One notification, naming what is out of date.
+    ///
+    /// The same apps used to be announced again on every background run, and a library with
+    /// two entries for one app counted it twice. The set that has been announced is kept, so
+    /// only genuinely new updates produce a notice, and each app is named once.
+    static let announcedKey = "announcedUpdates"
+
     static func notify(about apps: [LibraryApp]) {
+        // One line per app ID, however many copies of it My apps holds.
+        var seen = Set<String>()
+        let unique = apps.filter { seen.insert($0.bundleID).inserted }
+        let signature = unique.map { "\($0.bundleID)@\($0.version)" }.sorted()
+        let announced = UserDefaults.standard.stringArray(forKey: announcedKey) ?? []
+        guard Set(signature) != Set(announced) else { return }
+        UserDefaults.standard.set(signature, forKey: announcedKey)
+
         let content = UNMutableNotificationContent()
-        content.title = apps.count == 1 ? "An update is waiting" : "\(apps.count) updates are waiting"
-        let names = apps.prefix(4).map(\.name).joined(separator: ", ")
-        content.body = apps.count > 4 ? names + " and more" : names
+        content.title = unique.count == 1 ? "An update is waiting" : "\(unique.count) updates are waiting"
+        let names = unique.prefix(4).map(\.name).joined(separator: ", ")
+        content.body = unique.count > 4 ? names + " and more" : names
         content.sound = .default
         let request = UNNotificationRequest(identifier: "updates-\(UUID().uuidString)",
                                             content: content, trigger: nil)

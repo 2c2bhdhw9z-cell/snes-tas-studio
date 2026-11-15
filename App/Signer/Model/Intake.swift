@@ -123,30 +123,36 @@ final class ImportCoordinator: ObservableObject {
                         Task { @MainActor in ImportCoordinator.shared.progress = fraction }
                     }
                 }.value
-                switch Intake.kind(of: saved) {
-                case .app:
-                    let app = try SigningRunner.importIPA(saved)
+                // Only an app needs its info read. The heavy part runs off the main thread.
+                if case .app = Intake.kind(of: saved) {
+                    let info = try await Task.detached(priority: .userInitiated) {
+                        try SigningRunner.readApp(saved)
+                    }.value
+                    let app = SigningRunner.addToLibrary(saved, info: info)
                     notes.append("Added \(app.name)")
-                case .profile:
-                    let profile = try Store.shared.importProfile(saved)
-                    notes.append("Imported \(profile.name)")
-                case .certificate:
-                    // Try no password first; most need one, and then we ask.
-                    if let cert = try? Store.shared.importCertificate(p12: saved, password: "") {
-                        Store.shared.selectedCertificateID = cert.id
-                        Store.shared.save()
-                        notes.append("Imported \(cert.commonName)")
-                    } else {
-                        password = ""
-                        pendingCertificate = saved
+                } else {
+                    switch Intake.kind(of: saved) {
+                    case .profile:
+                        let profile = try Store.shared.importProfile(saved)
+                        notes.append("Imported \(profile.name)")
+                    case .certificate:
+                        // Try no password first; most need one, and then we ask.
+                        if let cert = try? Store.shared.importCertificate(p12: saved, password: "") {
+                            Store.shared.selectedCertificateID = cert.id
+                            Store.shared.save()
+                            notes.append("Imported \(cert.commonName)")
+                        } else {
+                            password = ""
+                            pendingCertificate = saved
+                        }
+                    case .tweak:
+                        let dest = Paths.tweaks.appendingPathComponent(saved.lastPathComponent)
+                        try? FileManager.default.removeItem(at: dest)
+                        try? FileManager.default.copyItem(at: saved, to: dest)
+                        notes.append("Saved the add-on \(saved.lastPathComponent)")
+                    case .other, .app:
+                        notes.append("Saved \(saved.lastPathComponent) to the File tab")
                     }
-                case .tweak:
-                    let dest = Paths.tweaks.appendingPathComponent(saved.lastPathComponent)
-                    try? FileManager.default.removeItem(at: dest)
-                    try? FileManager.default.copyItem(at: saved, to: dest)
-                    notes.append("Saved the add-on \(saved.lastPathComponent)")
-                case .other:
-                    notes.append("Saved \(saved.lastPathComponent) to the File tab")
                 }
             } catch let e as SignKitError {
                 notes.append(e.description)

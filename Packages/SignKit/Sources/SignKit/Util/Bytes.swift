@@ -13,6 +13,8 @@ public enum SignKitError: Error, CustomStringConvertible {
     case crypto(String)
     case io(String)
     case badPassword
+    /// The person pressed Stop. Not a failure: the half-written output is removed.
+    case cancelled
 
     public var description: String {
         switch self {
@@ -21,12 +23,22 @@ public enum SignKitError: Error, CustomStringConvertible {
         case .crypto(let s): return "Crypto error: \(s)"
         case .io(let s): return "File error: \(s)"
         case .badPassword: return "Wrong certificate password"
+        case .cancelled: return "Signing was stopped"
         }
     }
 }
 
 extension Data {
-    @inline(__always) public func u8(_ o: Int) -> UInt8 { self[self.startIndex + o] }
+    /// Reads past the end return 0 instead of trapping.
+    ///
+    /// This used to be `self[startIndex + o]`, so a crafted or damaged `.ipa` — an offset in a
+    /// Mach-O header pointing past the end of the file, a zip name length larger than the
+    /// directory — crashed the whole app mid-sign. Reading zero makes the caller's own bounds
+    /// checks and length guards decide, which turns a crash into "this file is damaged".
+    @inline(__always) public func u8(_ o: Int) -> UInt8 {
+        guard o >= 0, o < count else { return 0 }
+        return self[startIndex + o]
+    }
 
     public func u16le(_ o: Int) -> UInt16 { UInt16(u8(o)) | UInt16(u8(o + 1)) << 8 }
     public func u32le(_ o: Int) -> UInt32 {
@@ -41,8 +53,10 @@ extension Data {
     public func u64be(_ o: Int) -> UInt64 { UInt64(u32be(o)) << 32 | UInt64(u32be(o + 4)) }
 
     public func sub(_ o: Int, _ n: Int) -> Data {
+        // Clamped for the same reason as `u8`: a bad length in a file must not trap.
+        guard n > 0, o >= 0, o < count else { return Data() }
         let s = startIndex + o
-        return Data(self[s..<(s + n)])
+        return Data(self[s..<(s + Swift.min(n, count - o))])
     }
 
     mutating func put16le(_ v: UInt16) { append(UInt8(v & 0xff)); append(UInt8(v >> 8)) }

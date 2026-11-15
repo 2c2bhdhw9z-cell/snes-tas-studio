@@ -59,12 +59,15 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- The app installs apps by serving them to iOS from the phone itself. -->
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
+		<!-- Sources are ordinary web addresses and plenty of them are only served over plain
+		     http, and Apple's own certificate-revocation answers are http too. iOS ignores
+		     NSAllowsArbitraryLoads whenever NSAllowsLocalNetworking is also present, which is
+		     why the http addresses used to fail; the arbitrary-loads key is now set alone. -->
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Signer talks to this phone itself so iOS can install the apps it signs. Nothing on your Wi-Fi is contacted.</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
