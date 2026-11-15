@@ -50,6 +50,9 @@ jobs:
         working-directory: App
         run: |
           set -o pipefail
+          # The whole output is kept in build.log: when a build fails, the one thing that
+          # matters is a line ending in "error:", and the step after this one turns those into
+          # annotations the API can read back without downloading a 40 MB log.
           xcodebuild \
             -project Signer.xcodeproj \
             -scheme Signer \
@@ -58,13 +61,23 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO \
             ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
-            | xcpretty || xcodebuild \
+            2>&1 | tee build.log | xcpretty \
+            || xcodebuild \
             -project Signer.xcodeproj \
             -scheme Signer \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee -a build.log
+
+      - name: Show what went wrong
+        if: failure()
+        working-directory: App
+        run: |
+          grep -h "error:" build.log | sort -u | head -30 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit 1
 
       - name: Make the .ipa
         working-directory: App
