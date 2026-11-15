@@ -60,21 +60,24 @@ struct LibraryView: View {
         }
     }
 
-    @ToolbarContentBuilder
+    /// The top bar. One `ToolbarItemGroup` returned directly: a `@ToolbarContentBuilder`
+    /// property cannot hold bare `Button`s, only `ToolbarContent`.
     var toolbar: some ToolbarContent {
-        if !store.library.isEmpty {
-            Button(selecting ? "Done" : "Select") {
-                if selecting { stopSelecting() } else { selecting = true }
-            }
-        }
-        if !selecting {
-            Button {
-                DocumentPicker.present { urls in
-                    guard !urls.isEmpty else { return }
-                    ImportCoordinator.shared.take(urls)
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            if !store.library.isEmpty {
+                Button(selecting ? "Done" : "Select") {
+                    if selecting { stopSelecting() } else { selecting = true }
                 }
-            } label: {
-                Label("Add an app", systemImage: "plus")
+            }
+            if !selecting {
+                Button {
+                    DocumentPicker.present { urls in
+                        guard !urls.isEmpty else { return }
+                        ImportCoordinator.shared.take(urls)
+                    }
+                } label: {
+                    Label("Add an app", systemImage: "plus")
+                }
             }
         }
     }
