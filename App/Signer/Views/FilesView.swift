@@ -311,7 +311,7 @@ struct FilesView: View {
             }.value
             switch result {
             case .success(let info):
-                let app = SigningRunner.addToLibrary(entry, info: info)
+                let app = SigningRunner.addToLibrary(entry.url, info: info)
                 show(thenSign ? "Opening it in My apps…" : "Added to My apps")
                 if thenSign { NotificationCenter.default.post(name: .signThisApp, object: app.id) }
             case .failure(let error):

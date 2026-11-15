@@ -434,10 +434,11 @@ struct SignView: View {
             reading = true
             Task.detached(priority: .userInitiated) {
                 let local = try? Intake.keep(url)
-                let imported = local.flatMap { try? SigningRunner.importIPA($0) }
+                let info = local.flatMap { try? SigningRunner.readApp($0) }
                 await MainActor.run {
                     reading = false
-                    if let imported {
+                    if let local, let info {
+                        let imported = SigningRunner.addToLibrary(local, info: info)
                         select(imported)
                     } else {
                         ImportCoordinator.shared.take([url])

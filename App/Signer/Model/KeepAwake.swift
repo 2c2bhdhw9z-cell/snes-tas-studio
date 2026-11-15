@@ -51,6 +51,16 @@ final class KeepAwake {
         endNow()
     }
 
+    /// iOS has reclaimed the background task. The silent loop is left playing and the screen
+    /// stays awake on purpose — stopping them is exactly what used to end a long sign.
+    /// `end()` still tidies everything up when the work really is done.
+    private func expire() {
+        if taskID != .invalid {
+            UIApplication.shared.endBackgroundTask(taskID)
+            taskID = .invalid
+        }
+    }
+
     private func endNow() {
         player?.stop()
         player = nil
