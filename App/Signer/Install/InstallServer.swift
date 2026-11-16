@@ -66,6 +66,16 @@ final class InstallServer: ObservableObject {
             stage = .serving
             note("Serving \(title) from this phone on port \(p)")
 
+            // Knock on our own door before telling iOS to. Build 41 could bind a port
+            // other than the one written into the manifest, and the only symptom was
+            // "it signs fine but will not install" - no error anywhere. Fetching the
+            // details file back catches that every time, with a sentence worth reading
+            // instead of a silent failure. Only over plain http: a self-signed HTTPS
+            // server would (correctly) refuse its own certificate.
+            if case .helper = route {
+                try await checkWeAnswer(port: p)
+            }
+
             let manifestURL: String
             switch route {
             case .localHTTPS:
@@ -104,45 +114,84 @@ final class InstallServer: ObservableObject {
     // MARK: - the server
 
     private func startListener(route: Route) async throws -> UInt16 {
-        let params: NWParameters
-        switch route {
-        case .localHTTPS(let p12, let password, _):
-            params = try InstallServer.tlsParameters(p12: p12, password: password)
-        case .helper:
-            params = .tcp
-        }
-        params.allowLocalEndpointReuse = true
-        // Only this phone may connect. Without this, anyone on the same Wi-Fi could download
-        // the signed app while it is being installed.
-        params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        // Loopback first (only this phone may connect), then the plain bind that build 38
+        // used, so a phone that dislikes the stricter form still installs instead of failing.
+        for loopbackOnly in [true, false] {
+            let params: NWParameters
+            switch route {
+            case .localHTTPS(let p12, let password, _):
+                params = try InstallServer.tlsParameters(p12: p12, password: password)
+            case .helper:
+                params = .tcp
+            }
+            params.allowLocalEndpointReuse = true
 
-        // A fixed, known port (with a few spares) rather than "any port". Before the
-        // listener is ready, iOS reports its port as 0, and build 16 handed iOS
-        // "127.0.0.1:0" — an address nothing listens on. Now we only carry on once
-        // the listener says it is ready, and the port is one we chose ourselves.
-        var lastError: Error?
-        for candidate in InstallServer.ports {
-            guard let port = NWEndpoint.Port(rawValue: candidate) else { continue }
-            do {
-                let l = try NWListener(using: params, on: port)
-                l.newConnectionHandler = { [weak self] conn in
-                    Task { @MainActor in self?.handle(conn) }
+            // A fixed, known port (with a few spares) rather than "any port". Before the
+            // listener is ready, iOS reports its port as 0, and build 16 handed iOS
+            // "127.0.0.1:0" — an address nothing listens on. Now we only carry on once
+            // the listener says it is ready, and the port is one we chose ourselves.
+            var lastError: Error?
+            for candidate in InstallServer.ports {
+                guard let port = NWEndpoint.Port(rawValue: candidate) else { continue }
+                do {
+                    // Loopback only, and pinned to the SAME port the manifest is about to
+                    // name. Build 41 set this to `.any` while `on: port` asked for a fixed
+                    // one; when both are given the required endpoint wins, so the listener
+                    // could bind a port other than the one iOS was told about. iOS then
+                    // fetched an address with nothing behind it, and every install —
+                    // including Signer signing itself — failed. Same value here keeps the
+                    // two honest.
+                    if loopbackOnly {
+                        params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port)
+                    }
+                    let l = try NWListener(using: params, on: port)
+                    l.newConnectionHandler = { [weak self] conn in
+                        Task { @MainActor in self?.handle(conn) }
+                    }
+                    if try await InstallServer.waitUntilReady(l) {
+                        listener = l
+                        // The port the listener really reports beats the one we hoped for,
+                        // so a manifest can never point where the server is not.
+                        return l.port?.rawValue ?? candidate
+                    }
+                    l.cancel()
+                } catch {
+                    lastError = error
                 }
-                if try await InstallServer.waitUntilReady(l) {
-                    listener = l
-                    return candidate
-                }
-                l.cancel()
-            } catch {
-                lastError = error
+            }
+            if !loopbackOnly {
+                throw SignKitError.io("the phone would not let Signer serve the app"
+                                      + (lastError.map { " (\($0.localizedDescription))" } ?? ""))
             }
         }
-        throw SignKitError.io("the phone would not let Signer serve the app"
-                              + (lastError.map { " (\($0.localizedDescription))" } ?? ""))
+        throw SignKitError.io("the phone would not let Signer serve the app")
     }
 
     /// Ports tried in order. Several, in case another app is already using one.
     static let ports: [UInt16] = [41_234, 41_235, 41_236, 52_731, 52_732, 60_101]
+
+    /// Fetches our own details file back over the port iOS is about to use. Throws with
+    /// something readable if nothing answers, which is the failure mode that used to be
+    /// invisible: the app signed perfectly and iOS never got the file it needed.
+    private func checkWeAnswer(port: UInt16) async throws {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/manifest.plist") else { return }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard code == 200, !data.isEmpty else {
+                throw SignKitError.io("Signer could not reach its own server (answer \(code))")
+            }
+            note("Checked the local server: it answers on port \(port)")
+        } catch let failure as SignKitError {
+            throw failure
+        } catch {
+            throw SignKitError.io("Signer could not reach its own server on port \(port). "
+                                  + "iOS would have had nothing to download, so the install "
+                                  + "was stopped instead of hanging.")
+        }
+    }
 
     /// Starts the listener and waits until it is actually accepting connections.
     /// Returns false if that port could not be used.

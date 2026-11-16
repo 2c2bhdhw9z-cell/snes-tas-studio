@@ -19,7 +19,10 @@ final class UDIDReader: ObservableObject {
 
     private var listener: NWListener?
     private var connections: [NWConnection] = []
-    private let port: UInt16 = 14_302
+    /// The port the profile names. Read back from the listener rather than assumed, so the
+    /// profile can never point somewhere nothing is listening.
+    private var port: UInt16 = 0
+    private static let preferredPort: UInt16 = 14_302
 
     func start() async {
         stop()
@@ -28,15 +31,28 @@ final class UDIDReader: ObservableObject {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
+            guard let nwPort = NWEndpoint.Port(rawValue: UDIDReader.preferredPort) else { return }
             // Loopback only: nothing on the Wi-Fi may POST a device ID before the real phone.
-            params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
-            guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+            // Pinned to the same port the profile names. Build 41 asked for `.any` here
+            // while binding a fixed port; the required endpoint wins, so the reader could
+            // listen somewhere else and iOS would post the ID to a dead address.
+            params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: nwPort)
             let l = try NWListener(using: params, on: nwPort)
             l.newConnectionHandler = { [weak self] conn in
                 Task { @MainActor in self?.handle(conn) }
             }
-            l.start(queue: .global(qos: .userInitiated))
+            // waitUntilReady starts the listener and waits for it to accept connections.
+            // The profile is opened only after that, so iOS is never sent to an address
+            // that is not listening yet.
+            guard try await InstallServer.waitUntilReady(l) else {
+                l.cancel()
+                isWaiting = false
+                self.error = "The local reader could not take port \(UDIDReader.preferredPort). "
+                    + "Another app may be using it."
+                return
+            }
             listener = l
+            port = l.port?.rawValue ?? UDIDReader.preferredPort
             #if canImport(UIKit)
             if let url = URL(string: "http://127.0.0.1:\(port)/profile") {
                 await UIApplication.shared.open(url)
