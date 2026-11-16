@@ -97,8 +97,17 @@ final class Store: ObservableObject {
         guard let cert = store.identity, store.privateKey != nil, store.isUsableForSigning else {
             throw SignKitError.crypto("that file has no certificate we can sign with")
         }
-        // Already have it? Just update the password and keep going.
+        // Already have it? Keep this file and this password together.
+        //
+        // The same certificate often arrives in more than one .p12 (a new download, the
+        // "Development (JIT)" copy, one exported by another signer), each with its own
+        // password. Saving only the new password left the old file on disk, so the password
+        // that had just been accepted was then "wrong" on every sign and every retype.
         if let existing = certificates.firstIndex(where: { $0.sha256 == cert.sha256Fingerprint }) {
+            let target = p12URL(for: certificates[existing])
+            try FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try data.write(to: target, options: .atomic)
             try SecretStore.set(password, for: certificates[existing].id)
             certificates[existing].password = nil
             save()
@@ -211,17 +220,46 @@ final class Store: ObservableObject {
             // keychain the app can read. Always let the person type the password again.
             throw SignKitError.crypto(saved == nil
                 ? "this certificate's password is not saved on this phone any more. Tap \"Certificate password\" and type it once."
-                : "the saved password for this certificate is wrong. Tap \"Certificate password\" and type it again.")
+                : "the saved password does not open the copy of this certificate Signer kept. Tap \"Certificate password\" and type it again, or import the .p12 again from the File tab.")
         }
     }
 
     /// Checks a typed password against the `.p12` and keeps it only if it really opens it.
+    ///
+    /// If it does not open the copy Signer kept, the person may still be right: that copy can
+    /// be an older .p12 of the same certificate with a different password. Any .p12 on the
+    /// File tab that holds this same certificate and opens with this password replaces it.
     func setPassword(_ password: String, for cert: StoredCertificate) throws {
-        let store = try PKCS12(url: p12URL(for: cert), password: password)
-        guard store.privateKey != nil, store.identity != nil else {
-            throw SignKitError.crypto("that password opened the file but found no certificate in it")
+        let kept = p12URL(for: cert)
+        do {
+            let store = try PKCS12(url: kept, password: password)
+            guard store.privateKey != nil, store.identity != nil else {
+                throw SignKitError.crypto("that password opened the file but found no certificate in it")
+            }
+        } catch SignKitError.badPassword {
+            guard let replacement = fileOpening(cert, with: password) else {
+                throw SignKitError.crypto("that password does not open the copy of this certificate Signer kept. "
+                    + "If the certificate was downloaded again, tap the new .p12 on the File tab and "
+                    + "choose Import: it replaces the old copy.")
+            }
+            try FileManager.default.createDirectory(at: kept.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try replacement.write(to: kept, options: .atomic)
         }
         try SecretStore.set(password, for: cert.id)
+    }
+
+    /// A .p12 on the File tab that holds `cert` and opens with `password`, if there is one.
+    private func fileOpening(_ cert: StoredCertificate, with password: String) -> Data? {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: filesDir.path)) ?? []
+        for name in names where ["p12", "pfx"].contains((name as NSString).pathExtension.lowercased()) {
+            guard let data = try? Data(contentsOf: filesDir.appendingPathComponent(name)),
+                  let store = try? PKCS12(data: data, password: password),
+                  store.isUsableForSigning,
+                  store.identity?.sha256Fingerprint == cert.sha256 else { continue }
+            return data
+        }
+        return nil
     }
 
     // MARK: - library
