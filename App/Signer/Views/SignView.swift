@@ -35,6 +35,10 @@ struct SignView: View {
     /// A complaint about an add-on that could not be read, shown at the bottom of the screen.
     @State private var banner: String?
     @State private var bannerIsError = false
+    /// True when the certificate's password has to be typed in again — because it was lost, or
+    /// because a sign just failed with "Wrong certificate password".
+    @State private var needsPassword = false
+    @State private var passwordEntry = ""
     @AppStorage("installAfterSigning") private var installAfterSigning = true
 
     init(preselected: LibraryApp? = nil) {
@@ -359,6 +363,33 @@ struct SignView: View {
                           + "will not install.", systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
                 }
+                // The password lives in the Keychain, and iOS can lose that entry when the app
+                // is re-signed under another team (every sideload) or restored to a new phone.
+                // Without this row there was no way back except deleting the certificate.
+                if store.selectedCertificate != nil, !needsPassword {
+                    Button {
+                        passwordEntry = ""
+                        needsPassword = true
+                    } label: {
+                        Label("Certificate password", systemImage: "key")
+                    }
+                    .font(.callout)
+                }
+                if needsPassword {
+                    SecureField("Certificate password", text: $passwordEntry)
+                        .textContentType(.password)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    Button {
+                        savePassword()
+                    } label: {
+                        Label("Save the password", systemImage: "checkmark")
+                    }
+                    .disabled(passwordEntry.isEmpty)
+                    Text("Kept in the iPhone Keychain, only on this phone. Type it once and signing "
+                         + "works again.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -406,6 +437,15 @@ struct SignView: View {
                 }
             } else if let message = runner.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.red)
+                // The one failure the person can fix themselves on the spot.
+                if message.lowercased().contains("password") {
+                    Button {
+                        passwordEntry = ""
+                        needsPassword = true
+                    } label: {
+                        Label("Type the certificate password", systemImage: "key")
+                    }
+                }
             }
 
             Button {
@@ -510,8 +550,35 @@ struct SignView: View {
         }
     }
 
+    func savePassword() {
+        guard let cert = store.selectedCertificate else { return }
+        do {
+            try store.setPassword(passwordEntry, for: cert)
+            passwordEntry = ""
+            needsPassword = false
+            runner.errorMessage = nil
+            show("Password saved", error: false)
+        } catch let e as SignKitError {
+            show(e.description, error: true)
+        } catch {
+            show(error.localizedDescription, error: true)
+        }
+    }
+
+    func show(_ text: String, error: Bool) {
+        banner = text
+        bannerIsError = error
+    }
+
     func sign() async {
         guard let app else { return }
+        // Never start a sign that is certain to fail. If the certificate's password is not on
+        // this phone, put the password box up first and let Sign this app work once it is in.
+        if let cert = store.selectedCertificate, SecretStore.get(for: cert.id) == nil, cert.password == nil {
+            needsPassword = true
+            show("Type your certificate's password once, then tap Sign this app again.", error: true)
+            return
+        }
         var options = SigningOptions()
         if name != info?.name { options.displayName = name }
         if bundleID != info?.bundleID { options.bundleID = bundleID }

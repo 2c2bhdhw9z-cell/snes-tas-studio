@@ -155,7 +155,28 @@ struct CertificateDetailView: View {
     @Environment(\.dismiss) var dismiss
     let certificate: StoredCertificate
 
+    @State private var password = ""
+    @State private var note: String?
+    @State private var noteIsError = false
+
     var profile: StoredProfile? { store.profile(for: certificate) }
+
+    /// Checks the typed password against the file before keeping it, so "saved" never means
+    /// "saved and wrong".
+    func savePassword() {
+        do {
+            try store.setPassword(password, for: certificate)
+            password = ""
+            note = "Saved. Signing works again."
+            noteIsError = false
+        } catch let e as SignKitError {
+            note = e.description
+            noteIsError = true
+        } catch {
+            note = error.localizedDescription
+            noteIsError = true
+        }
+    }
 
     var body: some View {
         List {
@@ -185,6 +206,34 @@ struct CertificateDetailView: View {
                     Text("None paired. Import the matching .mobileprovision from the File tab and it "
                          + "will attach itself to this certificate.")
                         .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Password") {
+                if SecretStore.get(for: certificate.id) != nil {
+                    Label("Saved on this phone", systemImage: "checkmark.circle")
+                        .foregroundStyle(.green)
+                    Text("Signing uses it without asking. Change it here if you ever need to.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Label("Not saved on this phone", systemImage: "key.slash")
+                        .foregroundStyle(.orange)
+                    Text("Signing will fail until it is typed in. A build signed with a different "
+                         + "certificate cannot read the old saved password, which is what this means.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                SecureField("Certificate password", text: $password)
+                    .textContentType(.password)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                Button {
+                    savePassword()
+                } label: {
+                    Label("Save the password", systemImage: "checkmark")
+                }
+                .disabled(password.isEmpty)
+                if let note {
+                    Text(note).font(.caption).foregroundStyle(noteIsError ? .red : .green)
                 }
             }
 

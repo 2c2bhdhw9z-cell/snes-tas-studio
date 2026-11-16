@@ -192,16 +192,36 @@ final class Store: ObservableObject {
     /// Loads the signing identity: the certificate plus its paired profile.
     func identity(for cert: StoredCertificate) throws -> IPASigner.Identity {
         let paired = profile(for: cert)
-        let password = SecretStore.get(for: cert.id) ?? cert.password ?? ""
+        let saved = SecretStore.get(for: cert.id)
+        let password = saved ?? cert.password ?? ""
         // Migrate a password left by an older build into the Keychain.
-        if SecretStore.get(for: cert.id) == nil, let legacy = cert.password {
+        if saved == nil, let legacy = cert.password {
             try? SecretStore.set(legacy, for: cert.id)
         }
-        return try IPASigner.Identity.load(
-            p12: p12URL(for: cert),
-            password: password,
-            profile: paired.map { profileURL(for: $0) }
-        )
+        do {
+            return try IPASigner.Identity.load(
+                p12: p12URL(for: cert),
+                password: password,
+                profile: paired.map { profileURL(for: $0) }
+            )
+        } catch SignKitError.badPassword {
+            // The Keychain entry can be lost for reasons outside the app's control: iOS
+            // refuses the entry to a build signed under a different team, a restore to a new
+            // phone drops it, and a re-sign that changes the app's entitlements changes which
+            // keychain the app can read. Always let the person type the password again.
+            throw SignKitError.crypto(saved == nil
+                ? "this certificate's password is not saved on this phone any more. Tap \"Certificate password\" and type it once."
+                : "the saved password for this certificate is wrong. Tap \"Certificate password\" and type it again.")
+        }
+    }
+
+    /// Checks a typed password against the `.p12` and keeps it only if it really opens it.
+    func setPassword(_ password: String, for cert: StoredCertificate) throws {
+        let store = try PKCS12(url: p12URL(for: cert), password: password)
+        guard store.privateKey != nil, store.identity != nil else {
+            throw SignKitError.crypto("that password opened the file but found no certificate in it")
+        }
+        try SecretStore.set(password, for: cert.id)
     }
 
     // MARK: - library
